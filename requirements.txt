@@ -1,5 +1,6 @@
 langgraph>=0.2.56
 langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
 langchain-google-vertexai>=2.0.0
 neo4j>=5.27.0
 pyyaml>=6.0
@@ -8,3 +9,5 @@ google-cloud-run>=0.10.0
 pyjwt>=2.10.0
 tenacity>=8.2.0
 pydantic>=2.0.0
+streamlit>=1.40.0
+pandas>=2.0.0

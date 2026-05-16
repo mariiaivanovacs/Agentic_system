@@ -1,198 +1,180 @@
-# EcoLink NeuroCore — Platform Generalization Plan
-
-## Context
-
-The current system is a **domain-specific implementation** hardwired to the EcoLink
-mentor-matching use case. Skills, connectors, and flows are static JSON files. The
-graph schema is implicit inside `ingest.py`. There is no way to point the system at
-a different IT solution and have it index, represent, and operate on that system.
-
-This plan describes what is **missing** and the **exact tasks** required to turn the
-system into a **generic, pluggable platform** that can be dropped onto any existing
-software and autonomously build a graph representation of it, register new skills,
-and configure its own storage — without touching production data.
-
-Sandbox creation is **explicitly deferred** to a future phase and is not part of
-this plan.
+# EcoLink NeuroCore — Full Platform Plan
+**Hackathon: Build With AI 2026 KL — MyHack | 16–17 May 2026**
 
 ---
 
-## Gap Analysis — What Is Missing
+## Final Target State
 
-| Capability | Current state | Gap |
+The system described in `full_technical.md` is an **Autonomous Ecosystem Operating
+System**: an agentic platform that can be pointed at any existing IT solution,
+index its components into a knowledge graph, and continuously propose, simulate,
+and optimize how those components interact — without touching production.
+
+The four pillars it requires:
+
+| Pillar | Description |
+|---|---|
+| **Dual Knowledge Graph** | Graph A = historical data (what happened). Graph B = system blueprint (how it works). Bridged by ExecutionTrace nodes. |
+| **Agentic Brain** | LangGraph multi-agent pipeline (Planner → Generator → Critic → Simulator → Evaluator → HumanApproval) powered by Gemini. |
+| **GraphRAG Intelligence** | Retrieval-Augmented Generation over the graph — the agent reasons by traversing history, not by memorizing training data. |
+| **Platform Generalization** | Schema registry, system indexer, skill factory, connector factory — so the platform works on ANY IT solution, not just EcoLink. |
+
+---
+
+## Current State (what is already built)
+
+| Component | File(s) | Status |
 |---|---|---|
-| Index any external IT system | ❌ Not possible — data is hardcoded JSON | Full indexer subsystem |
-| Configurable graph schema | ❌ Schema is implicit in `ingest.py` Cypher strings | Schema registry + validator |
-| Metadata storage configuration | ❌ Only Neo4j, no artifact store for code | Storage config layer |
-| Create new skills dynamically | ❌ Skills are static entries in `skills.json` | Skill factory + code store |
-| Create new connectors dynamically | ❌ Connectors are static entries in `connectors.json` | Connector factory |
-| Agent awareness of schema | ❌ Agent hardcodes node/edge names in Cypher | Schema-aware query generation |
-| Unified platform CLI | ❌ Only `main.py --goal` exists | `platform_cli.py` with subcommands |
+| Graph A + B ingestion | `ecolink-graph/ingest.py`, `data/` | ✅ Done |
+| Full query library | `ecolink-graph/queries.py` | ✅ Done |
+| 4 agent tools | `src/agents/tools.py` | ✅ Done |
+| LangGraph 6-node pipeline | `src/agents/graph.py`, `nodes.py`, `state.py` | ✅ Done |
+| ExecutionTrace bridge | `log_execution_trace()` in tools.py | ✅ Done |
+| JWT capability tokens | `_capability_token()` in tools.py | ✅ Done |
+| CLI entry point | `main.py` | ✅ Done |
+| Mock sandbox | `_mock_sandbox()` in tools.py | ✅ Mock only |
 
 ---
 
-## Architecture of the New Platform Layer
+## Gap Analysis — Three Documents Compared
 
-```
-External IT Solution
-  │
-  ▼
-┌─────────────────────────────────────────────────────┐
-│  INDEXER LAYER  (Phase 1)                           │
-│  OpenAPIIndexer │ PythonIndexer │ DBIndexer         │
-│        └──────────────┬─────────────┘               │
-│               GraphWriter                           │
-└──────────────────┬──────────────────────────────────┘
-                   │ writes validated nodes
-┌──────────────────▼──────────────────────────────────┐
-│  SCHEMA REGISTRY  (Phase 2)                         │
-│  schema.yaml → SchemaValidator → MetaGraph in Neo4j │
-└──────────────────┬──────────────────────────────────┘
-                   │ governs all reads/writes
-┌──────────────────▼──────────────────────────────────┐
-│  METADATA STORAGE CONFIG  (Phase 3)                 │
-│  storage_config.yaml                                │
-│  ArtifactStore (local FS / GCS)  ←── skill code    │
-│  MetadataStore (Neo4j wrapper)   ←── graph nodes   │
-└──────────────────┬──────────────────────────────────┘
-                   │
-       ┌───────────┴───────────┐
-       ▼                       ▼
-┌──────────────┐     ┌──────────────────┐
-│ SKILL FACTORY│     │ CONNECTOR FACTORY│
-│  (Phase 4)   │     │   (Phase 5)      │
-└──────┬───────┘     └────────┬─────────┘
-       │                      │
-       └──────────┬───────────┘
-                  ▼
-         Existing LangGraph Agent
-         (queries schema-aware graph,
-          proposes new skills/connectors)
-```
+| Feature | `response.md` | `PLATFORM_PLAN.md` (old) | `full_technical.md` | Priority |
+|---|---|---|---|---|
+| GraphRAG retriever | ✅ | ❌ | ✅ (as GraphRAG shortcut) | **P0** |
+| GraphRAG generator | ✅ | ❌ | ✅ | **P0** |
+| Prompt engine | ✅ | ❌ | ✅ | **P0** |
+| YAML validator | ✅ | ❌ | ✅ | **P0** |
+| FastAPI `/api/optimize` | ✅ | ❌ | ✅ | **P0** |
+| React / Streamlit UI | ✅ (React) | ❌ | ✅ (Streamlit) | **P0** |
+| Graph visualization | ✅ | ❌ | ✅ (pyvis) | **P0** |
+| Approve/Reject in UI | ✅ | ❌ | ✅ | **P0** |
+| Schema registry | ❌ | ✅ | implicit | **P1** |
+| Metadata storage config | ❌ | ✅ | ✅ | **P1** |
+| System indexer | ❌ | ✅ | partial | **P1** |
+| Skill factory | ❌ | ✅ | ✅ | **P1** |
+| Connector factory | ❌ | ✅ | ✅ | **P1** |
+| GNN embeddings | ❌ | ❌ | ✅ | **P2** |
+| PPO reward calculator | ❌ | ❌ | ✅ | **P2** |
+| Real Docker sandbox | ❌ | deferred | ✅ | **P2** |
+| Platform CLI | ❌ | ✅ | partial | **P1** |
+| Git + team workflow | ✅ | ❌ | ❌ | **P0** |
+
+**P0** = Demo-blocking. Must work for the hackathon.
+**P1** = Platform generalization. Required for the system to work on any IT solution.
+**P2** = Full intelligence layer. Required for the final ideal state from `full_technical.md`.
 
 ---
 
-## Phase 1 — System Indexer
+## Team Structure
 
-**Goal:** Accept a pointer to any external IT solution and populate Graph B with a
-structured representation of its components.
+Four parallel streams. Each person owns their stream completely.
 
-**Why first:** Everything else in the platform depends on having data in the graph.
-The indexer is the entry point for any new integration.
+| Stream | Person | Focus | P0 role |
+|---|---|---|---|
+| **Stream 1 — Graph & Data** | Backend Dev | Neo4j schema, ingestion, queries, schema registry | Seed graph, ensure all nodes exist for Leila's retriever |
+| **Stream 2 — AI / GraphRAG** | Leila | GraphRAG engine, LangGraph integration, skill factory | `retriever.py`, `generator.py`, working end-to-end agent |
+| **Stream 3 — Frontend & API** | Frontend Dev | FastAPI backend, Streamlit UI, graph visualization, approval flow | `/api/optimize` endpoint + basic UI showing output |
+| **Stream 4 — Platform & Infra** | Cloud Dev | Schema registry, storage config, indexer, connector factory, CLI | `requirements.txt`, `.env`, platform startup, deployment |
 
-### Tasks
-
-#### 1.1 — `src/indexer/base_indexer.py`
-Define the abstract contract all indexers implement.
-
-```
-Class:  BaseIndexer(ABC)
-Method: discover() -> IndexedSystem
-        Returns a dataclass containing:
-          - connectors: List[ConnectorSpec]  (data sources found)
-          - skills:     List[SkillSpec]      (operations/functions found)
-          - flows:      List[FlowSpec]       (pipelines/workflows found)
-          - metadata:   Dict                 (source system info)
-```
-
-No I/O, no Neo4j — pure discovery. Allows unit testing without a database.
-
-#### 1.2 — `src/indexer/openapi_indexer.py`
-Reads an OpenAPI 3.x / Swagger 2.x spec (URL or local file) and extracts:
-- Each `path + method` → one **Connector** node (`type=rest`, `endpoint`, `method`, `auth_required`)
-- Each `operationId` → one **Skill** node (`input_schema`, `output_schema` from the spec's request/response bodies)
-- Groups of related paths → one candidate **Flow** node
-
-```
-Usage:  OpenAPIIndexer(source="https://api.example.com/openapi.json")
-        OpenAPIIndexer(source="./specs/my_api.yaml")
-```
-
-Dependency: `httpx`, `pyyaml`, `jsonschema`
-
-#### 1.3 — `src/indexer/python_indexer.py`
-Reads a Python package directory and extracts:
-- Each public function with a docstring → one **Skill** node
-  (`language=python`, `input_schema` from type hints, `description` from docstring)
-- Each module-level class with `__call__` → one **Connector** node
-- Each file ending in `_flow.py` or `_pipeline.py` → one candidate **Flow** node
-
-Uses Python's built-in `ast` module — zero external dependencies beyond what
-is already installed.
-
-```
-Usage:  PythonIndexer(source="/path/to/my_package")
-```
-
-#### 1.4 — `src/indexer/db_indexer.py`
-Reads a database via a SQLAlchemy DSN and extracts:
-- Each table/view → one **Connector** node (`type=sql`, `table`, `column_schema`)
-- Stored procedures (where supported) → **Skill** nodes
-- Foreign key relationships → **Flow** edge hints
-
-Connection string is read from env var `INDEX_DB_DSN` — never hardcoded.
-
-```
-Usage:  DBIndexer(source="postgresql://user:pass@host:5432/mydb")
-```
-
-#### 1.5 — `src/indexer/graph_writer.py`
-Takes the `IndexedSystem` output from any indexer and writes it to Neo4j via
-the **MetadataStore** (Phase 3). This is the only file that knows about Neo4j.
-
-Responsibilities:
-- Deduplicates nodes (MERGE on `id`)
-- Validates each node against the **Schema Registry** (Phase 2) before writing
-- Creates `DEPRECATED_BY` edges if a node with the same name already exists at
-  a different version
-- Writes a `IndexRun` meta-node recording source, timestamp, and node counts
-
-#### 1.6 — `src/indexer/runner.py`
-CLI entry point for the indexer subsystem.
-
-```bash
-python -m src.indexer.runner --type openapi --source https://api.example.com/openapi.json
-python -m src.indexer.runner --type python  --source ./my_package
-python -m src.indexer.runner --type db      --source postgresql://...
-```
-
-Prints a summary table: nodes discovered, nodes written, nodes skipped (duplicates).
-
-**Deliverable:** Running the indexer against any OpenAPI spec, Python package,
-or SQL database populates Graph B with real nodes that the existing LangGraph
-agent can immediately query and propose flows against.
+**Rule:** If you did not create the file, ask the owner before editing it.
 
 ---
 
-## Phase 2 — Schema Registry
+## Stream 1 — Graph & Data (Backend Dev)
 
-**Goal:** Make the graph schema explicit, versioned, and queryable — so both
-the indexer and the agent operate against a defined contract, not implicit Cypher.
+### P0 Tasks — Demo Blockers
 
-**Why second:** The indexer (Phase 1) needs the schema to validate what it writes.
-The agent needs the schema to generate correct Cypher.
+#### S1-P0-1: Verify and stabilize the seeded graph
+Ensure the live Neo4j instance (`017c3af7`) has all required nodes for Leila's
+retriever. Run `ecolink-graph/ingest.py` and confirm via `queries.py`:
 
-### Tasks
+Required node counts (minimum for demo):
+- 30 Company nodes with `id, name, industry, stage, pain_points`
+- 20 Mentor nodes with `id, name, expertise_tags, industry_focus, availability`
+- 100 MATCHED_WITH edges with `outcome_score`
+- 4 active Flow nodes, 6 Skill nodes, 4 Connector nodes
 
-#### 2.1 — `src/config/schema.yaml`
-The single source of truth for all node and edge types in the graph.
+Acceptance: `python ecolink-graph/queries.py` prints no errors and shows correct counts.
+
+#### S1-P0-2: API contract validation — node schema for Leila
+`response.md` specifies exact fields Leila's retriever expects. Confirm they match
+what `ingest.py` actually writes:
+
+```
+response.md requires:          ingest.py writes:
+  Company.pain_points      ✅   pain_points (list)
+  Mentor.expertise         ❌   expertise_tags  ← MISMATCH — add alias
+  Mentor.success_score     ❌   past_success_score  ← MISMATCH — add alias
+  Mentor.available         ❌   availability (string, not bool) ← needs mapping
+```
+
+Fix: add the following to `ingest.py`'s `create_mentor` Cypher:
+```cypher
+SET me.expertise      = $expertise_tags,
+    me.success_score  = $past_success_score,
+    me.available      = ($availability = 'available')
+```
+This writes both the original fields and the aliased fields Leila needs.
+Do not remove the original fields — other parts of the codebase use them.
+
+#### S1-P0-3: Add `get_success_patterns` query to `queries.py`
+The retriever needs historical success patterns by industry.
+
+```python
+def get_success_patterns(industry: str, min_score: float = 7.0):
+    """Return company-mentor pairs with high outcome scores for the given industry.
+    Used by GraphRAG retriever as few-shot examples for the generator.
+    """
+    return run_query("""
+        MATCH (c:Company)-[r:MATCHED_WITH]->(m:Mentor)
+        WHERE c.industry = $industry AND r.outcome_score >= $min_score
+        RETURN c.name AS company, c.pain_points AS pain_points,
+               c.stage AS stage,
+               m.name AS mentor, m.expertise_tags AS skills,
+               r.outcome_score AS score, r.feedback AS feedback
+        ORDER BY r.outcome_score DESC
+        LIMIT 10
+    """, {"industry": industry, "min_score": min_score})
+```
+
+#### S1-P0-4: Add `get_failure_patterns` query to `queries.py`
+
+```python
+def get_failure_patterns(industry: str, max_score: float = 4.0):
+    """Return company-mentor pairs with low scores — used by Critic agent."""
+    return run_query("""
+        MATCH (c:Company)-[r:MATCHED_WITH]->(m:Mentor)
+        WHERE c.industry = $industry AND r.outcome_score <= $max_score
+        RETURN c.name AS company, c.pain_points AS pain_points,
+               m.name AS mentor, m.expertise_tags AS skills,
+               r.outcome_score AS score, r.feedback AS feedback
+        ORDER BY r.outcome_score ASC
+        LIMIT 10
+    """, {"industry": industry, "max_score": max_score})
+```
+
+### P1 Tasks — Platform Generalization
+
+#### S1-P1-1: `src/config/schema.yaml`
+Canonical node/edge schema. Every other component reads from this file instead
+of hardcoding labels and properties.
 
 ```yaml
 version: "1.0"
-
 nodes:
   Company:
     required: [id, name, industry]
     optional: [stage, revenue, pain_points, founded_year]
   Mentor:
     required: [id, name, expertise_tags]
-    optional: [industry_focus, availability, past_success_score, years_experience]
+    optional: [industry_focus, availability, past_success_score,
+               expertise, success_score, available]
   Skill:
     required: [id, name, language]
     optional: [description, performance_score, avg_execution_ms, artifact_path]
   Connector:
     required: [id, name, type]
-    optional: [version, status, error_rate, endpoint, auth_required]
+    optional: [version, status, error_rate, endpoint, auth_required, auth_env_var]
   Flow:
     required: [id, name, status]
     optional: [description, avg_outcome_score, yaml_config]
@@ -205,487 +187,805 @@ nodes:
   Outcome:
     required: [score, date]
     optional: []
-
 edges:
-  MATCHED_WITH:   { from: Company,        to: Mentor         }
-  USES:           { from: Flow,           to: Skill          }
-  READS_FROM:     { from: Flow,           to: Connector      }
-  RUNS_ON:        { from: Flow,           to: Server         }
-  RAN_FLOW:       { from: ExecutionTrace, to: Flow           }
-  RESULTED_IN:    { from: ExecutionTrace, to: Outcome        }
-  PROCESSED_COMPANY: { from: ExecutionTrace, to: Company     }
-  DEPRECATED_BY:  { from: Flow,           to: Flow           }
-  ENROLLED_IN:    { from: Company,        to: Programme      }
+  MATCHED_WITH:      { from: Company,        to: Mentor          }
+  USES:              { from: Flow,            to: Skill           }
+  READS_FROM:        { from: Flow,            to: Connector       }
+  RUNS_ON:           { from: Flow,            to: Server          }
+  RAN_FLOW:          { from: ExecutionTrace,  to: Flow            }
+  RESULTED_IN:       { from: ExecutionTrace,  to: Outcome         }
+  PROCESSED_COMPANY: { from: ExecutionTrace,  to: Company         }
+  DEPRECATED_BY:     { from: Flow,            to: Flow            }
+  ENROLLED_IN:       { from: Company,         to: Programme       }
 ```
 
-This file is the contract. All other code reads from it — nothing hardcodes
-node labels or property names inline.
-
-#### 2.2 — `src/config/schema_validator.py`
-Validates any incoming dict against the schema before it reaches Neo4j.
-
-```
-Class:  SchemaValidator
-Method: validate_node(label: str, props: dict) -> None
-        Raises SchemaValidationError with field name if required field missing.
-Method: validate_edge(rel_type: str, from_label: str, to_label: str) -> None
-        Raises SchemaValidationError if the edge type is not defined for those labels.
-Method: load(path: str = "src/config/schema.yaml") -> SchemaValidator
-```
-
-#### 2.3 — `src/config/meta_graph.py`
-Writes the schema itself into Neo4j as `:SchemaNode` and `:SchemaEdge` meta-nodes,
-so the LangGraph agent can query "what node types exist and what properties do they
-have?" without reading a YAML file.
-
-```cypher
-// Written by meta_graph.py on startup
-(:SchemaNode {label: "Skill", required: ["id","name","language"], version: "1.0"})
-(:SchemaEdge {type: "USES", from: "Flow", to: "Skill"})
-```
-
-The Planner agent gains a new startup query:
-```cypher
-MATCH (s:SchemaNode) RETURN s.label, s.required, s.optional
-```
-This makes the agent self-aware of the schema it is operating on.
-
-#### 2.4 — Refactor `ecolink-graph/ingest.py`
-Replace all hardcoded `SET co.name = $name, co.industry = $industry ...` blocks
-with a loop driven by `schema.yaml`:
+#### S1-P1-2: `src/config/schema_validator.py`
+Validates any incoming dict before it reaches Neo4j.
 
 ```python
-validator = SchemaValidator.load()
-validator.validate_node("Company", company_dict)
-# then write — no property list needs to be maintained by hand
+class SchemaValidator:
+    def validate_node(self, label: str, props: dict) -> None:
+        # raises SchemaValidationError if required field missing
+    def validate_edge(self, rel_type: str, from_label: str, to_label: str) -> None:
+        # raises SchemaValidationError if edge type not defined for those labels
+    @classmethod
+    def load(cls, path: str = "src/config/schema.yaml") -> "SchemaValidator": ...
 ```
 
-**Deliverable:** `schema.yaml` is the single source of truth. Adding a new node
-type requires editing one file, not hunting through Cypher strings across multiple
-Python files.
+#### S1-P1-3: `src/config/meta_graph.py`
+Writes schema as `:SchemaNode` meta-nodes in Neo4j so the agent can query
+"what node types and properties exist?" at runtime.
+
+```python
+def push_schema_to_graph(validator: SchemaValidator) -> None:
+    """Run once at startup or when schema.yaml changes."""
+```
+
+#### S1-P1-4: Refactor `ecolink-graph/ingest.py`
+Replace inline Cypher property lists with a SchemaValidator-driven loop.
+Validate each dict before writing. No property names hardcoded in Python strings.
+
+#### S1-P1-5: `src/indexer/` — System Indexer subsystem
+Files to build (in dependency order):
+
+```
+src/indexer/base_indexer.py       — abstract BaseIndexer, IndexedSystem dataclass
+src/indexer/openapi_indexer.py    — OpenAPI spec → Connector + Skill nodes
+src/indexer/python_indexer.py     — Python package AST → Skill nodes
+src/indexer/db_indexer.py         — SQLAlchemy DSN → Connector nodes
+src/indexer/graph_writer.py       — writes IndexedSystem to Neo4j via MetadataStore
+src/indexer/runner.py             — CLI: python -m src.indexer.runner --type openapi --source ...
+```
+
+See architecture detail in the original PLATFORM_PLAN sections (Phase 1).
+
+**Stream 1 owns:** All `src/config/`, `src/indexer/`, `ecolink-graph/`
+**Does not touch:** `src/agents/`, `src/graphrag/`, `frontend/`, `src/ui/`
 
 ---
 
-## Phase 3 — Metadata Storage Configuration
+## Stream 2 — AI / GraphRAG (Leila)
 
-**Goal:** Separate where graph metadata goes (Neo4j) from where code artifacts go
-(file system in dev, GCS in prod), with a single config that controls both.
+### P0 Tasks — Demo Blockers
 
-**Why third:** The Skill Factory (Phase 4) needs to store executable code somewhere.
-That somewhere must be configured before the factory is built.
+#### S2-P0-1: `src/graphrag/retriever.py`
+Queries Neo4j for historical success and failure patterns for a given industry.
+Returns structured context for the generator.
 
-### Tasks
+```python
+def retrieve_context(industry: str, goal: str) -> RetrievedContext:
+    """
+    Returns:
+      RetrievedContext(
+        success_patterns: List[dict],   # from get_success_patterns()
+        failure_patterns: List[dict],   # from get_failure_patterns()
+        available_skills: List[dict],   # from get_best_skills()
+        infra_status:     dict,         # from get_infrastructure_status()
+      )
+    """
+```
 
-#### 3.1 — `src/config/storage_config.yaml`
-Declares storage backends per artifact type.
+Uses `ecolink-graph/queries.py` functions — do not write raw Cypher here.
+Import: `from ecolink-graph.queries import get_success_patterns, ...`
+(use `sys.path` insert or make `ecolink-graph` a package with `__init__.py`).
+
+**Contract:** Retriever must be callable with just `(industry, goal)` — no Neo4j
+driver code inside this file. All DB access goes through `queries.py`.
+
+#### S2-P0-2: `src/graphrag/prompt_engine.py`
+Builds the prompt sent to Gemini from the retrieved context.
+
+```python
+def build_planner_prompt(goal: str, context: RetrievedContext) -> str:
+    """Assembles a structured prompt with:
+    - Goal statement
+    - Success patterns (as few-shot examples)
+    - Failure patterns (as negative examples)
+    - Available skills to choose from
+    - Infrastructure constraints
+    Returns a plain string ready for Gemini.
+    """
+
+def build_critic_prompt(proposed_yaml: str, context: RetrievedContext) -> str:
+    """Builds validation prompt for the Critic node."""
+```
+
+No LLM calls inside this file — pure string construction. Testable without
+any API key.
+
+#### S2-P0-3: `src/graphrag/generator.py`
+Calls Gemini with the prompt and returns a structured result.
+
+```python
+def generate_flow_proposal(goal: str, industry: str) -> FlowProposal:
+    """
+    1. retriever.retrieve_context(industry, goal)
+    2. prompt_engine.build_planner_prompt(goal, context)
+    3. Calls Gemini (gemini-2.5-flash via langchain_google_genai)
+    4. Parses response into FlowProposal(flow_yaml, reasoning_trace, skills_used)
+    5. Returns FlowProposal
+    """
+```
+
+Uses structured output (`with_structured_output`) exactly as `nodes.py` does —
+do not invent a different calling pattern.
+
+Model: `gemini-2.5-flash` (same as `nodes.py` `_llm()` — share the factory).
+
+#### S2-P0-4: `src/graphrag/validator.py`
+Validates the generated YAML flow before it is returned to the frontend.
+
+```python
+def validate_flow_yaml(flow_yaml: str, valid_skill_ids: List[str],
+                       valid_connector_ids: List[str]) -> ValidationResult:
+    """
+    Checks:
+    1. YAML parses without error
+    2. Every skill referenced exists in valid_skill_ids
+    3. Every connector referenced exists in valid_connector_ids
+    4. Required fields present: flow_id, steps
+    Returns ValidationResult(is_valid, errors: List[str])
+    """
+```
+
+No LLM calls. No Neo4j. Pure logic — fully testable.
+
+#### S2-P0-5: `src/graphrag/main_graphrag.py`
+End-to-end GraphRAG pipeline. Wires retriever → prompt engine → generator →
+validator together.
+
+```python
+def run(goal: str, industry: str) -> dict:
+    """Returns the JSON contract defined in response.md Contract 1:
+    {
+      "goal": str,
+      "industry": str,
+      "reasoning_trace": str,
+      "proposed_flow": { "flow_id": str, "steps": [...] },
+      "status": "valid" | "invalid",
+      "errors": []
+    }
+    """
+
+if __name__ == "__main__":
+    import argparse
+    # python src/graphrag/main_graphrag.py --goal "..." --industry Fintech
+```
+
+### P1 Tasks — LangGraph Integration
+
+#### S2-P1-1: Wire GraphRAG retriever into `planner_node`
+Replace the bare Cypher queries in `planner_node` with calls to
+`retriever.retrieve_context()`. The planner gets richer context (success examples,
+failure examples) without longer prompts.
+
+```python
+# In nodes.py planner_node — replace the two raw query_graph.invoke calls:
+from src.graphrag.retriever import retrieve_context
+context = retrieve_context(industry=goal_industry, goal=goal)
+# pass context.success_patterns and context.failure_patterns into prompt
+```
+
+#### S2-P1-2: Wire prompt engine into `planner_node` and `critic_node`
+Replace inline f-string prompts in `nodes.py` with calls to `prompt_engine`:
+
+```python
+from src.graphrag.prompt_engine import build_planner_prompt, build_critic_prompt
+prompt = build_planner_prompt(goal, context)
+```
+
+This decouples prompt engineering from graph wiring — Leila owns prompts,
+prompt changes don't require touching the graph topology.
+
+#### S2-P1-3: `src/skills/skill_factory.py` + `create_skill` tool
+When the agent identifies that no existing skill covers a needed capability,
+it should be able to register a new one.
+
+```
+src/skills/skill_validator.py     — AST syntax + safety check (no os.system, eval, etc.)
+src/skills/skill_factory.py       — validate → store → write Skill node to Neo4j
+src/skills/skill_version_manager.py — DEPRECATED_BY versioning
+src/skills/skill_registry.py      — list/search skills (used by Generator)
+```
+
+Add to `src/agents/tools.py`:
+```python
+@tool
+def create_skill(name, code, language, description, input_schema, output_schema) -> str:
+    """Register a new Skill node from validated code. Returns skill_id."""
+```
+
+#### S2-P1-4: `src/ml/graph_embedder.py` — GNN embeddings (P2 if time allows)
+Node2Vec over the MATCHED_WITH subgraph. Writes `embedding` property to Company
+and Mentor nodes. Enables structural similarity search beyond keyword matching.
+
+```python
+class GraphEmbedder:
+    def train(self, driver) -> None: ...    # reads from Neo4j, writes embeddings back
+    def get_embedding(self, node_id) -> np.ndarray: ...
+```
+
+#### S2-P1-5: `src/ml/reward_calculator.py` — PPO Lite (P2 if time allows)
+Converts simulation output to a scalar reward signal.
+
+```python
+def calculate_reward(sim_result: dict, baseline_score: float) -> float:
+    """
+    +10  if sim match_score > baseline * 1.3
+    -5   if latency increased > 20%
+    -50  if status == 'fail'
+    """
+```
+
+**Stream 2 owns:** `src/graphrag/`, `src/skills/`, `src/ml/`
+**Does not touch:** `ecolink-graph/`, `frontend/`, `src/ui/`, `src/config/`
+
+---
+
+## Stream 3 — Frontend & API (Frontend Dev)
+
+### P0 Tasks — Demo Blockers
+
+#### S3-P0-1: `src/api/main.py` — FastAPI backend
+
+Implements the API contracts from `response.md`:
+
+```python
+from fastapi import FastAPI
+from src.graphrag.main_graphrag import run as graphrag_run
+
+app = FastAPI(title="EcoLink NeuroCore API")
+
+@app.post("/api/optimize")
+def optimize(body: OptimizeRequest) -> OptimizeResponse:
+    """
+    Input:  { goal, industry, output_file (optional) }
+    Output: Contract 1 from response.md
+    """
+    return graphrag_run(goal=body.goal, industry=body.industry)
+
+@app.post("/api/agent/run")
+def run_agent(body: AgentRunRequest) -> AgentRunResponse:
+    """Triggers the full LangGraph pipeline. Returns thread_id for polling."""
+
+@app.post("/api/proposals/{proposal_id}/approve")
+def approve(proposal_id: str):
+    """Resumes paused LangGraph thread with approved=True."""
+
+@app.post("/api/proposals/{proposal_id}/reject")
+def reject(proposal_id: str, body: RejectRequest):
+    """Resumes paused LangGraph thread with approved=False."""
+
+@app.get("/api/proposals")
+def list_proposals():
+    """Returns all Flow nodes with status='proposed' from Neo4j."""
+
+@app.get("/api/graph/stats")
+def graph_stats():
+    """Returns ecosystem stats for the dashboard header."""
+
+@app.get("/api/infrastructure")
+def infrastructure():
+    """Returns server status for the infra monitor."""
+```
+
+Run with: `uvicorn src.api.main:app --reload`
+
+All Neo4j reads go through `ecolink-graph/queries.py`.
+All agent calls go through `src/agents/graph.py`.
+
+#### S3-P0-2: Basic UI — choose one of:
+
+**Option A — Streamlit** (recommended: fastest, same language as backend)
+```
+src/ui/app.py              — Streamlit entry: sidebar + page router
+src/ui/pages/optimize.py   — Goal input form → calls /api/optimize → shows output
+src/ui/pages/proposals.py  — Pending proposals table + Approve/Reject buttons
+src/ui/pages/infra.py      — Server load table
+```
+
+**Option B — React** (from `response.md`, if Frontend Dev prefers)
+```
+frontend/src/pages/Optimize.jsx     — form + result display
+frontend/src/pages/Proposals.jsx    — approval dashboard
+frontend/src/components/GraphView.jsx — pyvis/react-force-graph visualization
+```
+
+Both options call the same FastAPI endpoints. The team decides at kickoff.
+
+#### S3-P0-3: Graph visualization component
+Displays Company and Mentor nodes, MATCHED_WITH edges coloured by score.
+
+If Streamlit: use `pyvis` — generate HTML and embed with `st.components.html`.
+If React: use `react-force-graph` or `vis-network`.
+
+Minimum for demo:
+- Show all Company nodes (circle, sized by revenue)
+- Show all Mentor nodes (square, sized by success_score)
+- Show MATCHED_WITH edges coloured: green (score ≥ 7), red (score < 4)
+- Click a node → show its details in a sidebar panel
+
+#### S3-P0-4: Approve/Reject flow in UI
+```
+1. UI calls GET /api/proposals → shows table of pending flows
+2. Admin clicks "Approve" → POST /api/proposals/{id}/approve
+3. UI shows success toast → refreshes proposals list
+4. In Neo4j: Flow.status changes from 'proposed' to 'active'
+```
+
+This uses the existing `activate_proposal()` function in `tools.py` via the
+FastAPI endpoint — no new graph logic needed.
+
+### P1 Tasks — Platform & Polish
+
+#### S3-P1-1: Agent run panel
+Full LangGraph pipeline triggered from the UI:
+```
+1. User enters goal + clicks "Run Agent"
+2. POST /api/agent/run → returns { thread_id }
+3. UI polls GET /api/agent/status/{thread_id}
+4. When status == "awaiting_approval": show proposal details + Approve/Reject
+5. When status == "complete": show final output
+```
+
+#### S3-P1-2: Dual graph view (Graph A + Graph B side by side)
+Two network graphs:
+- Left: Graph A (historical data — Companies, Mentors, MATCHED_WITH)
+- Right: Graph B (blueprint — Flows, Skills, Connectors, Servers)
+- Highlight nodes referenced in the latest agent proposal (yellow pulse)
+
+#### S3-P1-3: Infrastructure monitor panel
+Live table from `/api/infrastructure`:
+- Server name, status badge (healthy/overloaded/critical), load bar, region
+- Auto-refresh every 30 seconds
+
+**Stream 3 owns:** `src/api/`, `src/ui/` (or `frontend/`)
+**Does not touch:** `src/agents/`, `src/graphrag/`, `ecolink-graph/`
+
+---
+
+## Stream 4 — Platform & Infra (Cloud Dev)
+
+### P0 Tasks — Demo Blockers
+
+#### S4-P0-1: Environment setup and `requirements.txt`
+Ensure all dependencies install cleanly for every team member.
+
+Current `requirements.txt` (verified):
+```
+langgraph>=0.2.56
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-google-vertexai>=2.0.0
+neo4j>=5.27.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+google-cloud-run>=0.10.0
+pyjwt>=2.10.0
+tenacity>=8.2.0
+pydantic>=2.0.0
+streamlit>=1.40.0
+pandas>=2.0.0
+```
+
+Add for Stream 3 (API):
+```
+fastapi>=0.115.0
+uvicorn>=0.32.0
+httpx>=0.27.0
+```
+
+Add for Stream 1 (Indexer):
+```
+sqlalchemy>=2.0.0
+google-cloud-storage>=2.0.0
+```
+
+Add for Stream 2 (ML — P2 only):
+```
+torch>=2.0.0
+torch-geometric>=2.0.0
+node2vec>=0.4.0
+scikit-learn>=1.3.0
+```
+
+Manage additions via PR to `main` — others request, Cloud Dev approves.
+
+#### S4-P0-2: `.env` template
+Create `.env.example` (safe to commit — no real secrets):
+
+```bash
+# Neo4j (ecolink-graph instance)
+NEO4J_URI=neo4j+s://017c3af7.databases.neo4j.io
+NEO4J_USERNAME=017c3af7
+NEO4J_PASSWORD=<ask team lead>
+NEO4J_DATABASE=017c3af7
+
+# Google AI
+GOOGLE_API_KEY=<ask Leila>
+GOOGLE_CLOUD_PROJECT=ecosystem-sandbox
+GOOGLE_CLOUD_LOCATION=us-central1
+
+# Sandbox
+SANDBOX_MOCK=true
+SANDBOX_GCP_REGION=us-central1
+SANDBOX_JOB_NAME=ecolink-sandbox-executor
+CAPABILITY_TOKEN_SECRET=change-this-in-production
+
+# Artifact storage (Stream 1 — Phase 1)
+ARTIFACT_STORE_BACKEND=local
+ARTIFACT_STORE_PATH=./artifacts
+
+# Optional: timeouts
+NEO4J_CONNECTION_TIMEOUT_SECONDS=5
+NEO4J_QUERY_TIMEOUT_SECONDS=10
+```
+
+Add `.env` to `.gitignore` immediately.
+
+#### S4-P0-3: `src/config/startup.py` — pre-flight checks
+
+```python
+def run_startup_checks() -> None:
+    """Run before any CLI command or API startup.
+    1. verify_neo4j_connection()  (already in tools.py)
+    2. Confirm GOOGLE_API_KEY is set
+    3. Confirm artifact store path exists (create if local)
+    4. Print one-line status: ✓ Neo4j | ✓ Gemini key | ✓ Artifacts
+    Raises RuntimeError on first failure.
+    """
+```
+
+Call from `main.py` at startup and from `src/api/main.py` lifespan event.
+
+#### S4-P0-4: Run instructions in `README.md`
+One-page guide every team member can follow:
+
+```bash
+# 1. Install
+pip install -r requirements.txt
+
+# 2. Configure
+cp .env.example .env
+# → fill in credentials from team chat
+
+# 3. Seed the graph
+cd ecolink-graph && python ingest.py
+
+# 4. Verify graph
+python ecolink-graph/queries.py
+
+# 5. Run GraphRAG (Leila's engine)
+python src/graphrag/main_graphrag.py --goal "Optimize Fintech" --industry Fintech
+
+# 6. Run the API
+uvicorn src.api.main:app --reload
+
+# 7. Run the UI
+streamlit run src/ui/app.py
+# OR: cd frontend && npm run dev
+
+# 8. Run the full agent (LangGraph)
+python main.py --goal "Improve Healthtech matching"
+```
+
+### P1 Tasks — Platform Generalization
+
+#### S4-P1-1: `src/config/storage_config.yaml`
 
 ```yaml
 graph:
-  backend: neo4j                    # always Neo4j for relationships
+  backend: neo4j
   uri_env: NEO4J_URI
   database_env: NEO4J_DATABASE
-
 artifacts:
-  backend: local                    # or: gcs
-  local_path: ./artifacts           # used when backend=local
-  gcs_bucket_env: GCS_BUCKET       # used when backend=gcs
+  backend: local           # or: gcs
+  local_path: ./artifacts
+  gcs_bucket_env: GCS_BUCKET
   gcs_prefix: ecolink/skills/
-
-metadata_cache:
-  enabled: false                    # set true to cache Neo4j reads in Redis
-  redis_url_env: REDIS_URL
 ```
 
-#### 3.2 — `src/storage/artifact_store.py`
-Stores and retrieves binary artifacts (skill code, connector configs) with a
-content-addressed key derived from `sha256(content)`.
+#### S4-P1-2: `src/storage/artifact_store.py`
+Stores skill code and connector configs outside Neo4j.
 
-```
-Class:  ArtifactStore(ABC)
-  Method: save(key: str, content: bytes) -> str   (returns storage URI)
-  Method: load(key: str) -> bytes
-
-Class:  LocalArtifactStore(ArtifactStore)
-  - stores files under ./artifacts/{key}
-
-Class:  GCSArtifactStore(ArtifactStore)
-  - stores blobs in gs://{bucket}/{prefix}/{key}
-  - uses Application Default Credentials (no API keys)
-
-Factory: ArtifactStore.from_config(storage_config.yaml) -> ArtifactStore
-```
-
-#### 3.3 — `src/storage/metadata_store.py`
-Thin wrapper around the Neo4j driver that enforces schema validation on every
-write and routes artifact-heavy properties (like `code`) to the ArtifactStore
-instead of storing them inline in the graph.
-
-```
-Class:  MetadataStore
-  Method: write_node(label: str, props: dict) -> str   (returns node id)
-          - calls SchemaValidator.validate_node()
-          - extracts any "artifact" fields → ArtifactStore.save()
-          - stores the returned URI as artifact_path on the node
-          - writes to Neo4j
-
-  Method: read_node(label: str, node_id: str) -> dict
-  Method: write_edge(rel_type: str, from_id: str, to_id: str, props: dict)
-```
-
-#### 3.4 — Update `.env` and `requirements.txt`
-Add:
-```
-ARTIFACT_STORE_BACKEND=local
-ARTIFACT_STORE_PATH=./artifacts
-```
-Add to `requirements.txt`: `google-cloud-storage>=2.0` (optional, only needed
-for GCS backend).
-
-**Deliverable:** All graph writes go through `MetadataStore`. Code artifacts are
-stored outside Neo4j in a configurable location. Switching from local dev to GCS
-in production is a one-line `.env` change.
-
----
-
-## Phase 4 — Skill Factory
-
-**Goal:** Enable the system (and the agent) to create new Skills dynamically from
-code, validate them, store the executable, and register them in Graph B — without
-touching any JSON file.
-
-**Why fourth:** Depends on ArtifactStore (Phase 3) for code storage and
-SchemaValidator (Phase 2) for node validation.
-
-### Tasks
-
-#### 4.1 — `src/skills/skill_validator.py`
-Validates skill code before it is stored. Two-stage check:
-
-**Stage 1 — Syntax:**
 ```python
-ast.parse(code)   # raises SyntaxError on bad Python
+class ArtifactStore(ABC):
+    def save(self, key: str, content: bytes) -> str: ...  # returns URI
+    def load(self, key: str) -> bytes: ...
+
+class LocalArtifactStore(ArtifactStore): ...   # ./artifacts/{key}
+class GCSArtifactStore(ArtifactStore): ...     # gs://{bucket}/{prefix}/{key}
+
+def from_config(config_path: str) -> ArtifactStore: ...
 ```
 
-**Stage 2 — Safety (AST walk):**
-Rejects code containing any of:
-- `os.system`, `subprocess`, `__import__`, `eval`, `exec`
-- `open(` with write modes (`"w"`, `"a"`, `"wb"`)
-- Network calls (`socket`, `requests.post`, `urllib`)
+#### S4-P1-3: `src/storage/metadata_store.py`
+Schema-validating wrapper around Neo4j. All writes go through here.
 
-Raises `SkillValidationError` with the offending line number and reason.
-
-Java support: runs `javac` in a subprocess (if available) for syntax check only.
-
-#### 4.2 — `src/skills/skill_factory.py`
-Creates a Skill from code and registers it in the graph.
-
-```
-Class:  SkillFactory
-Method: create(
-          name:          str,
-          code:          str,
-          language:      str,          # "python" | "java"
-          description:   str,
-          input_schema:  dict,         # JSON Schema
-          output_schema: dict,
-          tags:          List[str] = []
-        ) -> str                       # returns skill_id
-
-Internally:
-  1. SkillValidator.validate(code, language)
-  2. skill_id = f"skill_{slugify(name)}_{sha256(code)[:8]}"
-  3. artifact_path = ArtifactStore.save(skill_id, code.encode())
-  4. MetadataStore.write_node("Skill", {
-       "id": skill_id, "name": name, "language": language,
-       "description": description, "artifact_path": artifact_path,
-       "input_schema": json.dumps(input_schema),
-       "output_schema": json.dumps(output_schema),
-       "performance_score": 0.0,   # updated after first sandbox run
-       "avg_execution_ms": 0,
-     })
-  5. return skill_id
+```python
+class MetadataStore:
+    def write_node(self, label: str, props: dict) -> str: ...
+    def read_node(self, label: str, node_id: str) -> dict: ...
+    def write_edge(self, rel_type: str, from_id: str, to_id: str,
+                   props: dict = {}) -> None: ...
 ```
 
-#### 4.3 — `src/skills/skill_version_manager.py`
-Handles versioning when a skill is updated.
+Internally calls `SchemaValidator.validate_node()` before every write.
+Extracts `artifact`-type fields → `ArtifactStore.save()`, stores URI in node.
+
+#### S4-P1-4: `src/connectors/` — Connector Factory
 
 ```
-Method: create_new_version(old_skill_id, new_code, ...) -> str
-        - calls SkillFactory.create() to get new_skill_id
-        - writes DEPRECATED_BY edge: (old_skill)-[:DEPRECATED_BY]->(new_skill)
-        - sets old node status = "deprecated"
-        - returns new_skill_id
-
-Method: get_active_version(skill_name: str) -> dict
-        - queries graph for Skill by name with no outgoing DEPRECATED_BY edge
+src/connectors/connector_config.py   — Pydantic models: RESTConfig, SQLConfig, CSVConfig
+src/connectors/connection_tester.py  — liveness check before registration
+src/connectors/connector_factory.py  — test → write Connector node via MetadataStore
 ```
 
-#### 4.4 — `src/skills/skill_registry.py`
-Read-only listing and lookup. Used by the agent's Generator node to find valid
-skills to reference in proposed flows.
-
-```
-Method: list_skills(language=None, min_score=None, tags=None) -> List[dict]
-Method: get_skill(skill_id: str) -> dict
-Method: search_skills(query: str) -> List[dict]
-        (full-text search on name + description via Neo4j CONTAINS)
-```
-
-#### 4.5 — Add `create_skill` agent tool to `src/agents/tools.py`
-Exposes SkillFactory to the LangGraph agent so it can propose AND register new
-skills in a single step.
-
+Add to `src/agents/tools.py`:
 ```python
 @tool
-def create_skill(name: str, code: str, language: str,
-                 description: str, input_schema: dict, output_schema: dict) -> str:
-    """Register a new Skill node in Graph B from validated code.
-    Returns the new skill_id. The skill is immediately available for use in
-    proposed flows. Only call this after confirming no existing skill covers
-    this capability (use query_graph first to check).
-    """
+def create_connector(name, connector_type, config, description="") -> str:
+    """Test + register a new Connector in Graph B. Returns connector_id."""
 ```
 
-**Deliverable:** The agent (or a human via CLI) can call `create_skill` and
-the new skill is immediately queryable in Graph B, its code is stored safely in
-the artifact store, and future Generator nodes can reference it by ID.
+Secrets (passwords, API tokens) are stored by env var name only — never in Neo4j.
 
----
-
-## Phase 5 — Connector Factory
-
-**Goal:** Register new data connectors dynamically — test the connection, store
-the config, and create a Connector node in Graph B.
-
-**Why fifth:** Depends on MetadataStore (Phase 3). Mirrors Phase 4 for connectors.
-
-### Tasks
-
-#### 5.1 — `src/connectors/connector_config.py`
-Pydantic models defining the config shape for each connector type.
-
-```python
-class RESTConnectorConfig(BaseModel):
-    base_url: HttpUrl
-    auth_header: Optional[str]    # header name only — value from env
-    auth_env_var: Optional[str]   # env var holding the token
-
-class SQLConnectorConfig(BaseModel):
-    dsn_env_var: str              # env var holding the DSN — never inline
-    pool_size: int = 5
-    timeout_seconds: int = 10
-
-class CSVConnectorConfig(BaseModel):
-    path: str                     # relative path or GCS URI
-    delimiter: str = ","
-    encoding: str = "utf-8"
-
-class GraphQLConnectorConfig(BaseModel):
-    endpoint: HttpUrl
-    auth_env_var: Optional[str]
-```
-
-Secrets (API keys, passwords) are **never stored in the graph**. Only the env var
-name is stored. The actual value stays in the environment or GCP Secret Manager.
-
-#### 5.2 — `src/connectors/connection_tester.py`
-Lightweight liveness check run before registering a connector.
-
-```
-Method: test(connector_type: str, config: dict) -> TestResult
-  REST:     HEAD {base_url} — expects 2xx or 4xx (not connection error)
-  SQL:      SELECT 1 with 5-second timeout
-  CSV:      file exists and is readable (or GCS object HEAD)
-  GraphQL:  POST {endpoint} with introspection query
-```
-
-Raises `ConnectorTestError` with details on failure.
-
-#### 5.3 — `src/connectors/connector_factory.py`
-Creates a Connector node after testing the connection.
-
-```
-Class:  ConnectorFactory
-Method: create(
-          name:           str,
-          connector_type: str,    # "rest" | "sql" | "csv" | "graphql"
-          config:         dict,
-          description:    str     = ""
-        ) -> str                  # returns connector_id
-
-Internally:
-  1. Parse config into the appropriate Pydantic model (validates fields)
-  2. ConnectionTester.test(connector_type, config) — fail fast if unreachable
-  3. connector_id = f"conn_{slugify(name)}_v1"
-  4. MetadataStore.write_node("Connector", {
-       "id": connector_id, "name": name, "type": connector_type,
-       "description": description,
-       "status": "active", "error_rate": 0.0,
-       "version": "1.0",
-       # auth secrets stored by env var name only:
-       "auth_env_var": config.get("auth_env_var")
-     })
-  5. return connector_id
-```
-
-#### 5.4 — Add `create_connector` agent tool to `src/agents/tools.py`
-Exposes ConnectorFactory to the agent, symmetric to `create_skill`.
-
-```python
-@tool
-def create_connector(name: str, connector_type: str,
-                     config: dict, description: str = "") -> str:
-    """Register a new Connector node in Graph B after testing the connection.
-    Returns the new connector_id. Only call this when no existing connector
-    covers the required data source (check query_graph first).
-    """
-```
-
-**Deliverable:** The agent (or a human via CLI) can register a new REST API,
-SQL database, or CSV source in Graph B with a tested connection, ready for
-use in proposed flows.
-
----
-
-## Phase 6 — Platform CLI
-
-**Goal:** A single unified command-line interface that replaces running individual
-scripts and makes the platform operable without knowing internal file paths.
-
-### Tasks
-
-#### 6.1 — `src/platform_cli.py`
-Single entry point with subcommands.
+#### S4-P1-5: `src/platform_cli.py` — Unified CLI
 
 ```bash
-# Index an external system into Graph B
-python -m src.platform_cli index --type openapi --source https://api.example.com/openapi.json
-python -m src.platform_cli index --type python  --source ./my_service
-python -m src.platform_cli index --type db      --source $DATABASE_URL
-
-# Register a new skill from a file
-python -m src.platform_cli skill create --name "filter_by_stage" --file ./skills/filter_stage.py
-
-# Register a new connector
-python -m src.platform_cli connector create --name "crm_api" --type rest --base-url https://crm.example.com
-
-# List what's in the graph
-python -m src.platform_cli skill list
-python -m src.platform_cli connector list
-python -m src.platform_cli flow list
-
-# Run the agent
-python -m src.platform_cli agent run --goal "Improve match quality for Healthtech"
-python -m src.platform_cli agent approve --thread-id abc123
-python -m src.platform_cli agent reject  --thread-id abc123 --reason "Too risky"
-
-# Validate graph against schema
-python -m src.platform_cli schema validate
-python -m src.platform_cli schema push      # writes meta-nodes to Neo4j
+python -m src.platform_cli index     --type openapi --source <url>
+python -m src.platform_cli skill     create --name "my_skill" --file ./skill.py
+python -m src.platform_cli connector create --name "crm" --type rest --base-url <url>
+python -m src.platform_cli agent     run    --goal "..."
+python -m src.platform_cli agent     approve --thread-id <id>
+python -m src.platform_cli schema    validate
+python -m src.platform_cli schema    push
 ```
 
-#### 6.2 — `src/config/startup.py`
-Runs on every CLI invocation before any other code:
-1. `verify_neo4j_connection()` (already in tools.py)
-2. Load and validate `schema.yaml`
-3. Confirm `artifacts/` directory exists (or GCS bucket is reachable)
-4. Print a one-line status: `✓ Neo4j connected | ✓ Schema v1.0 | ✓ Artifact store ready`
+**Stream 4 owns:** `src/config/`, `src/storage/`, `src/connectors/`, `src/platform_cli.py`, `requirements.txt`, `.env.example`, `README.md`
+**Does not touch:** `src/agents/`, `src/graphrag/`, `src/ui/`, `ecolink-graph/`
 
-**Deliverable:** `python -m src.platform_cli --help` is the single entry point
-for the entire platform. No one needs to know which script to run.
+---
+
+## API Contracts (Full Reference)
+
+### Contract 1: GraphRAG engine → Frontend (from `response.md`)
+
+```json
+POST /api/optimize
+→ 200 OK
+{
+  "goal": "Optimize Fintech matching",
+  "industry": "Fintech",
+  "reasoning_trace": "Historical data shows semantic alignment between pain_points and expertise improves outcomes by 40% for Fintech...",
+  "proposed_flow": {
+    "flow_id": "fintech_optimized_v1",
+    "steps": [
+      { "skill": "semantic_similarity", "params": { "source": "company.pain_points", "target": "mentor.expertise" } },
+      { "skill": "sort_by_score_desc",  "params": {} }
+    ]
+  },
+  "status": "valid",
+  "errors": []
+}
+```
+
+### Contract 2: Neo4j → GraphRAG retriever (from `response.md` + fixes)
+
+```
+Node type     | Field name in query result
+Company       | id, name, industry, stage, pain_points
+Mentor        | id, name, expertise_tags, expertise (alias), success_score (alias), available (bool alias)
+MATCHED_WITH  | outcome_score, feedback, date, programme_name
+Skill         | id, name, description, performance_score
+```
+
+### Contract 3: Frontend → API
+
+```json
+POST /api/optimize        { "goal": str, "industry": str }
+POST /api/agent/run       { "goal": str }
+POST /api/proposals/{id}/approve   {}
+POST /api/proposals/{id}/reject    { "reason": str }
+GET  /api/proposals                → List[ProposalSummary]
+GET  /api/graph/stats              → EcosystemStats
+GET  /api/infrastructure           → List[ServerStatus]
+```
+
+### Contract 4: LangGraph → FastAPI (agent state polling)
+
+```
+GET /api/agent/status/{thread_id}
+→ {
+    "status": "running" | "awaiting_approval" | "complete" | "failed",
+    "current_node": "planner" | "generator" | ...,
+    "proposal_id": str | null,
+    "proposed_flow_yaml": str | null,
+    "baseline_score": float | null,
+    "simulation_score": float | null
+  }
+```
+
+---
+
+## Integration Checkpoints
+
+### Checkpoint 1 — Both days, morning start
+**Goal:** Everyone connects to the same Neo4j instance and sees data.
+
+- [ ] Stream 1: Run `python ecolink-graph/ingest.py` → no errors
+- [ ] Stream 1: Run `python ecolink-graph/queries.py` → shows 30 companies, 20 mentors
+- [ ] Stream 2: `from ecolink-graph import queries` works in Leila's environment
+- [ ] Stream 4: `.env` distributed to all team members via WhatsApp DM
+
+### Checkpoint 2 — Day 1, 14:00
+**Goal:** GraphRAG engine works end-to-end in terminal.
+
+- [ ] Stream 2: `python src/graphrag/main_graphrag.py --goal "Optimize Fintech" --industry Fintech` prints valid JSON
+- [ ] Stream 3: FastAPI starts: `uvicorn src.api.main:app` → no import errors
+- [ ] Stream 4: `python -m src.config.startup` prints ✓ for all checks
+
+### Checkpoint 3 — Day 1, 18:00
+**Goal:** Frontend calls backend and displays a real result.
+
+- [ ] Stream 3: `POST /api/optimize` returns Contract 1 JSON
+- [ ] Stream 3: UI renders the `reasoning_trace` and `proposed_flow.steps` from the API response
+- [ ] Stream 1: `get_success_patterns("Fintech")` and `get_failure_patterns("Fintech")` return data
+
+### Checkpoint 4 — Day 2, 10:00
+**Goal:** Full agent pipeline + approval flow works.
+
+- [ ] Stream 2: `python main.py --goal "Improve Healthtech matching"` reaches HumanApproval pause
+- [ ] Stream 3: `/api/proposals` returns the paused proposal
+- [ ] Stream 3: Clicking "Approve" in UI calls `/api/proposals/{id}/approve` → flow status changes to 'active' in Neo4j
+
+### Checkpoint 5 — Day 2, 14:00 ← Demo prep
+**Goal:** Complete user journey rehearsed.
+
+- [ ] Full flow works: enter goal in UI → GraphRAG returns result → agent proposes flow → admin approves → Neo4j updated
+- [ ] Graph visualization shows at least nodes + coloured edges
+- [ ] README covers setup in under 5 minutes
+- [ ] Demo script rehearsed by all team members
 
 ---
 
 ## Dependency Map
 
 ```
-Phase 2 (Schema Registry)
-  └──► Phase 1 (Indexer)       — needs schema to validate what it writes
-  └──► Phase 3 (Storage)       — needs schema for MetadataStore validation
-         └──► Phase 4 (Skills)  — needs ArtifactStore + MetadataStore
-         └──► Phase 5 (Connectors) — needs MetadataStore
-               └──► Phase 6 (CLI) — wraps all phases
-```
+S1 (Graph & Data)
+  │
+  ├── provides Neo4j data ──► S2 (GraphRAG retriever)
+  ├── provides queries.py ──► S3 (API reads from queries.py)
+  └── provides schema.yaml ──► S4 (storage uses schema)
 
-Build order: **2 → 3 → 1 + 4 + 5 (parallel) → 6**
+S2 (AI/GraphRAG)
+  │
+  ├── provides main_graphrag.py ──► S3 (API wraps it)
+  └── provides skill_factory ──────► S4 (CLI exposes it)
+
+S3 (Frontend/API)
+  │
+  └── provides /api/proposals ──► demo requires this
+
+S4 (Platform/Infra)
+  │
+  ├── provides .env + requirements ──► everyone
+  └── provides startup checks ──────► S2, S3
+
+Build order within streams:
+  S1: S1-P0-1 → S1-P0-2 → S1-P0-3+4 → S1-P1-1 → S1-P1-2 → S1-P1-3+4 → S1-P1-5
+  S2: S2-P0-1 → S2-P0-2 → S2-P0-3 → S2-P0-4 → S2-P0-5 → S2-P1-1 → S2-P1-2 → ...
+  S3: S3-P0-1 → S3-P0-4 → S3-P0-2 → S3-P0-3 → S3-P1-1+2+3
+  S4: S4-P0-2 → S4-P0-1 → S4-P0-3 → S4-P0-4 → S4-P1-1 → S4-P1-2+3 → S4-P1-4 → S4-P1-5
+```
 
 ---
 
-## File Inventory (all new files)
+## File Ownership Summary
 
 ```
+ecolink-graph/
+  ingest.py          ← Stream 1
+  queries.py         ← Stream 1
+
 src/
-├── config/
-│   ├── schema.yaml              # node/edge schema (Phase 2)
-│   ├── schema_validator.py      # validates dicts against schema (Phase 2)
-│   ├── meta_graph.py            # writes schema as Neo4j meta-nodes (Phase 2)
-│   ├── storage_config.yaml      # storage backend config (Phase 3)
-│   └── startup.py               # pre-flight checks (Phase 6)
-│
-├── storage/
-│   ├── artifact_store.py        # local + GCS artifact backends (Phase 3)
-│   └── metadata_store.py        # schema-validating Neo4j wrapper (Phase 3)
-│
-├── indexer/
-│   ├── base_indexer.py          # abstract BaseIndexer (Phase 1)
-│   ├── openapi_indexer.py       # OpenAPI/Swagger → Graph B (Phase 1)
-│   ├── python_indexer.py        # Python package AST → Graph B (Phase 1)
-│   ├── db_indexer.py            # SQL schema → Graph B (Phase 1)
-│   ├── graph_writer.py          # IndexedSystem → MetadataStore → Neo4j (Phase 1)
-│   └── runner.py                # CLI entry point for indexing (Phase 1)
-│
-├── skills/
-│   ├── skill_validator.py       # syntax + safety check (Phase 4)
-│   ├── skill_factory.py         # validate + store + register skill (Phase 4)
-│   ├── skill_version_manager.py # DEPRECATED_BY versioning (Phase 4)
-│   └── skill_registry.py        # read-only listing + search (Phase 4)
-│
-├── connectors/
-│   ├── connector_config.py      # Pydantic models per connector type (Phase 5)
-│   ├── connection_tester.py     # liveness check before registration (Phase 5)
-│   └── connector_factory.py     # test + register connector node (Phase 5)
-│
-├── agents/
-│   ├── tools.py                 # ADD: create_skill, create_connector tools
-│   └── ... (existing)
-│
-└── platform_cli.py              # unified CLI (Phase 6)
+  config/
+    schema.yaml              ← Stream 1 (+ Stream 4 reads)
+    schema_validator.py      ← Stream 1
+    meta_graph.py            ← Stream 1
+    storage_config.yaml      ← Stream 4
+    startup.py               ← Stream 4
+
+  storage/
+    artifact_store.py        ← Stream 4
+    metadata_store.py        ← Stream 4
+
+  indexer/
+    base_indexer.py          ← Stream 1
+    openapi_indexer.py       ← Stream 1
+    python_indexer.py        ← Stream 1
+    db_indexer.py            ← Stream 1
+    graph_writer.py          ← Stream 1
+    runner.py                ← Stream 1
+
+  graphrag/
+    retriever.py             ← Stream 2 (Leila)
+    prompt_engine.py         ← Stream 2 (Leila)
+    generator.py             ← Stream 2 (Leila)
+    validator.py             ← Stream 2 (Leila)
+    main_graphrag.py         ← Stream 2 (Leila)
+
+  agents/
+    tools.py        ← Stream 2 adds create_skill / create_connector tools
+    nodes.py        ← Stream 2 wires GraphRAG retriever + prompt engine
+    graph.py        ← no changes needed
+    state.py        ← no changes needed
+
+  skills/
+    skill_validator.py       ← Stream 2
+    skill_factory.py         ← Stream 2
+    skill_version_manager.py ← Stream 2
+    skill_registry.py        ← Stream 2
+
+  ml/
+    graph_embedder.py        ← Stream 2 (P2)
+    reward_calculator.py     ← Stream 2 (P2)
+
+  connectors/
+    connector_config.py      ← Stream 4
+    connection_tester.py     ← Stream 4
+    connector_factory.py     ← Stream 4
+
+  api/
+    main.py                  ← Stream 3
+
+  ui/
+    app.py                   ← Stream 3
+    pages/optimize.py        ← Stream 3
+    pages/proposals.py       ← Stream 3
+    pages/infra.py           ← Stream 3
+
+  platform_cli.py            ← Stream 4
+
+frontend/                    ← Stream 3 (if React chosen)
+
+main.py                      ← no changes needed
+requirements.txt             ← Stream 4
+.env.example                 ← Stream 4
+README.md                    ← Stream 4
 ```
-
-**Modified existing files:**
-
-| File | Change |
-|---|---|
-| `ecolink-graph/ingest.py` | Replace hardcoded Cypher property lists with SchemaValidator loop |
-| `ecolink-graph/queries.py` | No change — already the right abstraction |
-| `src/agents/tools.py` | Add `create_skill` and `create_connector` tools |
-| `src/agents/nodes.py` | Add startup schema query so Planner knows valid node types |
-| `requirements.txt` | Add `pydantic`, `httpx`, `sqlalchemy`, `google-cloud-storage` |
 
 ---
 
-## What This Enables
+## Git Workflow (from `response.md`)
 
-After these phases are complete, to plug the system into a new IT solution:
+```
+main    ← stable, demo-ready code only — never push directly
+dev     ← integration branch — merge here first, then to main
 
-```bash
-# 1. Point the indexer at the target system (one command)
-python -m src.platform_cli index --type openapi --source https://new-system.com/openapi.json
-
-# 2. Check what was found
-python -m src.platform_cli skill list
-python -m src.platform_cli connector list
-
-# 3. Run the agent against the new system's graph
-python -m src.platform_cli agent run --goal "Identify underperforming API endpoints and propose optimized flows"
-
-# 4. Agent proposes a new skill if none exists
-#    (calls create_skill tool internally)
-
-# 5. Human approves
-python -m src.platform_cli agent approve --thread-id <id>
+Branch naming:
+  feature/[name]-[description]   e.g. feature/leila-graphrag-retriever
+  fix/[name]-[description]       e.g. fix/backend-neo4j-field-mismatch
 ```
 
-The graph now represents the external system. The agent can reason about it,
-propose improvements, and register new capabilities — all without any hardcoded
-domain knowledge.
+**Rules:**
+- Never `git push origin main` directly
+- Never commit `.env` (it is in `.gitignore`)
+- Pull from `dev` before starting new work
+- One PR = one feature. Keep it small and reviewable.
+- Notify team in chat before merging to `dev`.
+
+---
+
+## Common Errors & Quick Fixes
+
+| Error | Cause | Fix |
+|---|---|---|
+| `NEO4J_URI not set` | `.env` missing | `cp .env.example .env` and fill in credentials |
+| `DatabaseNotFound: neo4j` | Missing `NEO4J_DATABASE=017c3af7` | Add that line to `.env` |
+| `No nodes found` | Ingest not run | `cd ecolink-graph && python ingest.py` |
+| `429 RESOURCE_EXHAUSTED` | Gemini free-tier daily limit hit | Wait for quota reset or add billing |
+| `UnicodeDecodeError csv` | interactions.csv encoding | Already fixed: `encoding="latin-1"` in ingest.py |
+| `YAML validation error` | Gemini generated bad YAML | Check `validator.py` error output — retry |
+| `Module not found` | Missing package | `pip install -r requirements.txt` |
+| `Connection refused Neo4j` | AuraDB paused | Go to console.neo4j.io and resume instance |
