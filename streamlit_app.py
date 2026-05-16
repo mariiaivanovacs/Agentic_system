@@ -2624,6 +2624,156 @@ def run_sandbox_from_ui(flow_yaml: str, mode: str) -> dict[str, Any]:
     return result
 
 
+@st.cache_data(ttl=20)
+def load_project_database_assets(project_id: str) -> pd.DataFrame:
+    rows = run_read(
+        f"""
+        MATCH (n)
+        WHERE n.project_id = {json.dumps(project_id)}
+          AND any(label IN labels(n) WHERE label IN ['DataStore','DatabaseModel','DatabaseTable'])
+        WITH coalesce(n.storage_type, labels(n)[0]) AS storage_type,
+             coalesce(n.name, n.display_name, n.id, labels(n)[0]) AS raw_name,
+             collect(DISTINCT labels(n)[0]) AS types,
+             collect(DISTINCT n.source_path)[0..6] AS source_paths,
+             count(*) AS evidence_count,
+             max(coalesce(n.confidence, 0)) AS confidence
+        WITH storage_type,
+             CASE
+               WHEN storage_type = 'orm' THEN raw_name
+               WHEN raw_name CONTAINS ':' THEN split(raw_name, ':')[-1]
+               ELSE raw_name
+             END AS name,
+             types,
+             source_paths,
+             evidence_count,
+             confidence
+        RETURN name,
+               storage_type,
+               types,
+               evidence_count,
+               source_paths,
+               confidence
+        ORDER BY evidence_count DESC, name
+        """
+    )
+    assets = df(rows)
+    if assets.empty:
+        return assets
+    assets["target"] = assets.apply(
+        lambda row: f"{row.get('name') or 'Database'} ({row.get('storage_type') or 'detected'})",
+        axis=1,
+    )
+    return assets.drop_duplicates(subset=["target"]).reset_index(drop=True)
+
+
+def redact_connection_uri(uri: str) -> str:
+    if not uri:
+        return ""
+    return re.sub(r"://([^:/@]+):([^@]+)@", r"://\1:***@", uri)
+
+
+def inspect_database_connection(uri: str, query: str | None, limit: int = 20) -> dict[str, Any]:
+    try:
+        connector = get_connector("SQL_Connector")
+        result = connector.inspect(
+            ConnectorInput(
+                source=uri,
+                query=query.strip() if query and query.strip() else None,
+                limit=limit,
+            )
+        )
+        return {
+            "status": result.status,
+            "schema": result.data_schema,
+            "rows": result.rows,
+            "metadata": result.metadata,
+            "connection": redact_connection_uri(uri),
+        }
+    except Exception as exc:
+        return {
+            "status": "fail",
+            "schema": [],
+            "rows": [],
+            "metadata": {},
+            "error": str(exc),
+            "connection": redact_connection_uri(uri),
+        }
+
+
+def decode_flow_config(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+def flow_yaml_from_config(raw: Any) -> str:
+    config = decode_flow_config(raw)
+    return str(config.get("yaml") or config.get("flow_yaml") or "")
+
+
+def code_patches_from_config(raw: Any) -> list[dict[str, Any]]:
+    config = decode_flow_config(raw)
+    candidates: list[Any] = []
+    candidates.extend(config.get("recommended_actions") or [])
+    candidates.extend(config.get("actions") or [])
+    if isinstance(config.get("proposed_summary"), dict):
+        candidates.extend(config["proposed_summary"].get("recommended_actions") or [])
+
+    patches: list[dict[str, Any]] = []
+    for action in candidates:
+        if not isinstance(action, dict):
+            continue
+        patch = action.get("code_patch")
+        if action.get("action_type") == "modify_code" and isinstance(patch, dict):
+            patches.append(patch)
+    return patches
+
+
+def apply_code_patches_to_repo(source_root: str, patches: list[dict[str, Any]]) -> dict[str, Any]:
+    root = Path(source_root).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        return {"status": "fail", "error": f"Source root does not exist: {source_root}", "applied": []}
+    if not patches:
+        return {"status": "fail", "error": "No concrete code patches are attached to this approved flow.", "applied": []}
+
+    pending: list[tuple[Path, str, str, str]] = []
+    for patch in patches:
+        rel_path = str(patch.get("file_path") or "").strip()
+        old_code = str(patch.get("old_code") or "")
+        new_code = str(patch.get("new_code") or "")
+        description = str(patch.get("description") or "")
+        if not rel_path:
+            return {"status": "fail", "error": "A patch is missing file_path.", "applied": []}
+        target = (root / rel_path).resolve()
+        if root not in target.parents and target != root:
+            return {"status": "fail", "error": f"Patch path escapes source root: {rel_path}", "applied": []}
+        if not target.exists():
+            return {"status": "fail", "error": f"Target file not found: {rel_path}", "applied": []}
+        original = target.read_text(encoding="utf-8")
+        if not old_code or old_code not in original:
+            return {"status": "fail", "error": f"old_code was not found in {rel_path}; no files were changed.", "applied": []}
+        pending.append((target, old_code, new_code, description))
+
+    applied: list[dict[str, Any]] = []
+    backup_root = ROOT / ".agent_runs" / "deploy_backups" / uuid.uuid4().hex[:10]
+    for target, old_code, new_code, description in pending:
+        rel = target.relative_to(root)
+        backup = backup_root / rel
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        updated = target.read_text(encoding="utf-8").replace(old_code, new_code, 1)
+        target.write_text(updated, encoding="utf-8")
+        applied.append({"file": str(rel), "description": description, "backup": str(backup)})
+
+    return {"status": "success", "applied": applied, "backup_root": str(backup_root)}
+
+
 with st.sidebar:
     st.markdown("## EcoLink")
     page = st.radio(
@@ -5587,290 +5737,216 @@ elif page == "System Map":
 # Full sandbox environment: configuration, run, compare, trace history.
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "Sandbox":
-    import json as _json_sb
     import pandas as _pd_sb
 
     st.subheader("Sandbox")
     st.caption(
-        "The secure sandbox executes proposed flows against a snapshot of real "
-        "companies and mentors. Skills run in sequence — each step scores "
-        "candidate pairs — producing a per-company trace and an average match score."
+        "Operational sandbox controls for database snapshots, Cloud Run execution, "
+        "and approved flow testing before any real source-code deployment."
     )
 
-    # ── Configuration strip ───────────────────────────────────────────────────
     _mock_on = os.environ.get("SANDBOX_MOCK", "true").lower() == "true"
     _sb_mode = os.environ.get("SANDBOX_MODE", "local")
     _gcp_proj = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    _sb_job   = os.environ.get("SANDBOX_JOB_NAME", "")
+    _sb_region = os.environ.get("SANDBOX_GCP_REGION") or os.environ.get("GOOGLE_CLOUD_LOCATION") or "not set"
+    _sb_job = os.environ.get("SANDBOX_JOB_NAME", "")
 
     _cfg_col1, _cfg_col2, _cfg_col3, _cfg_col4 = st.columns(4)
-    _cfg_col1.metric("Mode", "Mock" if _mock_on else _sb_mode.title())
-    _cfg_col2.metric("sandbox_task.py", "subprocess" if not _mock_on and _sb_mode == "local" else ("Cloud Run" if _sb_mode == "cloudrun" else "skipped"))
-    _cfg_col3.metric("GCP Project", _gcp_proj[:20] or "not set")
+    _cfg_col1.metric("Default Mode", "Mock" if _mock_on else _sb_mode.title())
+    _cfg_col2.metric("Local Engine", "available")
+    _cfg_col3.metric("GCP Project", _gcp_proj[:24] or "not set")
     _cfg_col4.metric("Cloud Run Job", _sb_job or "not set")
 
-    if _mock_on:
-        st.info(
-            "**Mock mode is ON** (`SANDBOX_MOCK=true`). Scores are derived deterministically "
-            "from skill names — no subprocess is launched. Set `SANDBOX_MOCK=false` in `.env` "
-            "to run the real skill execution engine.",
-            icon="⚠️",
-        )
+    sandbox_section = st.radio(
+        "Sandbox section",
+        ["Database Credentials", "Cloud Run Sandbox", "Approved Flows + Test + Deploy"],
+        horizontal=True,
+        key="sandbox_section",
+        label_visibility="collapsed",
+    )
 
-    st.divider()
-
-    # ── Two tabs: Run | History ───────────────────────────────────────────────
-    _tab_run, _tab_hist, _tab_snap = st.tabs(["▶ Run", "📋 History", "📦 Snapshot"])
-
-    # ── TAB: Run ─────────────────────────────────────────────────────────────
-    with _tab_run:
+    if sandbox_section == "Database Credentials":
         st.caption(
-            "Paste any flow YAML or load a preset. The skill pipeline is executed "
-            "against a live snapshot of companies and mentors from Neo4j."
+            "Detected databases come from the analyzed project graph. Credentials are kept in "
+            "this Streamlit session only and are used for read-only inspection."
         )
-
-        # ── Preset loader ─────────────────────────────────────────────────
-        _preset_opts = ["Custom YAML", "Default (semantic + filter)", "Random baseline only", "Full pipeline"]
-        _PRESETS = {
-            "Default (semantic + filter)": """flow_id: flow_test_semantic
-description: Semantic similarity + industry filter
-runs_on: srv_002
-steps:
-  - id: s1
-    skill: filter_by_industry_exact
-  - id: s2
-    skill: semantic_similarity
-""",
-            "Random baseline only": """flow_id: flow_test_random_baseline
-description: Random baseline — no skill intelligence
-runs_on: srv_002
-steps:
-  - id: s1
-    skill: random_shuffle
-""",
-            "Full pipeline": """flow_id: flow_test_full_pipeline
-description: Complete skill stack
-runs_on: srv_002
-steps:
-  - id: s1
-    skill: filter_by_industry_exact
-  - id: s2
-    skill: semantic_similarity
-  - id: s3
-    skill: pain_point_match
-  - id: s4
-    skill: score_by_expertise_depth
-""",
-        }
-
-        # Load from approved proposals
-        try:
-            _prop_rows = run_read(
-                "MATCH (f:Flow {status:'active'}) "
-                "RETURN coalesce(f.name,f.id) AS name, f.yaml_config AS cfg "
-                "ORDER BY f.id DESC LIMIT 10"
-            )
-            for _pr in _prop_rows:
-                try:
-                    _cy = _json_sb.loads(_pr["cfg"] or "{}")
-                    _fy = _cy.get("yaml", "")
-                    if _fy:
-                        _PRESETS[f"Active: {_pr['name']}"] = _fy
-                        _preset_opts.append(f"Active: {_pr['name']}")
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        _sel_preset = st.selectbox("Load preset", _preset_opts, key="sb_preset")
-        _init_yaml = _PRESETS.get(_sel_preset, default_sandbox_flow())
-
-        _col_yaml, _col_opts = st.columns([3, 1])
-        with _col_yaml:
-            _flow_yaml = st.text_area(
-                "Flow YAML",
-                value=st.session_state.get("sb_last_yaml", _init_yaml),
-                height=280,
-                key="sb_flow_yaml",
-            )
-        with _col_opts:
-            st.markdown("**Execution mode**")
-            _run_mode = st.radio("", ["mock", "local"], key="sb_run_mode",
-                help="mock = deterministic skill scoring, local = real sandbox_task.py subprocess")
-            _show_raw = st.checkbox("Show raw JSON", key="sb_show_raw")
-
-        if st.button("▶ Run Sandbox", type="primary", key="sb_run_btn", use_container_width=True):
-            st.session_state["sb_last_yaml"] = _flow_yaml
-            with st.spinner("Running sandbox…"):
-                _sb_result = run_sandbox_from_ui(_flow_yaml, _run_mode)
-            st.session_state["sb_last_result"] = _sb_result
-            st.rerun()
-
-        # ── Result display ────────────────────────────────────────────────
-        _last = st.session_state.get("sb_last_result")
-        if _last:
-            st.markdown("---")
-            st.markdown("### Result")
-            _status = _last.get("status", "unknown")
-            _metrics = _last.get("metrics", {}) or {}
-            _traces  = _last.get("traces", []) or []
-
-            # Headline metrics
-            def _sandbox_float(value: Any) -> float | None:
-                try:
-                    return float(value)
-                except (TypeError, ValueError):
-                    return None
-
-            _rm1, _rm2, _rm3, _rm4, _rm5 = st.columns(5)
-            _match  = _metrics.get("match_score")
-            _base   = _metrics.get("sandbox_baseline_score")
-            _match_f = _sandbox_float(_match)
-            _base_f = _sandbox_float(_base)
-            _improv = round(_match_f - _base_f, 2) if _match_f is not None and _base_f is not None else None
-            _rm1.metric("Status",    _status.upper(), delta="pass" if _status == "success" else None, delta_color="normal")
-            _rm2.metric("Match score",    _match if _match is not None else "—")
-            _rm3.metric("Baseline (random)", _base if _base is not None else "—")
-            _rm4.metric("Improvement", f"+{_improv}" if _improv is not None and _improv >= 0 else str(_improv) if _improv is not None else "—",
-                delta_color="normal" if _improv and _improv > 0 else "inverse")
-            _rm5.metric("Sample size", _metrics.get("sample_size", len(_traces)))
-
-            if _last.get("error_log"):
-                st.error(_last["error_log"])
-
-            # Score bar
-            if _match_f is not None and _base_f is not None:
-                _sb_chart = _pd_sb.DataFrame({
-                    "Flow score":    [_match_f],
-                    "Random baseline": [_base_f],
-                }).T.rename(columns={0: "Score"})
-                st.bar_chart(_sb_chart, color=["#44c29a"], height=160)
-
-            # Per-company trace breakdown
-            if _traces:
-                st.markdown("**Per-company match breakdown**")
-                _tr_df = _pd_sb.DataFrame([{
-                    "Company":   t.get("company_id", "?"),
-                    "Mentor":    t.get("mentor_id",  "?"),
-                    "Score":     t.get("simulated_outcome_score"),
-                    "Skills":    " → ".join(t.get("skills_applied", [])) if isinstance(t.get("skills_applied"), list) else str(t.get("skills_applied", "")),
-                    "Status":    t.get("status", ""),
-                } for t in _traces])
-                st.dataframe(
-                    _tr_df,
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Score": st.column_config.ProgressColumn(
-                            "Score", min_value=0, max_value=10, format="%.2f"
-                        )
-                    },
-                )
-
-            # Skill contribution per company (if multiple skills)
-            _all_skills = set()
-            for _t in _traces:
-                for _s in (_t.get("skills_applied") or []):
-                    _all_skills.add(_s)
-            if len(_all_skills) > 1:
-                st.caption(
-                    f"**Skills applied:** {' → '.join(sorted(_all_skills))}. "
-                    "Each skill transforms the candidate scores in sequence."
-                )
-
-            if _show_raw:
-                st.json(_last)
-
-    # ── TAB: History ─────────────────────────────────────────────────────────
-    with _tab_hist:
-        st.caption(
-            "Every sandbox execution logged to Neo4j as an ExecutionTrace node. "
-            "Score = proposed flow average. Baseline = random-shuffle score on the same snapshot."
-        )
-        _traces_df = load_traces()
-        if _traces_df.empty:
-            st.info("No sandbox history yet. Run the agent or use the Run tab to create traces.")
+        db_assets = load_project_database_assets(project["project_id"]) if project else pd.DataFrame()
+        if db_assets.empty:
+            st.info("No DataStore, DatabaseModel, or DatabaseTable nodes were detected for this project.")
         else:
-            import math as _mh
+            display_table(db_assets, height=220)
 
-            def _safe_f(v):
-                try: return float(v)
-                except: return None
-
-            _traces_df["score_f"]    = _traces_df["score"].apply(_safe_f)
-            _traces_df["baseline_f"] = _traces_df.get("baseline_score", _pd_sb.Series()).apply(_safe_f)
-            _traces_df["delta"]      = _traces_df.apply(
-                lambda r: round(r["score_f"] - r["baseline_f"], 2)
-                if r.get("score_f") is not None and r.get("baseline_f") is not None else None,
-                axis=1,
-            )
-
-            # Summary row
-            _th1, _th2, _th3, _th4 = st.columns(4)
-            _scores = _traces_df["score_f"].dropna()
-            _deltas = _traces_df["delta"].dropna()
-            _th1.metric("Total runs",      len(_traces_df))
-            _th2.metric("Avg score",        f"{_scores.mean():.2f}" if len(_scores) else "—")
-            _th3.metric("Best score",       f"{_scores.max():.2f}" if len(_scores) else "—")
-            _th4.metric("Avg improvement",  f"+{_deltas.mean():.2f}" if len(_deltas) else "—")
-
-            # Sparkline
-            if len(_scores) >= 3:
-                _sc = _traces_df[["timestamp","score_f","baseline_f"]].dropna(subset=["score_f"]).sort_values("timestamp").tail(30)
-                _sc = _sc.rename(columns={"score_f":"Proposed","baseline_f":"Baseline"})
-                _fallback_runs = pd.Series(
-                    _sc.reset_index(drop=True).index.astype(str),
-                    index=_sc.index,
-                )
-                _sc["run"] = _sc["timestamp"].astype("string").str[5:16].fillna(_fallback_runs)
-                st.line_chart(_sc.set_index("run")[["Proposed","Baseline"]], height=160, color=["#44c29a","#70a9ff"])
-
-            # Table with skills column highlighted
-            _show_cols = [c for c in ["timestamp","flow_name","status","score","baseline_score","delta","skills_applied","trace_id"] if c in _traces_df.columns]
-            st.dataframe(
-                _traces_df[_show_cols],
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "score": st.column_config.ProgressColumn("score", min_value=0, max_value=10, format="%.2f"),
-                    "baseline_score": st.column_config.NumberColumn("baseline", format="%.2f"),
-                    "delta": st.column_config.NumberColumn("Δ", format="%.2f"),
-                },
-                height=360,
-            )
-
-    # ── TAB: Snapshot ─────────────────────────────────────────────────────────
-    with _tab_snap:
-        st.caption(
-            "The data snapshot the sandbox uses: companies and mentors queried from "
-            "Neo4j Graph A. Secret fields (passwords, tokens, keys) are stripped before "
-            "the snapshot reaches the sandbox subprocess."
+        st.markdown("**Connection credentials**")
+        db_names = db_assets["target"].astype(str).tolist() if not db_assets.empty else ["Manual database"]
+        selected_db = st.selectbox("Database target", db_names, key="sb_db_target")
+        conn_uri = st.text_input(
+            "SQLAlchemy connection URI",
+            value=st.session_state.get(f"sb_db_uri_{selected_db}", ""),
+            type="password",
+            key=f"sb_db_uri_input_{selected_db}",
+            placeholder="postgresql+psycopg://user:password@host:5432/db or sqlite:////absolute/path.db",
         )
-        try:
-            _snap_companies = run_read(
-                "MATCH (c:Company) "
-                "RETURN c.id AS id, c.name AS name, c.industry AS industry, "
-                "       c.description AS description, c.pain_points AS pain_points "
-                "LIMIT 20"
-            )
-            _snap_mentors = run_read(
-                "MATCH (m:Mentor) "
-                "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise, "
-                "       m.description AS description "
-                "LIMIT 15"
-            )
-            _sc1, _sc2 = st.columns(2)
-            with _sc1:
-                st.markdown(f"**Companies** ({len(_snap_companies)} in snapshot)")
-                if _snap_companies:
-                    st.dataframe(_pd_sb.DataFrame(_snap_companies), hide_index=True, use_container_width=True, height=280)
+        sample_query = st.text_area(
+            "Optional read-only sample query",
+            value="",
+            height=90,
+            key=f"sb_db_query_{selected_db}",
+            placeholder="SELECT * FROM your_table LIMIT 20",
+        )
+        row_limit = st.slider("Snapshot row preview limit", 1, 100, 20, key=f"sb_db_limit_{selected_db}")
+        if st.button("Test Connection + Build Read-Only Snapshot", type="primary", key=f"sb_db_test_{selected_db}"):
+            st.session_state[f"sb_db_uri_{selected_db}"] = conn_uri
+            if not conn_uri.strip():
+                st.warning("Enter a connection URI first.")
+            else:
+                with st.spinner("Inspecting database schema with read-only connector..."):
+                    st.session_state["sb_db_snapshot_result"] = inspect_database_connection(
+                        conn_uri,
+                        sample_query,
+                        row_limit,
+                    )
+
+        db_snapshot = st.session_state.get("sb_db_snapshot_result")
+        if db_snapshot:
+            if db_snapshot.get("status") == "success":
+                st.success(f"Read-only snapshot created from {db_snapshot.get('connection')}")
+                meta = db_snapshot.get("metadata") or {}
+                m1, m2 = st.columns(2)
+                m1.metric("Tables", meta.get("table_count", 0))
+                m2.metric("Preview Rows", meta.get("row_preview_count", 0))
+                schema = db_snapshot.get("schema") or []
+                rows = db_snapshot.get("rows") or []
+                if schema:
+                    st.markdown("**Schema snapshot**")
+                    display_table(pd.DataFrame(schema), height=260)
+                if rows:
+                    st.markdown("**Row preview**")
+                    display_table(pd.DataFrame(rows), height=260)
+            else:
+                st.error(db_snapshot.get("error") or "Database connection failed.")
+
+    elif sandbox_section == "Cloud Run Sandbox":
+        st.caption("Cloud Run configuration for the remote sandbox job.")
+        configured = bool(_gcp_proj and _sb_job and _sb_region != "not set")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Configured", "Yes" if configured else "No")
+        c2.metric("Project", _gcp_proj or "not set")
+        c3.metric("Region", _sb_region)
+        c4.metric("Job", _sb_job or "not set")
+        job_url = cloud_run_job_url()
+        if job_url:
+            st.link_button("Open Cloud Run Job", job_url, use_container_width=True)
+        else:
+            st.warning("Set GOOGLE_CLOUD_PROJECT, SANDBOX_GCP_REGION, and SANDBOX_JOB_NAME to open the Cloud Run job.")
+
+        st.markdown("**Cloud Run smoke test**")
+        st.caption("Runs the default sandbox flow through the configured Cloud Run job and reports the result.")
+        if st.button("Test Cloud Run Sandbox", type="primary", key="sb_cloud_test", disabled=not configured):
+            with st.spinner("Triggering Cloud Run sandbox job..."):
+                st.session_state["sb_cloud_test_result"] = run_sandbox_from_ui(default_sandbox_flow(), "cloudrun")
+        cloud_result = st.session_state.get("sb_cloud_test_result")
+        if cloud_result:
+            if cloud_result.get("status") == "success":
+                st.success("Cloud Run sandbox completed successfully.")
+                metrics = cloud_result.get("metrics") or {}
+                cm1, cm2, cm3 = st.columns(3)
+                cm1.metric("Score", metrics.get("match_score", "—"))
+                cm2.metric("Baseline", metrics.get("sandbox_baseline_score", "—"))
+                cm3.metric("Latency ms", metrics.get("latency_ms", "—"))
+            else:
+                st.error(cloud_result.get("error_log") or "Cloud Run sandbox failed.")
+                if cloud_result.get("infra_error"):
+                    st.json(cloud_result["infra_error"])
+
+    elif sandbox_section == "Approved Flows + Test + Deploy":
+        st.caption(
+            "Approved flows can be tested in the sandbox. Real-code deployment is only enabled "
+            "when the approved flow contains concrete code patches."
+        )
+        flows = load_flows()
+        if not flows.empty:
+            flows = flows[flows["status"].fillna("").isin(["active", "approved"])].copy()
+            if project:
+                project_flows = flows[flows["project_id"].fillna("") == project["project_id"]].copy()
+                if not project_flows.empty:
+                    flows = project_flows
                 else:
-                    st.info("No Company nodes. Run `ecolink-graph/ingest.py` to seed data.")
-            with _sc2:
-                st.markdown(f"**Mentors** ({len(_snap_mentors)} in snapshot)")
-                if _snap_mentors:
-                    st.dataframe(_pd_sb.DataFrame(_snap_mentors), hide_index=True, use_container_width=True, height=280)
-                else:
-                    st.info("No Mentor nodes. Run `ecolink-graph/ingest.py` to seed data.")
-        except Exception as _sne:
-            st.error(f"Could not load snapshot data: {_sne}")
+                    st.info("No approved flows are tied to the selected project, so all approved/active flows are shown.")
+        if flows.empty:
+            st.info("No approved or active flows are available for this project yet.")
+        else:
+            _mode = st.selectbox("Sandbox mode for flow tests", ["mock", "local", "cloudrun"], key="sb_flow_test_mode")
+            display_rows = flows[["id", "name", "status", "avg_score", "project_id", "business_flow_id"]].copy()
+            display_rows["code_patches"] = flows["yaml_config"].apply(lambda raw: len(code_patches_from_config(raw)))
+            display_table(display_rows, height=220)
+
+            for _, flow in flows.iterrows():
+                flow_id = str(flow["id"])
+                flow_name = str(flow.get("name") or flow_id)
+                flow_yaml = flow_yaml_from_config(flow.get("yaml_config"))
+                patches = code_patches_from_config(flow.get("yaml_config"))
+                test_key = f"sb_flow_test_result_{flow_id}"
+                deploy_key = f"sb_flow_deploy_result_{flow_id}"
+                with st.expander(f"{flow_name} · {flow.get('status')} · {len(patches)} code patch(es)", expanded=False):
+                    fc1, fc2, fc3 = st.columns(3)
+                    fc1.metric("Flow ID", flow_id)
+                    fc2.metric("Score", flow.get("avg_score") or "—")
+                    fc3.metric("BusinessFlow", flow.get("business_flow_id") or "—")
+                    if flow.get("justification"):
+                        st.info(flow["justification"])
+                    if flow_yaml:
+                        with st.expander("View flow YAML", expanded=False):
+                            st.code(flow_yaml, language="yaml")
+                    else:
+                        st.warning("This approved flow does not have stored YAML, so it cannot be sandbox-tested.")
+
+                    if st.button("Test in Sandbox", key=f"sb_test_{flow_id}", disabled=not bool(flow_yaml)):
+                        with st.spinner("Running approved flow in sandbox..."):
+                            st.session_state[test_key] = run_sandbox_from_ui(flow_yaml, _mode)
+
+                    result = st.session_state.get(test_key)
+                    passed = bool(result and result.get("status") == "success")
+                    if result:
+                        metrics = result.get("metrics") or {}
+                        if passed:
+                            st.success("Sandbox test passed.")
+                        else:
+                            st.error(result.get("error_log") or "Sandbox test failed.")
+                        rc1, rc2, rc3 = st.columns(3)
+                        rc1.metric("Score", metrics.get("match_score", "—"))
+                        rc2.metric("Baseline", metrics.get("sandbox_baseline_score", "—"))
+                        rc3.metric("Sample", metrics.get("sample_size", len(result.get("traces") or [])))
+
+                    st.markdown("**Deploy to real code**")
+                    if not patches:
+                        st.warning(
+                            "Deployment is blocked because this flow contains workflow YAML only. "
+                            "Generate or approve a flow with `modify_code` actions and `code_patch` payloads first."
+                        )
+                    else:
+                        patch_preview = [
+                            {
+                                "file_path": p.get("file_path"),
+                                "description": p.get("description"),
+                                "old_code_chars": len(str(p.get("old_code") or "")),
+                                "new_code_chars": len(str(p.get("new_code") or "")),
+                            }
+                            for p in patches
+                        ]
+                        display_table(pd.DataFrame(patch_preview), height=160)
+                        repo_root = str(project.get("repo_path") or "") if project else ""
+                        confirm = st.text_input(
+                            f"Type DEPLOY {flow_id} to apply patches to {repo_root}",
+                            key=f"sb_deploy_confirm_{flow_id}",
+                        )
+                        deploy_disabled = not passed or confirm.strip() != f"DEPLOY {flow_id}"
+                        if st.button("Deploy to Real Code", type="primary", key=f"sb_deploy_{flow_id}", disabled=deploy_disabled):
+                            st.session_state[deploy_key] = apply_code_patches_to_repo(repo_root, patches)
+
+                        deploy_result = st.session_state.get(deploy_key)
+                        if deploy_result:
+                            if deploy_result.get("status") == "success":
+                                st.success(f"Applied {len(deploy_result.get('applied', []))} patch(es) to real source code.")
+                                display_table(pd.DataFrame(deploy_result.get("applied", [])), height=160)
+                            else:
+                                st.error(deploy_result.get("error") or "Deployment failed.")

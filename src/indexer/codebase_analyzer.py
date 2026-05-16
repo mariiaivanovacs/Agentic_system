@@ -122,18 +122,71 @@ RISK_HINT_RE = re.compile(r"\b(eval|exec|private[_-]?key|secret|password|token|d
 ACTION_VERBS = {
     "add",
     "approve",
+    "authenticate",
+    "ban",
+    "build",
+    "calculate",
     "connect",
     "create",
     "delete",
     "donate",
+    "download",
+    "fetch",
+    "filter",
+    "find",
+    "generate",
     "get",
+    "handle",
+    "inspect",
+    "load",
     "list",
     "login",
+    "match",
+    "parse",
+    "process",
+    "purge",
+    "query",
+    "read",
     "register",
+    "reset",
+    "run",
+    "save",
+    "score",
+    "search",
+    "select",
+    "send",
+    "set",
     "submit",
+    "sync",
+    "test",
+    "unban",
     "update",
+    "upload",
+    "validate",
+    "verify",
 }
-WRITE_ACTION_VERBS = {"add", "approve", "connect", "create", "delete", "donate", "register", "submit", "update"}
+WRITE_ACTION_VERBS = {
+    "add",
+    "approve",
+    "ban",
+    "connect",
+    "create",
+    "delete",
+    "donate",
+    "generate",
+    "process",
+    "purge",
+    "register",
+    "reset",
+    "save",
+    "send",
+    "set",
+    "submit",
+    "sync",
+    "unban",
+    "update",
+    "upload",
+}
 FLOW_STOPWORDS = {
     "api",
     "app",
@@ -235,7 +288,7 @@ def _tokens(text: str) -> list[str]:
     return [token for token in raw if token and token not in FLOW_STOPWORDS]
 
 
-def _flow_signature(text: str) -> tuple[str, str, str] | None:
+def _flow_signature(text: str, *, allow_fallback: bool = False) -> tuple[str, str, str] | None:
     tokens = _tokens(text)
     for index, token in enumerate(tokens):
         if token not in ACTION_VERBS:
@@ -248,6 +301,11 @@ def _flow_signature(text: str) -> tuple[str, str, str] | None:
             nouns = ["item"]
         display = " ".join([token, *nouns]).title()
         return _slug(display), display, token
+    if allow_fallback and tokens:
+        meaningful = [token for token in tokens if len(token) > 2][:4]
+        if meaningful:
+            display = " ".join(meaningful).title()
+            return _slug(display), display, meaningful[0]
     return None
 
 
@@ -583,10 +641,13 @@ class CodebaseAnalyzer(BaseIndexer):
         for node in nodes.values():
             if node.label not in candidate_labels:
                 continue
-            signature = _flow_signature(f"{node.name} {node.source_path}")
+            allow_fallback = node.label in {"Route", "Function", "Service", "Workflow"}
+            signature = _flow_signature(f"{node.name} {node.source_path}", allow_fallback=allow_fallback)
             if not signature:
                 continue
             key, display_name, verb = signature
+            if node.label in {"Route", "Function", "Service"}:
+                key = _slug(f"{display_name} {node.source_path} {node.name}")
             candidate_sources[key].add(node.source_path)
             flow_names[key] = display_name
             flow_verbs[key] = verb
