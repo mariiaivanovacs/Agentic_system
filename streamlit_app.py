@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import pandas as pd
 import requests
@@ -20,13 +21,24 @@ from dotenv import load_dotenv
 
 from src.agents.tools import (
     activate_proposal,
+    approve_architecture_proposal,
     approve_skill_proposal,
+    create_architecture_proposal,
+    list_architecture_proposals,
     log_execution_trace,
     query_graph,
     reject_proposal,
+    reject_architecture_proposal,
     reject_skill_proposal,
     simulate_flow,
     verify_neo4j_connection,
+)
+from src.agents.architecture_sandbox import (
+    build_architecture_proposal,
+    build_database_only_architecture_proposal,
+    discover_database_sources,
+    probe_database_source,
+    resolve_project_source_path,
 )
 from src.indexer.web_indexer import crawl as crawl_website
 from src.indexer.codebase_analyzer import CodebaseAnalyzer
@@ -249,7 +261,11 @@ st.markdown(
 
 
 def run_read(cypher: str) -> list[dict[str, Any]]:
-    return query_graph.invoke({"cypher_query": cypher})
+    try:
+        return query_graph.invoke({"cypher_query": cypher})
+    except Exception as exc:
+        st.session_state["neo4j_last_read_error"] = str(exc)
+        return []
 
 
 def df(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -705,6 +721,26 @@ def load_storage_summary(project_id: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=20)
+def load_exact_storage_sources(project_id: str) -> pd.DataFrame:
+    return df(
+        run_read(
+            f"""
+            MATCH (ds:DataStore)
+            WHERE ds.project_id = {json.dumps(project_id)}
+            OPTIONAL MATCH (f:File)-[:FILE_USES_DATASTORE]->(ds)
+            RETURN ds.id AS datastore_id,
+                   ds.name AS database_or_storage,
+                   ds.storage_type AS storage_type,
+                   ds.source_path AS evidence_file,
+                   collect(DISTINCT f.name)[0..6] AS linked_files,
+                   ds.confidence AS confidence
+            ORDER BY database_or_storage, evidence_file
+            """
+        )
+    )
+
+
+@st.cache_data(ttl=20)
 def load_project_relationship_counts(project_id: str | None = None) -> pd.DataFrame:
     project_filter = (
         f"WHERE coalesce(a.project_id, b.project_id) = {json.dumps(project_id)}"
@@ -744,6 +780,71 @@ def run_codebase_analysis(repo_path: str, project_name: str | None = None, proje
         "relationships": len(system.code_relationships),
         "skills": len(system.skills),
     }
+
+
+@st.cache_data(ttl=20)
+def load_architecture_proposals(project_id: str | None = None) -> pd.DataFrame:
+    return df(list_architecture_proposals(project_id=project_id))
+
+
+def render_architecture_proposal(payload: dict[str, Any]) -> None:
+    summary = payload.get("summary", {})
+    validation = payload.get("validation", {})
+    code_arch = payload.get("code_architecture", {})
+    sandbox = payload.get("sandbox", {})
+    database_error = payload.get("database_error")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Code Nodes", summary.get("code_nodes", 0))
+    c2.metric("Connectors", summary.get("connectors", 0))
+    c3.metric("Rules", summary.get("rules", 0))
+    c4.metric("Test", validation.get("status", "unknown"))
+
+    st.markdown("**Sandbox copy**")
+    database_copy = sandbox.get("database_copy") or {"copied": False, "message": "No database copy was created."}
+    st.json(
+        {
+            "status": (
+                "Project was copied into an isolated sandbox."
+                if sandbox.get("project_copy")
+                else "Database-only sandbox; project source was not copied."
+            ),
+            "project_copy": sandbox.get("project_copy") or "Not copied",
+            "database": database_copy,
+            "excluded": sandbox.get("excluded", []),
+            "credential_refs": payload.get("credential_refs", []),
+        },
+        expanded=False,
+    )
+    if database_error:
+        st.error(f"Database connection/copy failed: {database_error}")
+        raw_error = database_copy.get("raw_error") if isinstance(database_copy, dict) else None
+        if raw_error and raw_error != database_error:
+            with st.expander("Technical database error"):
+                st.code(raw_error, language="text")
+    if payload.get("limitations"):
+        for limitation in payload["limitations"]:
+            st.warning(limitation)
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Detected architecture**")
+        st.json(code_arch.get("counts", {}), expanded=False)
+        if payload.get("database_connectors"):
+            st.markdown("**Database connectors**")
+            display_table(pd.DataFrame(payload["database_connectors"]), height=180)
+    with right:
+        st.markdown("**Rules for communication**")
+        display_table(pd.DataFrame(payload.get("communication_rules", [])), height=260)
+
+    st.markdown("**Validation command**")
+    st.code(validation.get("command") or "No command detected", language="text")
+    if validation.get("stdout"):
+        with st.expander("Validation stdout"):
+            st.code(validation["stdout"], language="text")
+    if validation.get("stderr"):
+        with st.expander("Validation stderr"):
+            st.code(validation["stderr"], language="text")
 
 
 @st.cache_data(ttl=20)
@@ -2621,6 +2722,11 @@ if page != "Project Review" and not project_ready:
 
 
 overview = {} if neo4j_error else load_overview()
+if st.session_state.get("neo4j_last_read_error"):
+    st.warning(
+        "Neo4j read failed during page loading. The database may be paused, unreachable, "
+        "or blocked by the network. Retry after the connection is available."
+    )
 
 # ── Persistent proposal notification banner ───────────────────────────────────
 # Shown on every page (except Chat) so the admin never misses a pending proposal.
@@ -2708,6 +2814,21 @@ if page == "Project Review":
         st.markdown(f"**Connected project:** `{project.get('name')}`")
         st.markdown(f"**Repository path:** `{project.get('repo_path')}`")
         st.markdown(f"**Last scan:** `{project.get('last_scan_id') or 'not scanned yet'}`")
+        project_path_state = resolve_project_source_path(str(project.get("repo_path") or ""))
+        if project_path_state.get("exists"):
+            st.success("Local source folder is readable. Sandbox copy can use this project.")
+        else:
+            st.warning(
+                "Local source folder is not readable on this machine. The storage, flows, "
+                "and architecture below are cached from the last Neo4j scan; they are not "
+                "enough for a new sandbox copy until the local path is repaired."
+            )
+            with st.expander("Checked project path candidates"):
+                checked_paths = pd.DataFrame(project_path_state.get("checked", []))
+                if checked_paths.empty:
+                    st.caption("No path candidates were available.")
+                else:
+                    display_table(checked_paths, height=160)
     else:
         st.info("No project is connected yet. Approve a local repository before the graph and agents become available.")
 
@@ -2729,7 +2850,22 @@ if page == "Project Review":
         key="project_repo_path",
     )
     if st.button("Approve & Analyze Codebase", type="primary", key="approve_project_analysis"):
-        approved = approve_project(repo_path, project_name)
+        repo_resolution = resolve_project_source_path(repo_path)
+        if not repo_resolution.get("exists"):
+            st.error(
+                "That local codebase path cannot be opened on this machine. Choose the real "
+                "local project folder before approving analysis."
+            )
+            with st.expander("Checked project path candidates"):
+                checked_paths = pd.DataFrame(repo_resolution.get("checked", []))
+                if checked_paths.empty:
+                    st.caption("No path candidates were available.")
+                else:
+                    display_table(checked_paths, height=160)
+            st.stop()
+
+        analysis_repo_path = str(repo_resolution.get("resolved_path") or repo_path)
+        approved = approve_project(analysis_repo_path, project_name)
         project_id = approved["project_id"]
         publish_event(
             source="ui",
@@ -2744,12 +2880,12 @@ if page == "Project Review":
             source="indexer",
             event_type="started",
             title="Codebase analysis started after approval",
-            detail=repo_path,
-            payload={"project_id": project_id, "repo_path": repo_path},
+            detail=analysis_repo_path,
+            payload={"project_id": project_id, "repo_path": analysis_repo_path},
         )
         try:
             with st.spinner("Permission approved. Analyzing codebase and writing software graph..."):
-                result = run_codebase_analysis(repo_path, project_name, project_id)
+                result = run_codebase_analysis(analysis_repo_path, project_name, project_id)
             mark_project_status(project_id, "analysis_complete", result["scan_id"])
             publish_event(
                 source="indexer",
@@ -2769,7 +2905,7 @@ if page == "Project Review":
                 event_type="error",
                 title="Codebase analysis failed after approval",
                 detail=str(exc),
-                payload={"project_id": project_id, "repo_path": repo_path},
+                payload={"project_id": project_id, "repo_path": analysis_repo_path},
             )
             raise
 
@@ -4285,6 +4421,313 @@ elif page == "Retry Inspector":
         "context is recorded here. Use this to understand why the agent looped and what "
         "it was told to fix before regenerating."
     )
+
+    st.markdown("### Architecture Sandbox")
+    st.caption(
+        "Copy the project and optional database into an isolated sandbox, analyze the "
+        "data/connectors, test the copied project, then approve the tested architecture."
+    )
+
+    if project:
+        with st.expander("Create tested architecture proposal", expanded=True):
+            proposal_repo_path = str(project.get("repo_path") or "")
+            path_resolution = resolve_project_source_path(proposal_repo_path)
+            resolved_repo_path = path_resolution.get("resolved_path") or proposal_repo_path
+            project_source_ready = bool(path_resolution.get("exists"))
+            indexed_storage = load_exact_storage_sources(project["project_id"])
+            db_detection = discover_database_sources(resolved_repo_path) if project_source_ready else {
+                "selected_source": "",
+                "detected_sources": [],
+                "graph_credentials": discover_database_sources("__missing_project_source__").get("graph_credentials", []),
+            }
+            proposal_db_source = db_detection.get("selected_source", "")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Project Source", "Ready" if project_source_ready else "Missing")
+            c2.metric("Database Sources", 0 if not project_source_ready else len(db_detection.get("detected_sources", [])) + len(indexed_storage))
+            c3.metric("Credential Refs", len(db_detection.get("graph_credentials", [])))
+            if project_source_ready:
+                st.caption("Using the repository path saved in Project Review.")
+
+            if not project_source_ready:
+                st.error(
+                    "Retry Inspector read the repository path saved in Project Review, but this "
+                    "machine cannot open that folder. The sandbox cannot copy the project until "
+                    "Project Review points to a local folder that exists here."
+                )
+                st.info(
+                    "Project Review may still show storage and flows because those are cached "
+                    "Neo4j facts from the last successful scan. Cached facts can explain the old "
+                    "architecture, but they cannot be copied or tested in a new sandbox."
+                )
+                with st.expander("Checked project path candidates"):
+                    checked_paths = pd.DataFrame(path_resolution.get("checked", []))
+                    if checked_paths.empty:
+                        st.caption("No path candidates were available.")
+                    else:
+                        display_table(checked_paths, height=180)
+                if not indexed_storage.empty:
+                    with st.expander("Last-scan database evidence (stale, not usable for sandbox)"):
+                        stale_rows = indexed_storage.copy()
+                        display_table(
+                            stale_rows[
+                                [
+                                    "database_or_storage",
+                                    "storage_type",
+                                    "evidence_file",
+                                    "linked_files",
+                                    "confidence",
+                                ]
+                            ],
+                            height=180,
+                        )
+            else:
+                graph_database_sources = []
+                if not indexed_storage.empty:
+                    graph_database_sources = [
+                        {
+                            "kind": "indexed_project_storage",
+                            "credential_ref": "project graph",
+                            "source": row.get("database_or_storage"),
+                            "value": row.get("storage_type") or "detected storage",
+                            "evidence_file": row.get("evidence_file"),
+                            "linked_files": row.get("linked_files"),
+                            "confidence": row.get("confidence"),
+                        }
+                        for _, row in indexed_storage.iterrows()
+                    ]
+                runtime_sources = db_detection.get("detected_sources", [])
+                visible_sources = [
+                    {
+                        "kind": item.get("kind"),
+                        "credential_ref": item.get("credential_ref") or "local file",
+                        "source": item.get("source"),
+                        "value": item.get("display_value"),
+                        "evidence_file": "runtime source",
+                        "linked_files": [],
+                        "confidence": None,
+                    }
+                    for item in runtime_sources
+                ] + graph_database_sources
+
+                st.markdown("**Detected database and storage evidence**")
+                if visible_sources:
+                    display_table(pd.DataFrame(visible_sources), height=180)
+                else:
+                    st.info(
+                        "No runtime database credential, local database file, or indexed project storage "
+                        "was detected. The proposal will still analyze project connector boundaries."
+                    )
+
+            graph_credentials = db_detection.get("graph_credentials", [])
+            if graph_credentials:
+                with st.expander("Graph credential references"):
+                    display_table(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "credential_ref": item.get("credential_ref"),
+                                    "value": item.get("display_value"),
+                                }
+                                for item in graph_credentials
+                            ]
+                        ),
+                        height=140,
+                    )
+
+            external_db_source = ""
+            external_credential_ref = ""
+            with st.expander("External database credentials", expanded=not project_source_ready):
+                use_external_db = st.checkbox(
+                    "Use external database credentials for this sandbox run",
+                    value=not project_source_ready,
+                    key="retry_external_db_enabled",
+                )
+                if use_external_db:
+                    external_credential_ref = st.text_input(
+                        "Credential reference name",
+                        value=f"external_db_{str(project.get('name') or 'project').lower().replace(' ', '_')}",
+                        key="retry_external_db_ref",
+                    ).strip()
+                    input_mode = st.radio(
+                        "Connection input",
+                        ["Connection fields", "SQLAlchemy URL"],
+                        horizontal=True,
+                        key="retry_external_db_mode",
+                    )
+                    if input_mode == "SQLAlchemy URL":
+                        external_db_source = st.text_input(
+                            "SQLAlchemy database URL",
+                            value="",
+                            type="password",
+                            placeholder="postgresql+psycopg://user:password@host:5432/database",
+                            key="retry_external_db_url",
+                        ).strip()
+                    else:
+                        db_kind = st.selectbox(
+                            "Database type",
+                            ["postgresql+pg8000", "mysql+pymysql", "sqlite"],
+                            key="retry_external_db_kind",
+                        )
+                        if db_kind == "sqlite":
+                            sqlite_path = st.text_input(
+                                "SQLite file path",
+                                value="",
+                                key="retry_external_sqlite_path",
+                            ).strip()
+                            if sqlite_path:
+                                external_db_source = sqlite_path
+                        else:
+                            default_port = "5432" if db_kind.startswith("postgresql") else "3306"
+                            host = st.text_input("Host", value="", key="retry_external_db_host").strip()
+                            port = st.text_input("Port", value=default_port, key="retry_external_db_port").strip()
+                            database_name = st.text_input("Database name", value="", key="retry_external_db_name").strip()
+                            username = st.text_input("Username", value="", key="retry_external_db_user").strip()
+                            password = st.text_input("Password", value="", type="password", key="retry_external_db_password")
+                            if host and port and database_name and username:
+                                external_db_source = (
+                                    f"{db_kind}://{quote_plus(username)}:{quote_plus(password)}"
+                                    f"@{host}:{port}/{quote_plus(database_name)}"
+                                )
+                    st.caption(
+                        "The password is used only for this sandbox run. The proposal stores "
+                        "the credential reference name, not the secret value."
+                    )
+
+            replacement_mode = st.radio(
+                "Apply mode after approval",
+                ["merge", "replace"],
+                horizontal=True,
+                key="retry_arch_replacement_mode",
+            )
+
+            effective_db_source = external_db_source or proposal_db_source
+            credential_refs = [external_credential_ref] if external_db_source and external_credential_ref else []
+            can_run_architecture_sandbox = project_source_ready or bool(external_db_source)
+            if external_db_source:
+                st.caption("Database connection will be tested before any architecture proposal is saved.")
+            button_label = (
+                "Copy, Analyze & Test In Sandbox"
+                if project_source_ready
+                else "Analyze External Database In Sandbox"
+            )
+            if st.button(
+                button_label,
+                type="primary",
+                key="retry_arch_run",
+                disabled=not can_run_architecture_sandbox,
+            ):
+                with st.spinner("Creating sandbox copy, analyzing project/database, and running validation..."):
+                    try:
+                        if effective_db_source:
+                            db_probe = probe_database_source(effective_db_source)
+                            if not db_probe.get("ok"):
+                                st.error(db_probe.get("hint") or db_probe.get("error") or "Database connection failed.")
+                                with st.expander("Database connection details"):
+                                    st.json(db_probe, expanded=True)
+                                publish_event(
+                                    source="ui",
+                                    target="sandbox",
+                                    event_type="error",
+                                    title="Database connection failed",
+                                    detail=db_probe.get("hint") or db_probe.get("error") or "Database connection failed.",
+                                    payload={"project_id": project["project_id"], "database_probe": db_probe},
+                                )
+                                st.stop()
+                        if project_source_ready:
+                            payload = build_architecture_proposal(
+                                source_path=resolved_repo_path,
+                                project_id=project["project_id"],
+                                project_name=str(project.get("name") or "Project"),
+                                sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
+                                database_source=effective_db_source,
+                                validation_command=None,
+                                replacement_mode=replacement_mode,
+                                credential_refs=credential_refs,
+                            )
+                        else:
+                            payload = build_database_only_architecture_proposal(
+                                project_id=project["project_id"],
+                                project_name=str(project.get("name") or "Project"),
+                                sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
+                                database_source=effective_db_source,
+                                replacement_mode=replacement_mode,
+                                credential_refs=credential_refs,
+                            )
+                        proposal_id = create_architecture_proposal(payload)
+                        publish_event(
+                            source="ui",
+                            target="sandbox",
+                            event_type="result",
+                            title="Architecture sandbox proposal tested",
+                            detail=f"{proposal_id}: {payload['validation']['status']}",
+                            payload={
+                                "proposal_id": proposal_id,
+                                "project_id": project["project_id"],
+                                "test_status": payload["validation"]["status"],
+                                "replacement_mode": replacement_mode,
+                            },
+                        )
+                        clear_data_cache()
+                        if payload["validation"]["status"] == "success":
+                            st.success("Architecture proposal tested successfully and is ready for approval.")
+                        else:
+                            st.warning("Architecture proposal was created, but validation did not pass yet.")
+                        render_architecture_proposal(payload)
+                    except Exception as exc:
+                        publish_event(
+                            source="ui",
+                            target="sandbox",
+                            event_type="error",
+                            title="Architecture sandbox proposal failed",
+                            detail=str(exc),
+                            payload={"project_id": project["project_id"], "repo_path": proposal_repo_path},
+                        )
+                        st.error(str(exc))
+
+        proposals_df = load_architecture_proposals(project["project_id"])
+        st.markdown("### Tested Architecture Approvals")
+        if proposals_df.empty:
+            st.info("No architecture proposals yet. Create one above after the project analysis is complete.")
+        else:
+            for _, row in proposals_df.iterrows():
+                title = f"{row['id']} - {str(row.get('status') or 'unknown').upper()}"
+                with st.expander(title, expanded=row.get("status") == "proposed"):
+                    try:
+                        payload = json.loads(row.get("payload_json") or "{}")
+                    except json.JSONDecodeError:
+                        payload = {}
+                    st.caption(
+                        f"Mode: {row.get('replacement_mode')} | "
+                        f"Test: {row.get('test_status')} | "
+                        f"Created: {row.get('created_at')}"
+                    )
+                    if payload:
+                        render_architecture_proposal(payload)
+                    if row.get("status") == "proposed":
+                        if row.get("tested"):
+                            st.success("Changes are tested. Admin can approve this architecture.")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                if st.button("Approve Tested Architecture", type="primary", key=f"arch_approve_{row['id']}"):
+                                    approve_architecture_proposal(row["id"])
+                                    publish_event(
+                                        source="ui",
+                                        target="graph",
+                                        event_type="approved",
+                                        title="Tested architecture approved",
+                                        detail=row["id"],
+                                        payload={"proposal_id": row["id"], "project_id": project["project_id"]},
+                                    )
+                                    clear_data_cache()
+                                    st.rerun()
+                            with c2:
+                                if st.button("Reject", key=f"arch_reject_{row['id']}"):
+                                    reject_architecture_proposal(row["id"], "Rejected in Retry Inspector")
+                                    clear_data_cache()
+                                    st.rerun()
+                        else:
+                            st.warning("Approval is blocked until sandbox validation succeeds.")
 
     all_events = read_events(limit=500)
 
