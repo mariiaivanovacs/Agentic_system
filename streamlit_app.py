@@ -221,6 +221,9 @@ def load_flows() -> pd.DataFrame:
                    collect(DISTINCT sk.name) AS skills,
                    cn.name AS connector,
                    sv.name AS server,
+                   f.project_id AS project_id,
+                   f.business_flow_id AS business_flow_id,
+                   f.justification AS justification,
                    f.yaml_config AS yaml_config
             ORDER BY status, avg_score DESC, id
             """
@@ -465,6 +468,7 @@ def load_projects() -> pd.DataFrame:
             OPTIONAL MATCH (f)-[:FILE_USES_DATASTORE]->(ds:DataStore)
             OPTIONAL MATCH (f)-[:FILE_USES_INTEGRATION]->(it:Integration)
             OPTIONAL MATCH (f)-[:RISK_FOUND_IN]->(risk:Risk)
+            OPTIONAL MATCH (p)-[:HAS_BUSINESS_FLOW]->(bf:BusinessFlow)
             RETURN p.id AS project_id,
                    p.name AS name,
                    p.repo_path AS repo_path,
@@ -479,7 +483,8 @@ def load_projects() -> pd.DataFrame:
                    0 AS models,
                    count(DISTINCT ds) AS datastores,
                    count(DISTINCT it) AS integrations,
-                   count(DISTINCT risk) AS risks
+                   count(DISTINCT risk) AS risks,
+                   count(DISTINCT bf) AS business_flows
             ORDER BY updated_at DESC
             """
         )
@@ -500,7 +505,7 @@ def load_code_nodes(project_id: str | None = None) -> pd.DataFrame:
             WHERE any(label IN labels(n) WHERE label IN [
                 'Repository', 'File', 'Route', 'Service', 'Function',
                 'DatabaseModel', 'DatabaseTable', 'DataStore', 'Entity', 'Workflow',
-                'Integration', 'Artifact', 'Risk'
+                'BusinessFlow', 'FlowStep', 'Integration', 'Artifact', 'Risk'
             ])
             {project_filter}
             RETURN labels(n)[0] AS type,
@@ -515,6 +520,43 @@ def load_code_nodes(project_id: str | None = None) -> pd.DataFrame:
                    n.stakeholder_description AS stakeholder_description
             ORDER BY type, source_path, name
             LIMIT 500
+            """
+        )
+    )
+
+
+@st.cache_data(ttl=20)
+def load_business_flow_rows(project_id: str) -> pd.DataFrame:
+    return df(
+        run_read(
+            f"""
+            MATCH (:Project {{id: {json.dumps(project_id)}}})-[:HAS_BUSINESS_FLOW]->(bf:BusinessFlow)
+            OPTIONAL MATCH (bf)-[hs:HAS_STEP]->(step:FlowStep)
+            OPTIONAL MATCH (step)-[:USES_PRIMITIVE]->(primitive)
+            WITH bf, hs, step, primitive
+            ORDER BY coalesce(hs.order, step.order), step.name
+            WITH bf,
+                 collect({{
+                    order: coalesce(hs.order, step.order),
+                    step: step.name,
+                    step_type: step.step_type,
+                    primitive: primitive.name,
+                    primitive_type: labels(primitive)[0],
+                    primitive_id: primitive.id,
+                    evidence: step.evidence
+                 }}) AS steps
+            RETURN bf.id AS id,
+                   bf.name AS business_flow,
+                   bf.entrypoint AS entrypoint,
+                   bf.flow_type AS flow_type,
+                   bf.confidence AS confidence,
+                   bf.evidence_summary AS evidence_summary,
+                   bf.source_paths AS source_paths,
+                   steps,
+                   [s IN steps WHERE s.primitive_type IN ['DataStore', 'DatabaseModel', 'DatabaseTable'] | s.primitive] AS datastores,
+                   [s IN steps WHERE s.primitive_type = 'Integration' | s.primitive] AS integrations,
+                   [s IN steps WHERE s.primitive_type = 'Risk' | s.primitive] AS risks
+            ORDER BY confidence DESC, business_flow
             """
         )
     )
@@ -829,89 +871,7 @@ def load_graphrag_context(goal: str, industry: str | None = None) -> dict[str, A
     }
 
 
-@st.cache_data(ttl=20)
-def load_graph_payload(limit: int = 180, scope: str = "Dual graph") -> dict[str, list[dict[str, Any]]]:
-    scope_labels = {
-        "Dual graph": [
-            "Company", "Mentor", "Programme", "Flow", "Skill", "Connector", "Server"
-        ],
-        "Graph A: History": ["Company", "Mentor", "Programme"],
-        "Graph B: Code and Infrastructure": ["Flow", "Skill", "Connector", "Server"],
-        "Bridge: Execution traces": ["ExecutionTrace", "Outcome", "Flow"],
-    }
-    labels = scope_labels.get(scope, scope_labels["Dual graph"])
-    label_filter = json.dumps(labels)
-    rows = run_read(
-        f"""
-        MATCH (n)
-        WHERE any(label IN labels(n) WHERE label IN {label_filter})
-        WITH n LIMIT {limit}
-        OPTIONAL MATCH (n)-[r]->(m)
-        WHERE any(label IN labels(m) WHERE label IN {label_filter})
-        RETURN elementId(n) AS source_id,
-               labels(n) AS source_labels,
-               coalesce(n.name, n.id, n.path, elementId(n)) AS source_name,
-               n.status AS source_status,
-               n.avg_outcome_score AS source_score,
-               n.industry AS source_industry,
-               n.stage AS source_stage,
-               n.pain_points AS source_pain,
-               n.revenue AS source_revenue,
-               n.expertise AS source_expertise,
-               n.success_score AS source_success,
-               n.available AS source_available,
-               n.current_load AS source_load,
-               n.region AS source_region,
-               n.performance_score AS source_perf,
-               n.error_rate AS source_error,
-               n.project_id AS source_project_id,
-               n.scan_id AS source_scan_id,
-               n.source_path AS source_path,
-               n.path AS source_file_path,
-               n.confidence AS source_confidence,
-               n.description AS source_description,
-               n.technical_description AS source_technical_description,
-               n.business_description AS source_business_description,
-               n.method AS source_method,
-               n.route AS source_route,
-               n.storage_type AS source_storage_type,
-               n.primitive_type AS source_primitive_type,
-               n.risk_type AS source_risk_type,
-               n.severity AS source_severity,
-               type(r) AS rel_type,
-               elementId(m) AS target_id,
-               labels(m) AS target_labels,
-               coalesce(m.name, m.id, m.path, elementId(m)) AS target_name,
-               m.status AS target_status,
-               m.avg_outcome_score AS target_score,
-               m.industry AS target_industry,
-               m.stage AS target_stage,
-               m.pain_points AS target_pain,
-               m.revenue AS target_revenue,
-               m.expertise AS target_expertise,
-               m.success_score AS target_success,
-               m.available AS target_available,
-               m.current_load AS target_load,
-               m.region AS target_region,
-               m.performance_score AS target_perf,
-               m.error_rate AS target_error,
-               m.project_id AS target_project_id,
-               m.scan_id AS target_scan_id,
-               m.source_path AS target_path,
-               m.path AS target_file_path,
-               m.confidence AS target_confidence,
-               m.description AS target_description,
-               m.technical_description AS target_technical_description,
-               m.business_description AS target_business_description,
-               m.method AS target_method,
-               m.route AS target_route,
-               m.storage_type AS target_storage_type,
-               m.primitive_type AS target_primitive_type,
-               m.risk_type AS target_risk_type,
-               m.severity AS target_severity
-        """
-    )
-
+def _graph_rows_to_payload(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
 
@@ -939,13 +899,22 @@ def load_graph_payload(limit: int = 180, scope: str = "Dual graph") -> dict[str,
             "confidence": row.get(f"{prefix}_confidence"),
             "description": row.get(f"{prefix}_description"),
             "technical_description": row.get(f"{prefix}_technical_description"),
-            "business_description": row.get(f"{prefix}_business_description"),
+            "stakeholder_description": row.get(f"{prefix}_stakeholder_description"),
             "method": row.get(f"{prefix}_method"),
             "route": row.get(f"{prefix}_route"),
             "storage_type": row.get(f"{prefix}_storage_type"),
             "primitive_type": row.get(f"{prefix}_primitive_type"),
             "risk_type": row.get(f"{prefix}_risk_type"),
             "severity": row.get(f"{prefix}_severity"),
+            "entrypoint": row.get(f"{prefix}_entrypoint"),
+            "flow_type": row.get(f"{prefix}_flow_type"),
+            "evidence_summary": row.get(f"{prefix}_evidence_summary"),
+            "source_paths": row.get(f"{prefix}_source_paths"),
+            "order": row.get(f"{prefix}_order"),
+            "step_type": row.get(f"{prefix}_step_type"),
+            "primitive_id": row.get(f"{prefix}_primitive_id"),
+            "primitive_label": row.get(f"{prefix}_primitive_label"),
+            "evidence": row.get(f"{prefix}_evidence"),
         }
 
     for row in rows:
@@ -963,6 +932,176 @@ def load_graph_payload(limit: int = 180, scope: str = "Dual graph") -> dict[str,
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
+def _graph_return_clause() -> str:
+    return """
+           elementId(n) AS source_id,
+           labels(n) AS source_labels,
+           coalesce(n.display_name, n.name, n.id, n.path, elementId(n)) AS source_name,
+           n.status AS source_status,
+           n.avg_outcome_score AS source_score,
+           n.industry AS source_industry,
+           n.stage AS source_stage,
+           n.pain_points AS source_pain,
+           n.revenue AS source_revenue,
+           n.expertise AS source_expertise,
+           n.success_score AS source_success,
+           n.available AS source_available,
+           n.current_load AS source_load,
+           n.region AS source_region,
+           n.performance_score AS source_perf,
+           n.error_rate AS source_error,
+           n.project_id AS source_project_id,
+           n.scan_id AS source_scan_id,
+           n.source_path AS source_path,
+           n.path AS source_file_path,
+           n.confidence AS source_confidence,
+           n.description AS source_description,
+           n.technical_description AS source_technical_description,
+           coalesce(n.stakeholder_description, n.business_description) AS source_stakeholder_description,
+           n.method AS source_method,
+           coalesce(n.route_path, n.route) AS source_route,
+           n.storage_type AS source_storage_type,
+           n.primitive_type AS source_primitive_type,
+           n.risk_type AS source_risk_type,
+           n.severity AS source_severity,
+           n.entrypoint AS source_entrypoint,
+           n.flow_type AS source_flow_type,
+           n.evidence_summary AS source_evidence_summary,
+           n.source_paths AS source_source_paths,
+           n.order AS source_order,
+           n.step_type AS source_step_type,
+           n.primitive_id AS source_primitive_id,
+           n.primitive_label AS source_primitive_label,
+           n.evidence AS source_evidence,
+           type(r) AS rel_type,
+           elementId(m) AS target_id,
+           labels(m) AS target_labels,
+           coalesce(m.display_name, m.name, m.id, m.path, elementId(m)) AS target_name,
+           m.status AS target_status,
+           m.avg_outcome_score AS target_score,
+           m.industry AS target_industry,
+           m.stage AS target_stage,
+           m.pain_points AS target_pain,
+           m.revenue AS target_revenue,
+           m.expertise AS target_expertise,
+           m.success_score AS target_success,
+           m.available AS target_available,
+           m.current_load AS target_load,
+           m.region AS target_region,
+           m.performance_score AS target_perf,
+           m.error_rate AS target_error,
+           m.project_id AS target_project_id,
+           m.scan_id AS target_scan_id,
+           m.source_path AS target_path,
+           m.path AS target_file_path,
+           m.confidence AS target_confidence,
+           m.description AS target_description,
+           m.technical_description AS target_technical_description,
+           coalesce(m.stakeholder_description, m.business_description) AS target_stakeholder_description,
+           m.method AS target_method,
+           coalesce(m.route_path, m.route) AS target_route,
+           m.storage_type AS target_storage_type,
+           m.primitive_type AS target_primitive_type,
+           m.risk_type AS target_risk_type,
+           m.severity AS target_severity,
+           m.entrypoint AS target_entrypoint,
+           m.flow_type AS target_flow_type,
+           m.evidence_summary AS target_evidence_summary,
+           m.source_paths AS target_source_paths,
+           m.order AS target_order,
+           m.step_type AS target_step_type,
+           m.primitive_id AS target_primitive_id,
+           m.primitive_label AS target_primitive_label,
+           m.evidence AS target_evidence
+    """
+
+
+@st.cache_data(ttl=20)
+def load_legacy_graph_payload(limit: int = 180, scope: str = "Dual graph") -> dict[str, list[dict[str, Any]]]:
+    scope_labels = {
+        "Dual graph": [
+            "Company", "Mentor", "Programme", "Flow", "Skill", "Connector", "Server"
+        ],
+        "Graph A: History": ["Company", "Mentor", "Programme"],
+        "Legacy Graph B: Flow Runtime": ["Flow", "Skill", "Connector", "Server"],
+        "Bridge: Execution traces": ["ExecutionTrace", "Outcome", "Flow"],
+    }
+    labels = scope_labels.get(scope, scope_labels["Dual graph"])
+    label_filter = json.dumps(labels)
+    rows = run_read(
+        f"""
+        MATCH (n)
+        WHERE any(label IN labels(n) WHERE label IN {label_filter})
+        WITH n LIMIT {limit}
+        OPTIONAL MATCH (n)-[r]->(m)
+        WHERE any(label IN labels(m) WHERE label IN {label_filter})
+        RETURN {_graph_return_clause()}
+        """
+    )
+    return _graph_rows_to_payload(rows)
+
+
+@st.cache_data(ttl=20)
+def load_project_graph_payload(
+    project_id: str,
+    limit: int = 180,
+    scope: str = "Full Project Graph",
+) -> dict[str, list[dict[str, Any]]]:
+    scope_labels = {
+        "Full Project Graph": [
+            "Project", "Repository", "File", "Route", "Service", "Function",
+            "DatabaseModel", "DatabaseTable", "DataStore", "Entity", "Workflow",
+            "BusinessFlow", "FlowStep", "Integration", "Artifact", "Risk", "Skill",
+        ],
+        "Software Architecture": [
+            "Project", "Repository", "File", "Route", "Service", "Function",
+            "DatabaseModel", "DatabaseTable", "Entity", "Integration", "Artifact",
+        ],
+        "Workflow Pipeline": [
+            "Project", "BusinessFlow", "FlowStep", "File", "Route", "Service",
+            "Function", "DatabaseModel", "DatabaseTable", "DataStore", "Integration", "Risk",
+        ],
+        "Storage & Risk": [
+            "Project", "Repository", "File", "DataStore", "DatabaseModel",
+            "DatabaseTable", "Risk", "Integration",
+        ],
+        "Agentic Layer Links": ["Project", "Repository", "File", "Function", "Skill"],
+    }
+    labels = scope_labels.get(scope, scope_labels["Full Project Graph"])
+    label_filter = json.dumps(labels)
+    project_json = json.dumps(project_id)
+    rows = run_read(
+        f"""
+        MATCH (n)
+        WHERE any(label IN labels(n) WHERE label IN {label_filter})
+          AND (
+            n.project_id = {project_json}
+            OR (
+              'Skill' IN labels(n)
+              AND EXISTS {{
+                MATCH (n)-[:SKILL_DERIVED_FROM_FUNCTION]->(:Function {{project_id: {project_json}}})
+              }}
+            )
+          )
+        WITH n LIMIT {limit}
+        OPTIONAL MATCH (n)-[r]->(m)
+        WHERE any(label IN labels(m) WHERE label IN {label_filter})
+          AND (
+            m.project_id = {project_json}
+            OR (
+              'Skill' IN labels(m)
+              AND EXISTS {{
+                MATCH (m)-[:SKILL_DERIVED_FROM_FUNCTION]->(:Function {{project_id: {project_json}}})
+              }}
+            )
+          )
+        RETURN {_graph_return_clause()}
+        """
+    )
+
+    return _graph_rows_to_payload(rows)
+
+
 def clear_data_cache() -> None:
     st.cache_data.clear()
 
@@ -976,10 +1115,22 @@ def realtime_status() -> dict[str, Any]:
         return {"connected": False, "status": "disconnected", "clients": 0}
 
 
-def run_agent(goal: str) -> tuple[int, str, str, str | None]:
+def run_agent(
+    goal: str,
+    project_id: str | None = None,
+    business_flow_id: str | None = None,
+    source_path: str | None = None,
+) -> tuple[int, str, str, str | None]:
     env = os.environ.copy()
+    cmd = [sys.executable, "main.py", "--goal", goal]
+    if project_id:
+        cmd.extend(["--project-id", project_id])
+    if business_flow_id:
+        cmd.extend(["--business-flow-id", business_flow_id])
+    if source_path:
+        cmd.extend(["--source-path", source_path])
     result = subprocess.run(
-        [sys.executable, "main.py", "--goal", goal],
+        cmd,
         cwd=ROOT,
         env=env,
         text=True,
@@ -1040,6 +1191,24 @@ def workflow_sentence(row: pd.Series) -> str:
     return " -> ".join(steps) if steps else "No relationships detected yet"
 
 
+def business_flow_sentence(row: pd.Series, limit: int = 8) -> str:
+    steps = row.get("steps") or []
+    if not isinstance(steps, list):
+        return "No ordered steps detected yet"
+    labels = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        step_type = step.get("step_type") or step.get("primitive_type") or "Step"
+        primitive = step.get("primitive") or step.get("step") or "unknown"
+        labels.append(f"{step_type}: {primitive}")
+    if not labels:
+        return "No ordered steps detected yet"
+    shown = labels[:limit]
+    suffix = f" -> +{len(labels) - limit} more" if len(labels) > limit else ""
+    return " -> ".join(shown) + suffix
+
+
 def cloud_run_job_url() -> str | None:
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     region = os.environ.get("SANDBOX_GCP_REGION") or os.environ.get("GOOGLE_CLOUD_LOCATION")
@@ -1054,14 +1223,22 @@ def cloud_run_job_url() -> str | None:
 
 def graph_legend_html() -> str:
     items = [
+        ("Project", "#d8f3dc", "#167447"),
+        ("Repository", "#cdeff2", "#217b84"),
+        ("File", "#f1eadb", "#6d6252"),
+        ("Route", "#d7e8ff", "#3267a8"),
+        ("Business Flow", "#f8dfb2", "#a55b19"),
+        ("Flow Step", "#fff0c2", "#a55b19"),
+        ("Workflow", "#f8dfb2", "#a55b19"),
+        ("Function / Skill", "#dcecff", "#3267a8"),
+        ("Storage", "#ead8ff", "#6845a4"),
+        ("Risk", "#f0d6d6", "#a73737"),
         ("Company", "#d7efe5", "#167447"),
         ("Mentor", "#e7e0ff", "#5f4bb6"),
         ("Programme", "#f3e5ab", "#8b6d12"),
         ("Flow", "#fff0c2", "#a55b19"),
-        ("Skill", "#dcecff", "#3267a8"),
         ("Connector", "#ffd9cc", "#b54a2c"),
         ("Server", "#e7e3d8", "#6d6252"),
-        ("Problem", "#fddede", "#a73737"),
         ("Proposed", "#fff9c2", "#d4a017"),
         ("Agent active", "#d0f4de", "#0f7b63"),
     ]
@@ -1106,6 +1283,8 @@ def graph_html(
         "DataStore": {"color": {"background": "#d7efe5", "border": "#167447"}},
         "Entity": {"color": {"background": "#ffd9ed", "border": "#a63171"}},
         "Workflow": {"color": {"background": "#f8dfb2", "border": "#a55b19"}},
+        "BusinessFlow": {"color": {"background": "#f8dfb2", "border": "#a55b19"}},
+        "FlowStep": {"color": {"background": "#fff0c2", "border": "#a55b19"}},
         "Integration": {"color": {"background": "#ffd9cc", "border": "#b54a2c"}},
         "Artifact": {"color": {"background": "#e9f7cf", "border": "#6f9b20"}},
         "Risk": {"color": {"background": "#f0d6d6", "border": "#a73737"}},
@@ -1119,6 +1298,8 @@ def graph_html(
         "Programme": 20,
         "Flow": 20,
         "Workflow": 22,
+        "BusinessFlow": 24,
+        "FlowStep": 16,
         "Pipeline": 20,
         "Route": 18,
         "Service": 18,
@@ -1146,6 +1327,8 @@ def graph_html(
         "Route": "#3267a8",
         "Service": "#a55b19",
         "Workflow": "#a55b19",
+        "BusinessFlow": "#a55b19",
+        "FlowStep": "#a55b19",
         "Function": "#3267a8",
         "Skill": "#3267a8",
         "DataStore": "#167447",
@@ -1241,14 +1424,32 @@ def graph_html(
             details["Risk Type"] = node["risk_type"]
         if node.get("severity"):
             details["Severity"] = node["severity"]
+        if node.get("entrypoint"):
+            details["Entrypoint"] = node["entrypoint"]
+        if node.get("flow_type"):
+            details["Flow Type"] = node["flow_type"]
+        if node.get("evidence_summary"):
+            details["Evidence"] = node["evidence_summary"]
+        if node.get("source_paths"):
+            details["Source Paths"] = compact_list(node["source_paths"], 5)
+        if node.get("order") is not None:
+            details["Step Order"] = node["order"]
+        if node.get("step_type"):
+            details["Step Type"] = node["step_type"]
+        if node.get("primitive_label"):
+            details["Primitive Label"] = node["primitive_label"]
+        if node.get("primitive_id"):
+            details["Primitive ID"] = node["primitive_id"]
+        if node.get("evidence"):
+            details["Step Evidence"] = node["evidence"]
         if node.get("confidence") is not None:
             details["Confidence"] = node["confidence"]
         if node.get("description"):
             details["Description"] = node["description"]
         if node.get("technical_description"):
             details["Technical"] = node["technical_description"]
-        if node.get("business_description"):
-            details["Stakeholder"] = node["business_description"]
+        if node.get("stakeholder_description"):
+            details["Stakeholder"] = node["stakeholder_description"]
         if node.get("industry"):
             details["Industry"] = node["industry"]
         if node.get("stage"):
@@ -1619,13 +1820,14 @@ if page == "Project Review":
             f"<span class='status-pill'>Permission: {project.get('permission_status', 'unknown')}</span>",
             unsafe_allow_html=True,
         )
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("Files", int(project.get("files", 0) or 0))
         c2.metric("Functions", int(project.get("functions", 0) or 0))
         c3.metric("Routes", int(project.get("routes", 0) or 0))
         c4.metric("Models", int(project.get("models", 0) or 0))
         c5.metric("Storage", int(project.get("datastores", 0) or 0))
         c6.metric("Risks", int(project.get("risks", 0) or 0))
+        c7.metric("Flows", int(project.get("business_flows", 0) or 0))
         st.markdown(f"**Connected project:** `{project.get('name')}`")
         st.markdown(f"**Repository path:** `{project.get('repo_path')}`")
         st.markdown(f"**Last scan:** `{project.get('last_scan_id') or 'not scanned yet'}`")
@@ -1649,128 +1851,108 @@ if page == "Project Review":
         value=str(project.get("repo_path") if project else default_source),
         key="project_repo_path",
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Approve Analysis", type="primary", key="approve_project_analysis"):
-            approved = approve_project(repo_path, project_name)
-            project_id = approved["project_id"]
-            publish_event(
-                source="ui",
-                target="indexer",
-                event_type="approved",
-                title="Codebase analysis approved",
-                detail=approved["repo_path"],
-                payload=approved,
-            )
-            mark_project_status(project_id, "analysis_running")
-            publish_event(
-                source="indexer",
-                event_type="started",
-                title="Codebase analysis started after approval",
-                detail=repo_path,
-                payload={"project_id": project_id, "repo_path": repo_path},
-            )
-            try:
-                with st.spinner("Permission approved. Analyzing codebase and writing software graph..."):
-                    result = run_codebase_analysis(repo_path, project_name, project_id)
-                mark_project_status(project_id, "analysis_complete", result["scan_id"])
-                publish_event(
-                    source="indexer",
-                    event_type="result",
-                    title="Codebase analysis completed",
-                    detail=f"{result['code_nodes']} code nodes from {result['file_count']} files",
-                    payload=result,
-                )
-                clear_data_cache()
-                st.success("Project approved and analysis complete.")
-                st.json(result)
-                st.rerun()
-            except Exception as exc:
-                mark_project_status(project_id, "analysis_failed")
-                publish_event(
-                    source="indexer",
-                    event_type="error",
-                    title="Codebase analysis failed after approval",
-                    detail=str(exc),
-                    payload={"project_id": project_id, "repo_path": repo_path},
-                )
-                raise
-    with c2:
-        if st.button("Analyze Codebase", key="run_codebase_analysis"):
-            approved = approve_project(repo_path, project_name)
-            project_id = approved["project_id"]
-            mark_project_status(project_id, "analysis_running")
+    if st.button("Approve & Analyze Codebase", type="primary", key="approve_project_analysis"):
+        approved = approve_project(repo_path, project_name)
+        project_id = approved["project_id"]
+        publish_event(
+            source="ui",
+            target="indexer",
+            event_type="approved",
+            title="Codebase analysis approved",
+            detail=approved["repo_path"],
+            payload=approved,
+        )
+        mark_project_status(project_id, "analysis_running")
+        publish_event(
+            source="indexer",
+            event_type="started",
+            title="Codebase analysis started after approval",
+            detail=repo_path,
+            payload={"project_id": project_id, "repo_path": repo_path},
+        )
+        try:
+            with st.spinner("Permission approved. Analyzing codebase and writing software graph..."):
+                result = run_codebase_analysis(repo_path, project_name, project_id)
+            mark_project_status(project_id, "analysis_complete", result["scan_id"])
             publish_event(
                 source="indexer",
-                event_type="started",
-                title="Codebase analysis started",
-                detail=repo_path,
+                event_type="result",
+                title="Codebase analysis completed",
+                detail=f"{result['code_nodes']} code nodes from {result['file_count']} files",
+                payload=result,
+            )
+            clear_data_cache()
+            st.success("Project approved and analysis complete.")
+            st.json(result)
+            st.rerun()
+        except Exception as exc:
+            mark_project_status(project_id, "analysis_failed")
+            publish_event(
+                source="indexer",
+                event_type="error",
+                title="Codebase analysis failed after approval",
+                detail=str(exc),
                 payload={"project_id": project_id, "repo_path": repo_path},
             )
-            try:
-                with st.spinner("Analyzing codebase and writing software graph..."):
-                    result = run_codebase_analysis(repo_path, project_name, project_id)
-                mark_project_status(project_id, "analysis_complete", result["scan_id"])
-                publish_event(
-                    source="indexer",
-                    event_type="result",
-                    title="Codebase analysis completed",
-                    detail=f"{result['code_nodes']} code nodes from {result['file_count']} files",
-                    payload=result,
-                )
-                clear_data_cache()
-                st.success("Codebase analysis complete.")
-                st.json(result)
-                st.rerun()
-            except Exception as exc:
-                mark_project_status(project_id, "analysis_failed")
-                publish_event(
-                    source="indexer",
-                    event_type="error",
-                    title="Codebase analysis failed",
-                    detail=str(exc),
-                    payload={"project_id": project_id, "repo_path": repo_path},
-                )
-                raise
+            raise
 
     if project_ready and project:
         tab_summary, tab_workflows, tab_inspector, tab_storage, tab_legacy = st.tabs(
             ["Software Summary", "Workflows", "Primitive Inspector", "Storage", "Legacy Data"]
         )
         with tab_summary:
-            workflows = load_project_workflow_rows(project["project_id"])
+            business_flows = load_business_flow_rows(project["project_id"])
             storage = load_storage_summary(project["project_id"])
             c1, c2 = st.columns([1.25, 1])
             with c1:
-                st.markdown("### Workflow Map")
-                if workflows.empty:
-                    st.info("No route/function/storage relationships detected yet.")
+                st.markdown("### Business Logic Flows")
+                if business_flows.empty:
+                    st.info("No business flows detected yet. Re-run analysis after adding route/function/action names.")
                 else:
-                    preview = workflows.head(8).copy()
-                    preview["pipeline"] = preview.apply(workflow_sentence, axis=1)
-                    display_table(preview[["file", "workflow_type", "pipeline"]], height=380)
+                    preview = business_flows.head(8).copy()
+                    preview["ordered_chain"] = preview.apply(business_flow_sentence, axis=1)
+                    display_table(
+                        preview[["business_flow", "entrypoint", "ordered_chain", "confidence"]],
+                        height=380,
+                    )
             with c2:
                 st.markdown("### Architecture Signals")
                 display_table(load_project_relationship_counts(project["project_id"]), height=220)
                 st.markdown("### Storage Signals")
                 display_table(storage, height=180)
         with tab_workflows:
-            workflows = load_project_workflow_rows(project["project_id"])
-            if workflows.empty:
-                st.info("No workflows detected yet.")
+            business_flows = load_business_flow_rows(project["project_id"])
+            file_evidence = load_project_workflow_rows(project["project_id"])
+            if business_flows.empty:
+                st.info("No business logic flows detected yet.")
             else:
-                selected_file = st.selectbox("Workflow source", workflows["file"].tolist(), key="workflow_source")
-                selected_row = workflows[workflows["file"] == selected_file].iloc[0]
-                st.markdown("### Relationship Pipeline")
-                st.code(workflow_sentence(selected_row), language="text")
+                selected_flow = st.selectbox(
+                    "Business flow",
+                    business_flows["business_flow"].tolist(),
+                    key="business_flow_source",
+                )
+                selected_row = business_flows[business_flows["business_flow"] == selected_flow].iloc[0]
+                st.markdown("### Ordered Business-Logic Chain")
+                st.caption("This is a deterministic static-analysis chain with confidence scoring; exact runtime tracing comes later.")
+                st.code(business_flow_sentence(selected_row, limit=20), language="text")
                 c1, c2, c3 = st.columns(3)
-                c1.markdown(f"**Routes**\n\n{compact_list(selected_row['routes'], 10)}")
-                c2.markdown(f"**Functions / Services**\n\n{compact_list(selected_row['functions'], 8)}\n\n{compact_list(selected_row['services'], 5)}")
-                c3.markdown(f"**Storage / Risk**\n\n{compact_list(selected_row['datastores'], 8)}\n\n{compact_list(selected_row['risks'], 5)}")
-                with st.expander("All detected workflow rows"):
-                    rows = workflows.copy()
+                c1.markdown(f"**Entrypoint**\n\n{selected_row.get('entrypoint') or 'None'}")
+                c2.markdown(f"**Storage / Integrations**\n\n{compact_list(selected_row['datastores'], 8)}\n\n{compact_list(selected_row['integrations'], 5)}")
+                c3.markdown(f"**Risks / Confidence**\n\n{compact_list(selected_row['risks'], 5)}\n\n{round(float(selected_row.get('confidence') or 0), 2)}")
+                with st.expander("All business logic flows"):
+                    rows = business_flows.copy()
+                    rows["ordered_chain"] = rows.apply(business_flow_sentence, axis=1)
+                    display_table(
+                        rows[["business_flow", "entrypoint", "ordered_chain", "datastores", "integrations", "risks", "confidence"]],
+                        height=520,
+                    )
+            with st.expander("File-level architecture evidence"):
+                if file_evidence.empty:
+                    st.info("No file-level evidence detected yet.")
+                else:
+                    rows = file_evidence.copy()
                     rows["pipeline"] = rows.apply(workflow_sentence, axis=1)
-                    display_table(rows[["file", "workflow_type", "pipeline"]], height=520)
+                    display_table(rows[["file", "workflow_type", "pipeline"]], height=380)
         with tab_inspector:
             nodes = load_code_nodes(project["project_id"])
             if nodes.empty:
@@ -1831,6 +2013,19 @@ if page == "Project Review":
             cols[4].metric("Avg Score", overview.get("avg_match_score", 0))
             cols[5].metric("Pending", overview.get("proposed", 0))
             display_table(load_label_counts(), height=300)
+            legacy_scope = st.radio(
+                "Legacy graph scope",
+                [
+                    "Dual graph",
+                    "Graph A: History",
+                    "Legacy Graph B: Flow Runtime",
+                    "Bridge: Execution traces",
+                ],
+                horizontal=True,
+                key="project_review_legacy_graph_scope",
+            )
+            legacy_payload = load_legacy_graph_payload(120, legacy_scope)
+            components.html(graph_html(legacy_payload), height=560)
 
 elif page == "Database Review":
     st.subheader("Current Database Review")
@@ -1924,28 +2119,37 @@ elif page == "Database Review":
             display_table(load_traces(), height=500)
 
 elif page == "Graph Display":
-    st.subheader("Original Website Graph")
+    st.subheader("Project Analysis Graph")
+    st.caption(
+        "Generated from the latest approved codebase analysis. Nodes and relationships "
+        "are filtered to the connected project."
+    )
     graph_scope = st.radio(
         "Graph scope",
         [
-            "Dual graph",
-            "Graph A: History",
-            "Graph B: Code and Infrastructure",
-            "Bridge: Execution traces",
+            "Full Project Graph",
+            "Software Architecture",
+            "Workflow Pipeline",
+            "Storage & Risk",
+            "Agentic Layer Links",
         ],
         horizontal=True,
     )
     limit = st.slider("Node limit", min_value=40, max_value=240, value=180, step=20)
-    payload = load_graph_payload(limit, graph_scope)
+    payload = load_project_graph_payload(project["project_id"], limit, graph_scope)
+    node_groups = [node.get("group") for node in payload["nodes"]]
+    storage_count = sum(1 for group in node_groups if group in {"DataStore", "DatabaseModel", "DatabaseTable"})
+    risk_count = sum(1 for group in node_groups if group == "Risk")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Nodes", len(payload["nodes"]))
     c2.metric("Relationships", len(payload["edges"]))
-    c3.metric("Pending Proposals", overview.get("proposed", 0))
+    c3.metric("Latest Scan", project.get("last_scan_id") or "n/a")
+    c4.metric("Storage / Risks", f"{storage_count} / {risk_count}")
     st.markdown(graph_legend_html(), unsafe_allow_html=True)
     st.markdown(
         "<div class='graph-tip'>Click any node to inspect details. "
-        "Green glow indicates an agent-active node when a run marks one in session state.</div>",
+        "The Workflow Pipeline scope shows inferred BusinessFlow and FlowStep chains from static analysis.</div>",
         unsafe_allow_html=True,
     )
     active_node_ids = st.session_state.get("agent_active_nodes", [])
@@ -2006,242 +2210,312 @@ elif page == "Live Agent Comms":
 
 elif page == "Flows":
     st.subheader("Flows")
-    st.caption("Detected backend workflows, database/API pipelines, sandbox checks, optional web evidence, and approvals.")
+    st.caption("Select an extracted business flow. The agent will analyse the graph chain and propose an improved version without leaving this page.")
 
-    tab_code, tab_pipelines, tab_db_flows, tab_sandbox, tab_approvals, tab_web = st.tabs(
-        ["Codebase Flows", "Software Pipelines", "Database Flows", "Sandbox", "Approvals", "Optional Web Evidence"]
-    )
+    business_flows = load_business_flow_rows(project["project_id"]) if project else pd.DataFrame()
+    if business_flows.empty:
+        st.info("No business logic flows found. Re-run analysis from Project Review.")
+    else:
+        original_flows = business_flows.copy()
+        original_flows["ordered_chain"] = original_flows.apply(business_flow_sentence, axis=1)
+        original_flows["score"] = original_flows["confidence"].fillna(0).astype(float) * 10
 
-    with tab_code:
-        if project:
-            st.markdown("### Codebase Workflows")
-            workflows = load_project_workflow_rows(project["project_id"])
-            if workflows.empty:
-                st.info("No workflows found. Re-run analysis from Project Review.")
+        status_rows = original_flows[[
+            "business_flow",
+            "entrypoint",
+            "flow_type",
+            "ordered_chain",
+            "datastores",
+            "integrations",
+            "risks",
+            "confidence",
+        ]].copy()
+        display_table(status_rows, height=300)
+
+        st.divider()
+        st.subheader("Optimize a Flow")
+        st.caption("Select one of the extracted BusinessFlow chains below. The agent will analyse it and propose an improved version without leaving this page.")
+
+        selected_idx = st.session_state.get("selected_flow_idx", 0)
+        selected_idx = min(selected_idx, len(original_flows) - 1)
+
+        cols = st.columns(min(len(original_flows), 4))
+        for i, (_, row) in enumerate(original_flows.head(12).iterrows()):
+            score_val = float(row.get("score") or 0)
+            if score_val <= 0:
+                score_display = "N/A"
+                score_color = "#65706d"
+            elif score_val < 5:
+                score_display = f"{score_val:.1f} — low"
+                score_color = "#a73737"
+            elif score_val < 7:
+                score_display = f"{score_val:.1f} — ok"
+                score_color = "#a55b19"
             else:
-                workflow_types = sorted(workflows["workflow_type"].dropna().unique().tolist())
-                selected_types = st.multiselect(
-                    "Workflow type",
-                    workflow_types,
-                    default=workflow_types,
-                    key="workflow_type_filter",
-                )
-                filtered = workflows[workflows["workflow_type"].isin(selected_types)] if selected_types else workflows
-                filtered = filtered.copy()
-                filtered["pipeline"] = filtered.apply(workflow_sentence, axis=1)
-                display_table(filtered[["file", "workflow_type", "pipeline"]], height=480)
+                score_display = f"{score_val:.1f} — good"
+                score_color = "#167447"
 
-    with tab_web:
-        default_source = str((ROOT.parent / "fundraising_app" / "Crowd-Funding-App").resolve())
-        st.caption("Optional supporting evidence only. The primary source of truth is the approved codebase analysis.")
-        url = st.text_input("Website URL", value="http://127.0.0.1:5173", key="flow_ingest_url")
-        source_path = st.text_input("Local source folder", value=default_source, key="flow_ingest_source")
-        c1, c2, c3 = st.columns(3)
-        depth = c1.number_input("Crawl depth", min_value=0, max_value=3, value=1, key="flow_ingest_depth")
-        max_pages = c2.number_input("Max pages", min_value=1, max_value=100, value=30, key="flow_ingest_pages")
-        clear_existing = c3.checkbox("Clear existing domain first", value=True, key="flow_ingest_clear")
+            is_sel = selected_idx == i
+            border = "2px solid #19211f" if is_sel else "1px solid #d8d1c2"
+            bg = "#19211f" if is_sel else "#fffaf0"
+            txt = "#f7f1e4" if is_sel else "#19211f"
+            sub = "#a8a49e" if is_sel else "#65706d"
 
-        st.markdown("### Indexed Websites")
-        display_table(load_websites(), height=180)
+            with cols[i % len(cols)]:
+                st.markdown(f"""
+                <div style="background:{bg};border:{border};border-radius:10px;
+                            padding:12px 14px;cursor:pointer;transition:all .2s;
+                            margin-bottom:8px;">
+                    <div style="font-size:.82rem;font-weight:600;color:{txt};margin-bottom:4px;
+                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                        {row['business_flow']}
+                    </div>
+                    <div style="font-size:.72rem;color:{score_color if not is_sel else '#a8a49e'};">
+                        Score: {score_display}
+                    </div>
+                    <div style="font-size:.7rem;color:{sub};margin-top:2px;">
+                        {row.get('flow_type','') or 'business flow'}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Select", key=f"sel_{i}", use_container_width=True):
+                    st.session_state["selected_flow_idx"] = i
+                    st.session_state["opt_phase"] = "idle"
+                    st.rerun()
 
-        if st.button("Ingest Website & Source", type="primary"):
-            publish_event(
-                source="indexer",
-                event_type="started",
-                title="Website ingestion started",
-                detail=url,
-                payload={"url": url, "source_path": source_path},
-            )
-            with st.spinner("Crawling website, extracting identities, and materializing pipelines..."):
-                result = crawl_website(
-                    start_url=url,
-                    max_depth=int(depth),
-                    max_pages=int(max_pages),
-                    clear_existing=clear_existing,
-                    source_path=source_path or None,
-                )
-            publish_event(
-                source="indexer",
-                event_type="result",
-                title="Website ingestion completed",
-                detail=f"Indexed {result['domain']}: {result.get('entities_written', 0)} entities",
-                payload=result,
-            )
-            clear_data_cache()
-            st.success(f"Indexed {result['domain']}")
-            st.json(result)
+        sel_row = original_flows.iloc[selected_idx]
+        sel_name = sel_row["business_flow"]
+        sel_score_f = float(sel_row.get("score") or 0)
+        sel_conn = compact_list(sel_row.get("integrations") or [], 3) or "—"
+        sel_skills = sel_row.get("steps") or []
+        sel_status = sel_row.get("flow_type") or "business flow"
+        sel_chain = sel_row.get("ordered_chain") or "No ordered chain available."
 
-        websites = load_websites()
-        if not websites.empty:
-            selected_domain = st.selectbox("Analyze domain", websites["domain"].tolist(), key="flow_domain")
-            analysis = load_website_analysis(selected_domain)
-            funding = analysis["funding"]
-            donations = analysis["donations"]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Campaigns", funding.get("campaigns", 0))
-            m2.metric("Donors", donations.get("donors", 0))
-            m3.metric("Routes", analysis.get("routes", 0))
-            m4.metric("Contract Methods", analysis.get("contract_methods", 0))
-            display_table(df(analysis["counts"]), height=180)
+        st.markdown(f"""
+        <div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:10px;
+                    padding:12px 16px;margin:8px 0 12px;display:flex;gap:24px;
+                    flex-wrap:wrap;align-items:center;">
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Selected flow</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_name}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Current score</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Connector</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_conn}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Status</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_status}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Skills</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{len(sel_skills) if isinstance(sel_skills, list) else 0} steps</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption(sel_chain)
 
-    with tab_pipelines:
-        all_pipelines = load_pipelines()
-        if all_pipelines.empty:
-            st.info("No pipelines discovered yet. Run an ingest with a source path containing routes and contract/API code.")
-        else:
-            total = len(all_pipelines)
-            with_contract = int((all_pipelines["has_contract"] == True).sum())  # noqa: E712
-            apps_covered = all_pipelines["app_id"].nunique()
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Pipelines Discovered", total)
-            m2.metric("With Contract/API Risk", with_contract)
-            m3.metric("Apps Covered", apps_covered)
+        opt_phase = st.session_state.get("opt_phase", "idle")
+        opt_slot = st.empty()
 
-            app_ids = ["All"] + sorted(all_pipelines["app_id"].dropna().unique().tolist())
-            selected_app = st.selectbox("Filter by app", app_ids, key="pipeline_app_filter")
-            filtered = (
-                all_pipelines
-                if selected_app == "All"
-                else all_pipelines[all_pipelines["app_id"] == selected_app]
-            )
-            display_df = filtered[["name", "app_id", "entrypoint", "steps", "entity_types", "has_contract"]].copy()
-            display_df["risk"] = display_df["has_contract"].map(lambda x: "HIGH" if x else "low")
-            display_table(display_df.drop(columns=["has_contract"]), height=280)
-
-            pipeline_options = filtered["id"].tolist()
-            if pipeline_options:
-                labels = dict(zip(filtered["id"], filtered["name"]))
-                selected_pid = st.selectbox(
-                    "Pipeline detail",
-                    pipeline_options,
-                    format_func=lambda x: labels.get(x, x),
-                    key="pipeline_detail",
-                )
-                p_row = filtered[filtered["id"] == selected_pid].iloc[0]
-                risk_color = "status-bad" if p_row.get("has_contract") else "status-good"
-                risk_label = "HIGH — external/contract execution" if p_row.get("has_contract") else "low"
-                st.markdown(
-                    f"**Entrypoint:** `{p_row['entrypoint']}` "
-                    f"<span class='status-pill {risk_color}'>Risk: {risk_label}</span>",
-                    unsafe_allow_html=True,
-                )
-                display_table(pd.DataFrame(load_pipeline_steps(selected_pid)), height=240)
-
-    with tab_db_flows:
-        st.markdown("### Read-only Database Access")
-        st.caption("Optional. If a DSN is provided, the agentic layer can inspect database schema and SELECT samples without mutating data.")
-        dsn = st.text_input("SQLAlchemy database DSN", value=os.environ.get("INDEX_DB_DSN", ""), type="password", key="db_connector_dsn")
-        query = st.text_area("Optional SELECT preview query", value="", height=90, key="db_connector_query")
-        if st.button("Inspect Database Read-only", key="inspect_db_readonly"):
-            if not dsn:
-                st.warning("Provide a database DSN first.")
-            else:
-                connector = get_connector("SQL_Connector")
-                with st.spinner("Inspecting schema through SQL_Connector in read-only mode..."):
-                    output = connector.inspect(
-                        ConnectorInput(
-                            source=dsn,
-                            query=query or None,
-                            limit=20,
-                        )
-                    )
-                st.success("Database inspected without writes.")
-                st.json(output.model_dump())
-
-        st.markdown("### Existing Database Flows")
-        flows = load_flows()
-        if flows.empty:
-            st.info("No database flows found.")
-        else:
-            statuses = sorted([s for s in flows["status"].dropna().unique()])
-            selected_status = st.multiselect("Status", statuses, default=statuses, key="db_flow_status")
-            filtered_flows = flows[flows["status"].isin(selected_status)] if selected_status else flows
-            display_table(filtered_flows, height=460)
-
-    with tab_sandbox:
-        gcp_url = cloud_run_job_url()
-        mode = st.segmented_control(
-            "Sandbox target",
-            options=["local", "cloudrun"],
-            default=os.environ.get("SANDBOX_MODE", "local")
-            if os.environ.get("SANDBOX_MODE", "local") in {"local", "cloudrun"}
-            else "local",
-            key="flow_sandbox_mode",
-        )
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Configured Mode", os.environ.get("SANDBOX_MODE", "local"))
-        c2.metric("GCP Region", os.environ.get("SANDBOX_GCP_REGION", "not set"))
-        c3.metric("Cloud Run Job", os.environ.get("SANDBOX_JOB_NAME", "not set"))
-        if gcp_url:
-            st.link_button("Open GCP Cloud Run Job", gcp_url)
-        flow_yaml = st.text_area("Sandbox flow YAML", value=default_sandbox_flow(), height=280, key="flow_sandbox_yaml")
-        flow_id = "ui_sandbox_candidate"
-        try:
-            parsed_flow = yaml.safe_load(flow_yaml) or {}
-            if isinstance(parsed_flow, dict):
-                flow_id = parsed_flow.get("flow_id", flow_id)
-        except yaml.YAMLError:
-            pass
-        if st.button("Create Sandbox Run", type="primary", key="flow_sandbox_run"):
-            publish_event(
-                source="sandbox",
-                event_type="started",
-                title="Sandbox run requested",
-                detail=f"Mode: {mode}; Flow: {flow_id}",
-                payload={"mode": mode, "flow_id": flow_id},
-            )
-            result = run_sandbox_from_ui(flow_yaml, mode)
-            publish_event(
-                source="sandbox",
-                target="evaluator",
-                event_type="result" if result.get("status") == "success" else "error",
-                title="Sandbox run completed",
-                detail=result.get("error_log") or f"Metrics: {result.get('metrics', {})}",
-                payload={"flow_id": flow_id, "result": result},
-            )
-            st.session_state["last_sandbox_result"] = result
-            if result.get("status") == "success":
-                metrics = result.get("metrics", {})
-                log_execution_trace(
-                    flow_id="flow_smart_match_v1",
-                    result_score=metrics.get("match_score", 0.0),
-                    status="success",
-                )
-                clear_data_cache()
-                st.success("Sandbox run created successfully.")
-            else:
-                infra_err = result.get("infra_error")
-                if infra_err:
-                    err_type = infra_err.get("error_type", "CLOUD_ERROR")
-                    service  = infra_err.get("service", "")
-                    action   = infra_err.get("human_action", "")
-                    fix_url  = infra_err.get("activation_url", "")
-
-                    st.error(f"**Infrastructure error — {err_type}**")
-                    st.markdown(
-                        f"The sandbox could not run because a GCP infrastructure requirement is not met.\n\n"
-                        f"**Affected service:** `{service}`\n\n"
-                        f"**Required action:** {action}"
-                    )
-                    if fix_url:
-                        st.link_button("Enable API in GCP Console", fix_url, type="primary")
-                    st.info(
-                        "**Quick fix:** Switch to local sandbox mode — no GCP required.\n\n"
-                        "Set `SANDBOX_MODE=local` in your `.env` file and re-run, "
-                        "or use the segmented control above to select **local**."
-                    )
-                    with st.expander("Raw error detail"):
-                        st.code(infra_err.get("raw", ""), language="text")
+        def opt_anim(phase="idle", flow_name=""):
+            phases_map = {
+                "idle":       (-1, f"Ready — click Optimize to improve '{flow_name}'"),
+                "reading":    (0,  f"Planner reading '{flow_name}' skills and history from Neo4j..."),
+                "thinking":   (1,  f"Generator asking Gemini AI how to improve '{flow_name}'..."),
+                "proposing":  (2,  f"Critic validating the proposed replacement flow..."),
+                "validating": (3,  f"Simulator testing the new flow in sandbox..."),
+                "done":       (4,  f"Complete — improved version of '{flow_name}' saved as proposal"),
+                "error":      (-2, "No new proposals were created — try again in a moment"),
+            }
+            active, msg = phases_map.get(phase, phases_map["idle"])
+            agents = [
+                ("Planner",   "Reads flow + history", "#3267a8", "#dcecff"),
+                ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
+                ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
+                ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
+            ]
+            cards = ""
+            for i, (name, role, color, bg) in enumerate(agents):
+                is_a = active == i
+                is_d = active > i and active >= 0
+                op = "1" if (is_a or is_d) else "0.55"
+                bd = f"2px solid {color}" if is_a else "1px solid #d8d1c2"
+                cbg = bg if is_a else "#fffaf0"
+                pulse = "animation:pulse-card 1.4s ease-in-out infinite;" if is_a else ""
+                shimmer = '<div style="position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:shimmer 1.3s infinite;pointer-events:none;"></div>' if is_a else ""
+                if is_a:
+                    dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{color};animation:blink .9s infinite;margin-right:5px;flex-shrink:0;"></span>'
+                elif is_d:
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#167447;margin-right:5px;flex-shrink:0;"></span>'
                 else:
-                    st.error(result.get("error_log", "Sandbox run failed."))
-        if "last_sandbox_result" in st.session_state:
-            st.json(st.session_state["last_sandbox_result"])
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d8d1c2;margin-right:5px;flex-shrink:0;"></span>'
+                cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#65706d;line-height:1.3;">{role}</div></div>'
+                if i < 3:
+                    ac = color if (is_a or is_d) else "#d8d1c2"
+                    cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:16px;">&rarr;</div>'
+            pct = max(0, int(active / 4 * 100)) if active >= 0 else 0
+            if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
+            elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
+            elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
+            else:                 sb,sbd,sc = "#edf5ff","#3267a8","#3267a8"
+            return f"""<style>
+@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
+@keyframes pulse-card{{0%,100%{{box-shadow:0 0 0 0 rgba(50,103,168,.18)}}50%{{box-shadow:0 0 0 5px rgba(50,103,168,.06)}}}}
+@keyframes shimmer{{to{{left:140%}}}}
+</style>
+<div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
+<div style="display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
+<div style="background:#ede8df;border-radius:999px;height:2px;margin-bottom:9px;overflow:hidden;">
+<div style="background:#0f7b63;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
+<div style="background:{sb};border:1px solid {sbd};border-radius:7px;padding:8px 12px;font-size:.76rem;color:{sc};font-weight:500;">{msg}</div>
+</div>"""
 
-    with tab_approvals:
+        opt_slot.markdown(opt_anim(opt_phase, sel_name), unsafe_allow_html=True)
+
+        if opt_phase == "done":
+            st.markdown(f"""
+            <div style="background:#f0faf5;border:1px solid #167447;border-radius:10px;
+                        padding:14px 16px;margin-bottom:10px;">
+                <div style="font-size:.8rem;font-weight:600;color:#167447;margin-bottom:8px;">What the agent improved</div>
+                <div style="display:flex;gap:32px;flex-wrap:wrap;">
+                    <div>
+                        <div style="font-size:.68rem;color:#65706d;">Before</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">{sel_name}</div>
+                        <div style="font-size:.72rem;color:#a73737;">Score: {f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
+                    </div>
+                    <div style="font-size:18px;color:#d8d1c2;align-self:center;">&rarr;</div>
+                    <div>
+                        <div style="font-size:.68rem;color:#65706d;">After</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">New proposed flow</div>
+                        <div style="font-size:.72rem;color:#167447;">Score: sandbox-validated</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.info("Review the generated proposal below.")
+
+        if st.button("Optimize this flow", type="primary", use_container_width=True):
+            steps = sel_row.get("steps") or []
+            primitive_ids = [
+                step.get("primitive_id")
+                for step in steps
+                if isinstance(step, dict) and step.get("primitive_id")
+            ]
+            optimize_payload = {
+                "project_id": project["project_id"],
+                "business_flow_id": sel_row.get("id"),
+                "business_flow": sel_name,
+                "entrypoint": sel_row.get("entrypoint"),
+                "ordered_chain": sel_chain,
+                "steps": steps,
+                "primitive_ids": primitive_ids,
+                "source_paths": sel_row.get("source_paths") or [],
+                "datastores": sel_row.get("datastores") or [],
+                "integrations": sel_row.get("integrations") or [],
+                "risks": sel_row.get("risks") or [],
+                "confidence": sel_row.get("confidence"),
+            }
+            optimize_payload = json.loads(json.dumps(optimize_payload, default=str))
+            goal = (
+                f"Optimize the business flow named '{sel_name}'. Current score is {sel_score_f:.1f}. "
+                "Analyse its BusinessFlow, FlowStep, primitive graph evidence, historical failures, "
+                "and sandbox result. Propose a better version with justification."
+            )
+            st.session_state["opt_phase"] = "reading"
+            st.session_state["last_optimize_payload"] = optimize_payload
+            opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
+            publish_event(
+                source="ui",
+                target="planner",
+                event_type="started",
+                title="BusinessFlow optimization requested",
+                detail=sel_name,
+                payload=optimize_payload,
+            )
+
+            cmd = [
+                sys.executable, "main.py", "--goal", goal,
+                "--project-id", project["project_id"],
+                "--business-flow-id", str(sel_row.get("id")),
+            ]
+            repo_path = str(project.get("repo_path") or "")
+            if repo_path:
+                cmd.extend(["--source-path", repo_path])
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=ROOT,
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            stdout_lines = []
+            for raw_line in proc.stdout:
+                stdout_lines.append(raw_line)
+                ll = raw_line.lower()
+                if any(x in ll for x in ["query_graph", "querying", "reading", "graph", "neo4j"]):
+                    if st.session_state.get("opt_phase") != "reading":
+                        st.session_state["opt_phase"] = "reading"
+                        opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["gemini", "llm", "generat", "propose", "200 ok"]):
+                    if st.session_state.get("opt_phase") != "thinking":
+                        st.session_state["opt_phase"] = "thinking"
+                        opt_slot.markdown(opt_anim("thinking", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["critic", "validat", "check"]):
+                    if st.session_state.get("opt_phase") != "proposing":
+                        st.session_state["opt_phase"] = "proposing"
+                        opt_slot.markdown(opt_anim("proposing", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["simulat", "sandbox"]):
+                    if st.session_state.get("opt_phase") != "validating":
+                        st.session_state["opt_phase"] = "validating"
+                        opt_slot.markdown(opt_anim("validating", sel_name), unsafe_allow_html=True)
+
+            proc.wait()
+            stdout = "".join(stdout_lines)
+            clear_data_cache()
+
+            updated_flows = load_flows()
+            has_proposals = not updated_flows[updated_flows["status"].fillna("") == "proposed"].empty
+            st.session_state["last_optimize_result"] = {
+                "flow": sel_name,
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "payload": optimize_payload,
+            }
+
+            if has_proposals and proc.returncode == 0:
+                st.session_state["opt_phase"] = "done"
+                opt_slot.markdown(opt_anim("done", sel_name), unsafe_allow_html=True)
+                st.success("Optimization complete — review the new proposal below.")
+            else:
+                st.session_state["opt_phase"] = "error"
+                opt_slot.markdown(opt_anim("error", sel_name), unsafe_allow_html=True)
+                st.warning("No new proposals were created. Review the agent output below.")
+
+        if "last_optimize_result" in st.session_state:
+            result = st.session_state["last_optimize_result"]
+            with st.expander("Last optimization evidence", expanded=False):
+                st.write({
+                    "flow": result.get("flow"),
+                    "exit_code": result.get("exit_code"),
+                    "sandbox_scope": "isolated code sandbox when modify_code actions are generated; otherwise flow sandbox",
+                })
+                st.json(result.get("payload", {}))
+                st.code(result.get("stdout") or "(no stdout)", language="text")
+
+        st.divider()
+        st.subheader("Pending Optimizations")
         flows = load_flows()
         proposals = flows[flows["status"].fillna("") == "proposed"] if not flows.empty else flows
         if proposals.empty:
-            st.info("No pending optimization proposals.")
+            st.info("No pending proposals.")
         for _, row in proposals.iterrows():
             st.markdown(f"### {row['id']}")
             c1, c2, c3 = st.columns([1, 1, 4])
@@ -2270,10 +2544,68 @@ elif page == "Flows":
                     clear_data_cache()
                     st.rerun()
             with c3:
-                st.write({"name": row.get("name"), "avg_score": row.get("avg_score"), "skills": row.get("skills")})
+                st.write({
+                    "name": row.get("name"),
+                    "avg_score": row.get("avg_score"),
+                    "business_flow_id": row.get("business_flow_id"),
+                    "skills": row.get("skills"),
+                })
+                if row.get("justification"):
+                    st.info(row.get("justification"))
             payload = proposal_payload(row.get("yaml_config"))
             if payload:
                 st.code(payload, language="json")
+
+        with st.expander("Supporting pipelines, database flows, sandbox, and web evidence"):
+            support_tabs = st.tabs(["Software Pipelines", "Database Flows", "Sandbox", "Optional Web Evidence"])
+            with support_tabs[0]:
+                all_pipelines = load_pipelines()
+                if all_pipelines.empty:
+                    st.info("No pipelines discovered yet. Run an ingest with a source path containing routes and contract/API code.")
+                else:
+                    display_df = all_pipelines[["name", "app_id", "entrypoint", "steps", "entity_types", "has_contract"]].copy()
+                    display_df["risk"] = display_df["has_contract"].map(lambda x: "HIGH" if x else "low")
+                    display_table(display_df.drop(columns=["has_contract"]), height=280)
+            with support_tabs[1]:
+                flows = load_flows()
+                if flows.empty:
+                    st.info("No database flows found.")
+                else:
+                    display_table(flows, height=360)
+            with support_tabs[2]:
+                mode = st.segmented_control(
+                    "Sandbox target",
+                    options=["local", "cloudrun"],
+                    default=os.environ.get("SANDBOX_MODE", "local")
+                    if os.environ.get("SANDBOX_MODE", "local") in {"local", "cloudrun"}
+                    else "local",
+                    key="flow_sandbox_mode",
+                )
+                flow_yaml = st.text_area("Sandbox flow YAML", value=default_sandbox_flow(), height=220, key="flow_sandbox_yaml")
+                if st.button("Create Sandbox Run", type="primary", key="flow_sandbox_run"):
+                    result = run_sandbox_from_ui(flow_yaml, mode)
+                    st.session_state["last_sandbox_result"] = result
+                    if result.get("status") == "success":
+                        st.success("Sandbox run created successfully.")
+                    else:
+                        st.error(result.get("error_log", "Sandbox run failed."))
+                if "last_sandbox_result" in st.session_state:
+                    st.json(st.session_state["last_sandbox_result"])
+            with support_tabs[3]:
+                default_source = str((ROOT.parent / "fundraising_app" / "Crowd-Funding-App").resolve())
+                url = st.text_input("Website URL", value="http://127.0.0.1:5173", key="flow_ingest_url")
+                source_path = st.text_input("Local source folder", value=default_source, key="flow_ingest_source")
+                if st.button("Ingest Website & Source", type="primary"):
+                    result = crawl_website(
+                        start_url=url,
+                        max_depth=1,
+                        max_pages=30,
+                        clear_existing=True,
+                        source_path=source_path or None,
+                    )
+                    clear_data_cache()
+                    st.success(f"Indexed {result['domain']}")
+                    st.json(result)
 
 elif page == "Connected App":
     st.subheader("Connected Application Profiles")
@@ -2654,388 +2986,6 @@ elif page == "Agent Run":
     proposals = load_flows()
     proposals = proposals[proposals["status"].fillna("") == "proposed"]
     display_table(proposals[["id", "name", "avg_score", "server", "connector"]], height=220)
-
-elif page == "Sandbox":
-    st.subheader("Sandbox Control")
-    gcp_url = cloud_run_job_url()
-    mode = st.segmented_control(
-        "Sandbox target",
-        options=["local", "cloudrun"],
-        default=os.environ.get("SANDBOX_MODE", "local")
-        if os.environ.get("SANDBOX_MODE", "local") in {"local", "cloudrun"}
-        else "local",
-    )
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Configured Mode", os.environ.get("SANDBOX_MODE", "local"))
-    c2.metric("GCP Region", os.environ.get("SANDBOX_GCP_REGION", "not set"))
-    c3.metric("Cloud Run Job", os.environ.get("SANDBOX_JOB_NAME", "not set"))
-
-    if gcp_url:
-        st.link_button("Open GCP Cloud Run Job", gcp_url)
-        st.caption(gcp_url)
-    else:
-        st.warning("Set GOOGLE_CLOUD_PROJECT, SANDBOX_GCP_REGION, and SANDBOX_JOB_NAME to show the GCP container/job link.")
-
-    flow_yaml = st.text_area("Sandbox flow YAML", value=default_sandbox_flow(), height=300)
-    flow_id = "ui_sandbox_candidate"
-    try:
-        parsed_flow = yaml.safe_load(flow_yaml) or {}
-        if isinstance(parsed_flow, dict):
-            flow_id = parsed_flow.get("flow_id", flow_id)
-    except yaml.YAMLError:
-        pass
-
-    if st.button("Create Sandbox Run", type="primary"):
-        publish_event(
-            source="sandbox",
-            event_type="started",
-            title="Sandbox run requested",
-            detail=f"Mode: {mode}; Flow: {flow_id}",
-            payload={"mode": mode, "flow_id": flow_id},
-        )
-        with st.spinner(f"Creating {mode} sandbox run..."):
-            result = run_sandbox_from_ui(flow_yaml, mode)
-        publish_event(
-            source="sandbox",
-            target="evaluator",
-            event_type="result" if result.get("status") == "success" else "error",
-            title="Sandbox run completed",
-            detail=result.get("error_log") or f"Metrics: {result.get('metrics', {})}",
-            payload={"flow_id": flow_id, "result": result},
-        )
-        clear_data_cache()
-        st.session_state["last_sandbox_result"] = result
-        st.session_state["last_sandbox_flow_id"] = flow_id
-        if result.get("status") == "success":
-            st.success("Sandbox run created successfully.")
-            metrics = result.get("metrics", {})
-            score = metrics.get("match_score", 0.0)
-            log_execution_trace(flow_id="flow_smart_match_v1", result_score=score, status="success")
-            st.info("Execution trace logged against flow_smart_match_v1 for dashboard visibility.")
-        else:
-            infra_err = result.get("infra_error")
-            if infra_err:
-                err_type = infra_err.get("error_type", "CLOUD_ERROR")
-                service  = infra_err.get("service", "")
-                action   = infra_err.get("human_action", "")
-                fix_url  = infra_err.get("activation_url", "")
-
-                st.error(f"**Infrastructure error — {err_type}**")
-                st.markdown(
-                    f"The sandbox could not run because a GCP infrastructure requirement is not met.\n\n"
-                    f"**Affected service:** `{service}`\n\n"
-                    f"**Required action:** {action}"
-                )
-                if fix_url:
-                    st.link_button("Enable API in GCP Console", fix_url, type="primary")
-                st.info(
-                    "**Quick fix:** Switch to local sandbox mode — no GCP required.\n\n"
-                    "Set `SANDBOX_MODE=local` in your `.env` file and re-run, "
-                    "or use the segmented control above to select **local**."
-                )
-                with st.expander("Raw error detail"):
-                    st.code(infra_err.get("raw", ""), language="text")
-            else:
-                st.error(result.get("error_log", "Sandbox run failed."))
-
-    if "last_sandbox_result" in st.session_state:
-        result = st.session_state["last_sandbox_result"]
-        st.markdown("### Last Sandbox Result")
-        st.json(result)
-        if gcp_url and mode == "cloudrun":
-            st.link_button("Open Created GCP Sandbox Job", gcp_url)
-
-elif page == "Flows":
-    st.subheader("Flows")
-    flows = load_flows()
-    status = st.multiselect(
-        "Status",
-        sorted([s for s in flows["status"].dropna().unique()]) if not flows.empty else [],
-        default=sorted([s for s in flows["status"].dropna().unique()]) if not flows.empty else [],
-    )
-    if status and not flows.empty:
-        flows = flows[flows["status"].isin(status)]
-    display_table(flows, height=300)
-
-    st.divider()
-    st.subheader("Optimize a Flow")
-    st.caption("Select one of the original flows below. The agent will analyse it and propose an improved version without leaving this page.")
-
-    all_flows = load_flows()
-
-    # ── Only show real original flows, not agent-generated proposals ──
-    original_flows = all_flows[
-        ~all_flows["name"].fillna("").str.startswith("newflow") &
-        ~all_flows["status"].fillna("").isin(["proposed", "rejected"])
-    ] if not all_flows.empty else all_flows
-
-    if original_flows.empty:
-        st.info("No original flows found to optimize.")
-    else:
-        # ── Flow selection as clean cards ──
-        selected_idx = st.session_state.get("selected_flow_idx", 0)
-        selected_idx = min(selected_idx, len(original_flows) - 1)
-
-        cols = st.columns(len(original_flows))
-        for i, (_, row) in enumerate(original_flows.iterrows()):
-            score = row.get("avg_score")
-            score_val = float(score) if score and str(score) != "nan" else None
-            if score_val is None:
-                score_display = "N/A"
-                score_color = "#65706d"
-            elif score_val < 5:
-                score_display = f"{score_val:.1f} — low"
-                score_color = "#a73737"
-            elif score_val < 7:
-                score_display = f"{score_val:.1f} — ok"
-                score_color = "#a55b19"
-            else:
-                score_display = f"{score_val:.1f} — good"
-                score_color = "#167447"
-
-            is_sel = selected_idx == i
-            border = "2px solid #19211f" if is_sel else "1px solid #d8d1c2"
-            bg = "#19211f" if is_sel else "#fffaf0"
-            txt = "#f7f1e4" if is_sel else "#19211f"
-            sub = "#a8a49e" if is_sel else "#65706d"
-
-            with cols[i]:
-                st.markdown(f"""
-                <div style="background:{bg};border:{border};border-radius:10px;
-                            padding:12px 14px;cursor:pointer;transition:all .2s;
-                            margin-bottom:8px;">
-                    <div style="font-size:.82rem;font-weight:600;color:{txt};margin-bottom:4px;
-                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                        {row['name']}
-                    </div>
-                    <div style="font-size:.72rem;color:{score_color if not is_sel else '#a8a49e'};">
-                        Score: {score_display}
-                    </div>
-                    <div style="font-size:.7rem;color:{sub};margin-top:2px;">
-                        {row.get('status','') or '—'}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                if st.button("Select", key=f"sel_{i}", use_container_width=True):
-                    st.session_state["selected_flow_idx"] = i
-                    st.session_state["opt_phase"] = "idle"
-                    st.rerun()
-
-        # ── Selected flow details — compact row ──
-        sel_row     = original_flows.iloc[selected_idx]
-        sel_name    = sel_row["name"]
-        sel_score   = sel_row.get("avg_score")
-        sel_score_f = float(sel_score) if sel_score and str(sel_score) != "nan" else None
-        sel_conn    = sel_row.get("connector")
-        sel_conn    = sel_conn if sel_conn and str(sel_conn) != "nan" else "—"
-        sel_skills  = sel_row.get("skills") or []
-        sel_status  = sel_row.get("status") or "—"
-
-        st.markdown(f"""
-        <div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:10px;
-                    padding:12px 16px;margin:8px 0 12px;display:flex;gap:24px;
-                    flex-wrap:wrap;align-items:center;">
-            <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Selected flow</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_name}</div>
-            </div>
-            <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Current score</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{f"{sel_score_f:.1f}" if sel_score_f is not None else "N/A"}</div>
-            </div>
-            <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Connector</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_conn}</div>
-            </div>
-            <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Status</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_status}</div>
-            </div>
-            <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Skills</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{len(sel_skills) if isinstance(sel_skills, list) else 0} skills</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ── Agent animation ──
-        opt_phase = st.session_state.get("opt_phase", "idle")
-        opt_slot  = st.empty()
-
-        def opt_anim(phase="idle", flow_name=""):
-            phases_map = {
-                "idle":       (-1, f"Ready — click Optimize to improve '{flow_name}'"),
-                "reading":    (0,  f"Planner reading '{flow_name}' skills and history from Neo4j..."),
-                "thinking":   (1,  f"Generator asking Gemini AI how to improve '{flow_name}'..."),
-                "proposing":  (2,  f"Critic validating the proposed replacement flow..."),
-                "validating": (3,  f"Simulator testing the new flow in sandbox..."),
-                "done":       (4,  f"Complete — improved version of '{flow_name}' saved as proposal"),
-                "error":      (-2, "No new proposals were created — try again in a moment"),
-            }
-            active, msg = phases_map.get(phase, phases_map["idle"])
-            agents = [
-                ("Planner",   "Reads flow + history", "#3267a8", "#dcecff"),
-                ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
-                ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
-                ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
-            ]
-            cards = ""
-            for i, (name, role, color, bg) in enumerate(agents):
-                is_a = active == i
-                is_d = active > i and active >= 0
-                op   = "1" if (is_a or is_d) else "0.55"
-                bd   = f"2px solid {color}" if is_a else "1px solid #d8d1c2"
-                cbg  = bg if is_a else "#fffaf0"
-                pulse = "animation:pulse-card 1.4s ease-in-out infinite;" if is_a else ""
-                shimmer = '<div style="position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:shimmer 1.3s infinite;pointer-events:none;"></div>' if is_a else ""
-                if is_a:
-                    dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{color};animation:blink .9s infinite;margin-right:5px;flex-shrink:0;"></span>'
-                elif is_d:
-                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#167447;margin-right:5px;flex-shrink:0;"></span>'
-                else:
-                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d8d1c2;margin-right:5px;flex-shrink:0;"></span>'
-                cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#65706d;line-height:1.3;">{role}</div></div>'
-                if i < 3:
-                    ac = color if (is_a or is_d) else "#d8d1c2"
-                    cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:16px;">&rarr;</div>'
-            pct = max(0, int(active / 4 * 100)) if active >= 0 else 0
-            if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
-            elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
-            elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
-            else:                 sb,sbd,sc = "#edf5ff","#3267a8","#3267a8"
-            return f"""<style>
-@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
-@keyframes pulse-card{{0%,100%{{box-shadow:0 0 0 0 rgba(50,103,168,.18)}}50%{{box-shadow:0 0 0 5px rgba(50,103,168,.06)}}}}
-@keyframes shimmer{{to{{left:140%}}}}
-</style>
-<div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
-<div style="display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
-<div style="background:#ede8df;border-radius:999px;height:2px;margin-bottom:9px;overflow:hidden;">
-<div style="background:#0f7b63;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
-<div style="background:{sb};border:1px solid {sbd};border-radius:7px;padding:8px 12px;font-size:.76rem;color:{sc};font-weight:500;">{msg}</div>
-</div>"""
-
-        opt_slot.markdown(opt_anim(opt_phase, sel_name), unsafe_allow_html=True)
-
-        # Result panel after done
-        if opt_phase == "done":
-            st.markdown(f"""
-            <div style="background:#f0faf5;border:1px solid #167447;border-radius:10px;
-                        padding:14px 16px;margin-bottom:10px;">
-                <div style="font-size:.8rem;font-weight:600;color:#167447;margin-bottom:8px;">What the agent improved</div>
-                <div style="display:flex;gap:32px;flex-wrap:wrap;">
-                    <div>
-                        <div style="font-size:.68rem;color:#65706d;">Before</div>
-                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">{sel_name}</div>
-                        <div style="font-size:.72rem;color:#a73737;">Score: {f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
-                    </div>
-                    <div style="font-size:18px;color:#d8d1c2;align-self:center;">&rarr;</div>
-                    <div>
-                        <div style="font-size:.68rem;color:#65706d;">After</div>
-                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">New proposed flow</div>
-                        <div style="font-size:.72rem;color:#167447;">Score: estimated higher</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.info("Go to Proposals page to Approve or Reject this proposal.")
-
-        if st.button("Optimize this flow", type="primary", use_container_width=True):
-            goal = f"Optimize the flow named '{sel_name}'. Current score is {sel_score_f}. Analyse its skills and historical match failures. Propose a better version."
-            st.session_state["opt_phase"] = "reading"
-            opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
-
-            env = os.environ.copy()
-            proc = subprocess.Popen(
-                [sys.executable, "main.py", "--goal", goal],
-                cwd=ROOT, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
-            for raw_line in proc.stdout:
-                ll = raw_line.lower()
-                if any(x in ll for x in ["query_graph","querying","reading","graph","neo4j"]):
-                    if st.session_state.get("opt_phase") != "reading":
-                        st.session_state["opt_phase"] = "reading"
-                        opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["gemini","llm","generat","propose","200 ok"]):
-                    if st.session_state.get("opt_phase") != "thinking":
-                        st.session_state["opt_phase"] = "thinking"
-                        opt_slot.markdown(opt_anim("thinking", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["critic","validat","check"]):
-                    if st.session_state.get("opt_phase") != "proposing":
-                        st.session_state["opt_phase"] = "proposing"
-                        opt_slot.markdown(opt_anim("proposing", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["simulat","sandbox"]):
-                    if st.session_state.get("opt_phase") != "validating":
-                        st.session_state["opt_phase"] = "validating"
-                        opt_slot.markdown(opt_anim("validating", sel_name), unsafe_allow_html=True)
-
-            proc.wait()
-            clear_data_cache()
-
-            updated_flows = load_flows()
-            has_proposals = not updated_flows[updated_flows["status"].fillna("") == "proposed"].empty
-
-            if has_proposals:
-                st.session_state["opt_phase"] = "done"
-                opt_slot.markdown(opt_anim("done", sel_name), unsafe_allow_html=True)
-                st.success("Optimization complete — go to Proposals to approve the new flow!")
-            else:
-                st.session_state["opt_phase"] = "error"
-                opt_slot.markdown(opt_anim("error", sel_name), unsafe_allow_html=True)
-                st.warning("No new proposals were created. Try again in a moment.")
-
-
-elif page == "Proposals":
-    st.subheader("Pending Optimizations")
-    flows = load_flows()
-    proposals = flows[flows["status"].fillna("") == "proposed"] if not flows.empty else flows
-    if proposals.empty:
-        st.info("No pending proposals.")
-    for _, row in proposals.iterrows():
-        st.markdown(f"### {row['id']}")
-        c1, c2, c3 = st.columns([1, 1, 4])
-        with c1:
-            if st.button("Approve", key=f"approve_{row['id']}", type="primary"):
-                activate_proposal(row["id"])
-                publish_event(
-                    source="human_approval",
-                    event_type="approved",
-                    title="Proposal approved in Streamlit",
-                    detail=row["id"],
-                    payload={"proposal_id": row["id"]},
-                )
-                clear_data_cache()
-                st.success(f"Approved {row['id']}")
-                st.rerun()
-        with c2:
-            if st.button("Reject", key=f"reject_{row['id']}"):
-                reject_proposal(row["id"], "Rejected in Streamlit dashboard")
-                publish_event(
-                    source="human_approval",
-                    event_type="rejected",
-                    title="Proposal rejected in Streamlit",
-                    detail=row["id"],
-                    payload={"proposal_id": row["id"]},
-                )
-                clear_data_cache()
-                st.warning(f"Rejected {row['id']}")
-                st.rerun()
-        with c3:
-            st.write(
-                {
-                    "name": row.get("name"),
-                    "avg_score": row.get("avg_score"),
-                    "server": row.get("server"),
-                    "connector": row.get("connector"),
-                    "skills": row.get("skills"),
-                }
-            )
-        payload = proposal_payload(row.get("yaml_config"))
-        if payload:
-            st.code(payload, language="json")
 
 elif page == "Agentic Architecture":
     st.subheader("Full Agentic Architecture")

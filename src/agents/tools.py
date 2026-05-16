@@ -14,8 +14,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -32,6 +34,8 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+from src.agents.flow_utils import _extract_flow_references, _normalise_flow_def
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +63,7 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _sanitize_snapshot(data: object) -> object:
-    """Recursively strip secret-looking keys from a snapshot dict/list.
-
-    Called on every snapshot before it is passed to the sandbox so that
-    passwords, tokens, and API keys can never leak into the execution environment.
-    """
+    """Recursively strip secret-looking keys from a snapshot dict/list."""
     if isinstance(data, dict):
         return {
             k: _sanitize_snapshot(v)
@@ -143,11 +143,12 @@ def _run_read_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
     retry=retry_if_exception_type(neo4j_exc.ServiceUnavailable),
     reraise=True,
 )
-def _run_write_cypher(cypher: str, **params) -> List[Dict]:
+def _run_write_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
+    """Execute a write Cypher query. Params are passed as a dict (matching _run_read_cypher)."""
     driver = _get_driver()
     try:
         with driver.session(database=_db()) as session:
-            result = session.run(Query(cypher, timeout=_query_timeout()), **params)
+            result = session.run(Query(cypher, timeout=_query_timeout()), params or {})
             return [dict(record) for record in result]
     finally:
         driver.close()
@@ -198,17 +199,19 @@ def query_graph(cypher_query: str) -> List[Dict]:
 # Tool 2 — simulate_flow                                                       #
 # --------------------------------------------------------------------------- #
 
-def _capability_token(flow_id: str) -> str:
+def _capability_token(flow_id: str, allowed_skills: Optional[List[str]] = None) -> str:
+    """Mint a JWT capability token scoped to the skills actually in the flow."""
     secret = os.environ.get("CAPABILITY_TOKEN_SECRET", "dev-secret-do-not-use")
+    skills = allowed_skills or [
+        "filter_by_industry_exact",
+        "random_shuffle",
+        "semantic_similarity",
+        "fuzzy_industry_match",
+    ]
     payload = {
         "flow_id": flow_id,
         "allowed_connectors": ["sql_connector_v1", "csv_connector_v1", "json_connector_v1"],
-        "allowed_skills": [
-            "filter_by_industry_exact",
-            "random_shuffle",
-            "semantic_similarity",
-            "fuzzy_industry_match",
-        ],
+        "allowed_skills": skills,
         "iat": int(time.time()),
         "exp": int(time.time()) + 600,
     }
@@ -221,13 +224,9 @@ def _build_snapshot(
 ) -> dict:
     """Query Neo4j Graph A for companies and mentors to build a sandbox snapshot.
 
-    Isolation guarantees:
-    - If *app_id* is provided, only Company nodes whose app_id matches are
-      included. Falls back to the full graph if that query returns no results
-      (the seeded EcoLink data pre-dates per-app scoping).
-    - The returned dict is always passed through _sanitize_snapshot() so that
-      secret-looking fields are stripped before the snapshot reaches the sandbox.
-    - Falls back to two-row sample data if Neo4j is unavailable.
+    If *app_id* is provided, only Company nodes whose app_id matches are
+    included. Falls back to the full graph if that query returns no results.
+    The returned dict is always passed through _sanitize_snapshot().
     """
     _SAMPLE: dict = {
         "companies": [
@@ -240,7 +239,6 @@ def _build_snapshot(
         ],
     }
     try:
-        # Build company query — try app_id-scoped first, fall back to unscoped
         if app_id:
             company_rows = _run_read_cypher(
                 "MATCH (c:Company) WHERE c.app_id = $app_id "
@@ -249,9 +247,7 @@ def _build_snapshot(
                 {"app_id": app_id},
             )
             if not company_rows:
-                logger.info(
-                    "No Company nodes found for app_id=%s; using full graph.", app_id
-                )
+                logger.info("No Company nodes for app_id=%s; using full graph.", app_id)
                 company_rows = _run_read_cypher(
                     "MATCH (c:Company) WHERE c.industry = $industry "
                     "RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15"
@@ -262,21 +258,17 @@ def _build_snapshot(
         elif industry:
             company_rows = _run_read_cypher(
                 "MATCH (c:Company) WHERE c.industry = $industry "
-                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
-                "LIMIT 15",
+                "RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15",
                 {"industry": industry},
             )
         else:
             company_rows = _run_read_cypher(
-                "MATCH (c:Company) "
-                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
-                "LIMIT 15"
+                "MATCH (c:Company) RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15"
             )
 
         mentor_rows = _run_read_cypher(
             "MATCH (m:Mentor) "
-            "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise "
-            "LIMIT 10"
+            "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise LIMIT 10"
         )
 
         companies = [
@@ -325,11 +317,7 @@ def _traces_to_metrics(traces: List[dict], latency_ms: int) -> Dict:
 
 
 def _mock_sandbox(flow_yaml: str) -> Dict:
-    """Deterministic local simulation based on skills present in the YAML.
-
-    Searches the raw text for known skill names so it works regardless of the
-    exact nesting structure the LLM chooses to generate.
-    """
+    """Deterministic local simulation based on skills present in the YAML."""
     try:
         yaml.safe_load(flow_yaml)  # syntax check only
     except yaml.YAMLError as exc:
@@ -357,12 +345,7 @@ def _mock_sandbox(flow_yaml: str) -> Dict:
 
 
 def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
-    """Run sandbox_task.py as a local subprocess.
-
-    This is the default non-mock mode: real simulation logic from sandbox-system/,
-    real Neo4j snapshot data, no GCP required. Uses the DATA_STREAM_START/END
-    protocol defined in sandbox_task.py to extract results.
-    """
+    """Run sandbox_task.py as a local subprocess."""
     sandbox_script = (
         Path(__file__).resolve().parent.parent.parent
         / "sandbox-system"
@@ -379,13 +362,9 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
         flow_def = yaml.safe_load(flow_yaml) or {}
         if not isinstance(flow_def, dict):
             flow_def = {}
-        # Handle top-level nested YAML (e.g. {flow_proposal_v2: {steps: ...}})
         if "flow_id" not in flow_def and len(flow_def) == 1:
             key = next(iter(flow_def))
-            if isinstance(flow_def[key], dict):
-                flow_name = str(key)
-            else:
-                flow_name = str(key)
+            flow_name = str(key)
         else:
             flow_name = flow_def.get("flow_id", "proposed_flow")
     except yaml.YAMLError:
@@ -444,17 +423,11 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
 def _poll_cloud_logging_for_traces(
     project: str, region: str, job: str, execution_id: str
 ) -> Optional[List[dict]]:
-    """Poll Cloud Logging until DATA_STREAM_START/END markers appear in sandbox stdout.
-
-    Returns the parsed trace list on success, or None if the markers are not
-    found within the timeout window.
-    """
+    """Poll Cloud Logging until DATA_STREAM_START/END markers appear."""
     try:
         from google.cloud import logging as gcp_logging  # noqa: PLC0415
     except ImportError:
-        logger.error(
-            "google-cloud-logging is not installed. Run: pip install google-cloud-logging"
-        )
+        logger.error("google-cloud-logging is not installed.")
         return None
 
     log_client = gcp_logging.Client(project=project)
@@ -470,16 +443,10 @@ def _poll_cloud_logging_for_traces(
     _POLL_S = 5
     deadline = time.time() + _MAX_WAIT_S
 
-    logger.info(
-        "Polling Cloud Logging for execution %s (up to %ds).",
-        execution_id,
-        _MAX_WAIT_S,
-    )
+    logger.info("Polling Cloud Logging for execution %s (up to %ds).", execution_id, _MAX_WAIT_S)
 
     while time.time() < deadline:
-        entries = list(
-            log_client.list_entries(filter_=log_filter, order_by="timestamp asc")
-        )
+        entries = list(log_client.list_entries(filter_=log_filter, order_by="timestamp asc"))
         parts: list[str] = []
         for entry in entries:
             payload = entry.payload
@@ -497,27 +464,19 @@ def _poll_cloud_logging_for_traces(
         if "DATA_STREAM_START" in combined and "DATA_STREAM_END" in combined:
             traces = _parse_sandbox_output(combined)
             if traces is not None:
-                logger.info(
-                    "Parsed %d traces from Cloud Logging for %s.", len(traces), execution_id
-                )
+                logger.info("Parsed %d traces from Cloud Logging for %s.", len(traces), execution_id)
                 return traces
 
         time.sleep(_POLL_S)
 
-    logger.warning(
-        "No DATA_STREAM_START/END found in Cloud Logging for %s after %ds.",
-        execution_id,
-        _MAX_WAIT_S,
-    )
+    logger.warning("No DATA_STREAM_START/END in Cloud Logging for %s after %ds.", execution_id, _MAX_WAIT_S)
     return None
 
 
 def _classify_cloud_error(exc: Exception) -> dict:
     """Parse a GCP exception into a structured infra-error dict."""
     msg = str(exc)
-    # SERVICE_DISABLED — API not enabled on this project
     if "SERVICE_DISABLED" in msg or "has not been used in project" in msg:
-        import re
         url_match = re.search(r"https://console\.developers\.google\.com[^\s\"'>\]]+", msg)
         activation_url = url_match.group(0).rstrip(").,") if url_match else ""
         svc_match = re.search(r'value: "([^"]+\.googleapis\.com)"', msg)
@@ -529,7 +488,6 @@ def _classify_cloud_error(exc: Exception) -> dict:
             "human_action": f"Enable the '{service}' API in GCP console, then retry.",
             "raw": msg[:600],
         }
-    # PERMISSION_DENIED
     if "403" in msg or "PERMISSION_DENIED" in msg:
         return {
             "error_type": "CLOUD_PERMISSION_DENIED",
@@ -538,7 +496,6 @@ def _classify_cloud_error(exc: Exception) -> dict:
             "human_action": "Check GCP IAM permissions for the service account.",
             "raw": msg[:600],
         }
-    # Generic cloud error
     return {
         "error_type": "CLOUD_ERROR",
         "service": "",
@@ -549,16 +506,7 @@ def _classify_cloud_error(exc: Exception) -> dict:
 
 
 def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
-    """Trigger sandbox_task.py via a Google Cloud Run Job, then poll Cloud Logging
-    for the DATA_STREAM_START/END output written by sandbox_task.py to extract
-    real metrics.
-
-    The Cloud Run job must already exist (see sandbox-system/Dockerfile and
-    SandboxExecutor.py for setup instructions).
-
-    Required env vars: GOOGLE_CLOUD_PROJECT, SANDBOX_JOB_NAME.
-    Optional: SANDBOX_GCP_REGION (default: us-central1).
-    """
+    """Trigger sandbox_task.py via a Google Cloud Run Job."""
     from google.cloud import run_v2  # noqa: PLC0415
 
     try:
@@ -573,18 +521,10 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
 
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not project:
-        return {
-            "status": "fail",
-            "metrics": {},
-            "error_log": "GOOGLE_CLOUD_PROJECT env var is not set.",
-        }
+        return {"status": "fail", "metrics": {}, "error_log": "GOOGLE_CLOUD_PROJECT env var is not set."}
     job = os.environ.get("SANDBOX_JOB_NAME")
     if not job:
-        return {
-            "status": "fail",
-            "metrics": {},
-            "error_log": "SANDBOX_JOB_NAME env var is not set.",
-        }
+        return {"status": "fail", "metrics": {}, "error_log": "SANDBOX_JOB_NAME env var is not set."}
     region = os.environ.get("SANDBOX_GCP_REGION", "us-central1")
 
     client = run_v2.JobsClient()
@@ -609,11 +549,7 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
         execution = operation.result(timeout=300)
     except Exception as exc:
         classified = _classify_cloud_error(exc)
-        logger.error(
-            "Cloud Run sandbox failed [%s]: %s",
-            classified["error_type"],
-            classified["raw"],
-        )
+        logger.error("Cloud Run sandbox failed [%s]: %s", classified["error_type"], classified["raw"])
         return {
             "status": "fail",
             "metrics": {},
@@ -622,7 +558,6 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
         }
 
     latency_ms = round((time.time() - t0) * 1000)
-    # execution.name format: projects/{p}/locations/{r}/jobs/{j}/executions/{id}
     execution_id = execution.name.split("/")[-1]
     logger.info("Cloud Run execution %s completed in %dms.", execution_id, latency_ms)
 
@@ -633,8 +568,7 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
             "metrics": {},
             "error_log": (
                 f"Cloud Run execution '{execution_id}' finished but no DATA_STREAM_START/END "
-                "markers were found in Cloud Logging within 60s. "
-                "Verify sandbox_task.py ran and that google-cloud-logging is installed."
+                "markers were found in Cloud Logging within 60s."
             ),
         }
 
@@ -644,6 +578,190 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
         "error_log": None,
         "traces": traces,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Code sandbox — isolated codebase copy with patch + test execution            #
+# --------------------------------------------------------------------------- #
+
+def _detect_test_cmd(src_root: Path) -> Optional[str]:
+    """Auto-detect a test/validation command from the project layout."""
+    if (src_root / "package.json").exists():
+        try:
+            pkg = json.loads((src_root / "package.json").read_text())
+            if pkg.get("scripts", {}).get("test"):
+                return "npm test"
+        except Exception:
+            pass
+    if (src_root / "Cargo.toml").exists():
+        return "cargo test"
+    py_files = list(src_root.rglob("*.py"))
+    if py_files:
+        test_files = [f for f in py_files if f.name.startswith("test_") or "tests" in str(f)]
+        if test_files:
+            return f"{sys.executable} -m pytest --tb=short -q"
+        return f"{sys.executable} -m py_compile " + " ".join(str(f) for f in py_files[:20])
+    return None
+
+
+def _parse_pytest_output(output: str) -> tuple[int, int]:
+    """Return (passed, failed) from pytest -q output."""
+    passed = failed = 0
+    for line in output.splitlines():
+        m = re.search(r"(\d+) passed", line)
+        if m:
+            passed = int(m.group(1))
+        m = re.search(r"(\d+) failed", line)
+        if m:
+            failed = int(m.group(1))
+    return passed, failed
+
+
+def _code_sandbox(
+    source_path: str,
+    patches: List[Dict],
+    test_cmd: Optional[str] = None,
+) -> Dict:
+    """Apply code patches to an isolated temp copy of source_path, then run tests.
+
+    Each patch dict must have: file_path (str), old_code (str), new_code (str).
+    Returns a result dict compatible with the evaluator's metrics format.
+    match_score = (tests_passed / total_tests) * 10, capped at 10.
+    """
+    src_root = Path(source_path).expanduser().resolve()
+    if not src_root.exists():
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": f"source_path does not exist: {source_path}",
+        }
+
+    tmp_dir = tempfile.mkdtemp(prefix="ecolink_sandbox_")
+    traces: List[Dict] = []
+    patch_count = 0
+
+    try:
+        # 1. Copy the codebase into the temp dir
+        sandbox_root = Path(tmp_dir) / "src"
+        shutil.copytree(str(src_root), str(sandbox_root), ignore=shutil.ignore_patterns(
+            ".git", "node_modules", "__pycache__", ".venv", "venv", "*.pyc",
+        ))
+
+        # 2. Apply each patch
+        for patch in patches:
+            rel_path = patch.get("file_path", "")
+            old_code = patch.get("old_code", "")
+            new_code = patch.get("new_code", "")
+            if not rel_path:
+                continue
+
+            target = sandbox_root / rel_path
+            applied = False
+            error_msg = None
+
+            if old_code == "" and new_code:
+                # New file creation
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(new_code, encoding="utf-8")
+                applied = True
+            elif target.exists():
+                original = target.read_text(encoding="utf-8")
+                if old_code in original:
+                    target.write_text(original.replace(old_code, new_code, 1), encoding="utf-8")
+                    applied = True
+                else:
+                    error_msg = f"old_code not found in {rel_path}"
+                    logger.warning("Code patch failed: %s", error_msg)
+            else:
+                error_msg = f"Target file not found: {rel_path}"
+                logger.warning("Code patch failed: %s", error_msg)
+
+            traces.append({
+                "file": rel_path,
+                "patch_applied": applied,
+                "description": patch.get("description", ""),
+                "error": error_msg,
+            })
+            if applied:
+                patch_count += 1
+
+        # 3. Detect or use provided test command
+        cmd = test_cmd or _detect_test_cmd(sandbox_root)
+        if not cmd:
+            # No tests found — treat patch application success as the metric
+            success_rate = patch_count / max(len(patches), 1)
+            return {
+                "status": "success" if patch_count > 0 else "fail",
+                "metrics": {
+                    "match_score": round(success_rate * 10, 2),
+                    "patch_count": patch_count,
+                    "tests_passed": 0,
+                    "tests_failed": 0,
+                },
+                "error_log": None if patch_count > 0 else "No patches applied and no test command found.",
+                "traces": traces,
+            }
+
+        # 4. Run the test command inside the sandbox copy
+        t0 = time.time()
+        try:
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=str(sandbox_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**os.environ, "PYTHONPATH": str(sandbox_root)},
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "status": "fail",
+                "metrics": {"patch_count": patch_count},
+                "error_log": "Code sandbox test command timed out after 120 seconds.",
+                "traces": traces,
+            }
+        latency_ms = round((time.time() - t0) * 1000)
+        test_output = proc.stdout + proc.stderr
+
+        passed, failed = _parse_pytest_output(test_output)
+        total = passed + failed
+        if total == 0:
+            # Binary pass/fail — no pytest counts
+            success = proc.returncode == 0
+            match_score = 10.0 if success else 0.0
+            tests_passed = 1 if success else 0
+            tests_failed = 0 if success else 1
+            total = 1
+        else:
+            match_score = round((passed / total) * 10, 2)
+            tests_passed = passed
+            tests_failed = failed
+
+        status = "success" if proc.returncode == 0 else "fail"
+        for t in traces:
+            t["test_output"] = test_output[:500]
+
+        logger.info(
+            "Code sandbox: %d patches applied, %d/%d tests passed, score=%.2f, latency=%dms",
+            patch_count, tests_passed, total, match_score, latency_ms,
+        )
+
+        return {
+            "status": status,
+            "metrics": {
+                "match_score": match_score,
+                "latency_ms": latency_ms,
+                "patch_count": patch_count,
+                "tests_passed": tests_passed,
+                "tests_failed": tests_failed,
+            },
+            "error_log": test_output[:800] if status == "fail" else None,
+            "traces": traces,
+        }
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @tool
@@ -656,19 +774,16 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
       SANDBOX_MODE=local     → run sandbox_task.py as a subprocess (no GCP)
       SANDBOX_MODE=cloudrun  → trigger sandbox_task.py via Cloud Run Job (needs GCP)
 
-    A JWT capability token is always generated to scope allowed connectors/skills.
-    The snapshot (companies + mentors) is built from live Neo4j data.
+    A JWT capability token is generated from the skills in the proposed flow.
+    The snapshot (companies + mentors) is built from live Neo4j data, scoped
+    to the app_id encoded in dataset_snapshot_id (prefix: 'snapshot_<app_id>').
 
     Args:
         flow_yaml: Full YAML text of the proposed flow definition.
-        dataset_snapshot_id: Hint for snapshot selection (industry or snapshot ID).
+        dataset_snapshot_id: 'snapshot_<app_id>' to scope data, else default graph.
 
     Returns:
-        Dict with:
-          status      — 'success' or 'fail'
-          metrics     — dict with match_score, latency_ms, sample_size (on success)
-          error_log   — error string or None
-          traces      — list of per-company simulation traces (local/cloudrun modes)
+        Dict with status, metrics, error_log, and optionally traces.
     """
     try:
         flow_def = yaml.safe_load(flow_yaml) or {}
@@ -678,26 +793,31 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
     if not isinstance(flow_def, dict):
         flow_def = {}
 
-    flow_id = flow_def.get("flow_id", f"flow_{uuid.uuid4().hex[:8]}")
-    token = _capability_token(flow_id)
+    normalised = _normalise_flow_def(flow_def) if flow_def else {}
+    flow_id = normalised.get("flow_id", f"flow_{uuid.uuid4().hex[:8]}")
+
+    # Build dynamic capability token from the actual skills in the YAML
+    flow_skills = list(_extract_flow_references(normalised)[0]) if normalised else []
+    token = _capability_token(flow_id, allowed_skills=flow_skills or None)
 
     use_mock = os.environ.get("SANDBOX_MOCK", "true").lower() == "true"
     if use_mock:
         logger.info("Sandbox running in MOCK mode.")
         return _mock_sandbox(flow_yaml)
 
-    sandbox_mode = os.environ.get("SANDBOX_MODE", "local").lower()
-    # Pass app_id so _build_snapshot can scope the snapshot to the right app.
-    # dataset_snapshot_id is the caller-supplied hint; treat it as an industry
-    # tag or app_id depending on format (domain-like strings → app_id).
-    _snap_app_id = (
+    # Decode app_id from snapshot_id prefix: 'snapshot_<app_id>'
+    _snap_app_id: Optional[str] = None
+    if (
         dataset_snapshot_id
-        if dataset_snapshot_id and "." in dataset_snapshot_id
-        else None
-    )
+        and dataset_snapshot_id.startswith("snapshot_")
+        and dataset_snapshot_id != "snapshot_2025_q4"
+    ):
+        _snap_app_id = dataset_snapshot_id.removeprefix("snapshot_")
+
+    sandbox_mode = os.environ.get("SANDBOX_MODE", "local").lower()
     snapshot = _build_snapshot(app_id=_snap_app_id)
     logger.info(
-        "Sandbox snapshot (isolation: app_id=%s): %d companies, %d mentors — mode: %s",
+        "Sandbox snapshot (app_id=%s): %d companies, %d mentors — mode: %s",
         _snap_app_id or "none",
         len(snapshot.get("companies", [])),
         len(snapshot.get("mentors", [])),
@@ -717,13 +837,9 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
 def get_infrastructure_status() -> Dict:
     """Return current load and error rate for all servers in Graph B.
 
-    Use this before proposing a new flow to verify the target server has
-    capacity (load < 0.80) and acceptable reliability (error_rate < 0.03).
-
     Returns:
         Dict mapping server_id → {'load': float, 'error_rate': float}.
         load is normalised to 0–1 (current_load / 100).
-        error_rate is the most recent value from error_rate_history.
         Returns an empty dict if Neo4j is temporarily unavailable.
     """
     try:
@@ -747,18 +863,12 @@ def get_infrastructure_status() -> Dict:
 def propose_change(change_type: str, details: Dict) -> str:
     """Persist a proposed change to Neo4j as a node with status='proposed'.
 
-    This does NOT activate the change. The node waits for human approval via
-    the HumanApproval node before becoming 'active'.
-
     Args:
         change_type: One of 'new_flow', 'update_connector', 'deprecate_skill'.
         details: Dict containing the YAML or JSON content of the proposed change.
 
     Returns:
-        The ID of the created proposal node (e.g. 'newflow_proposal_8a3f1c2b').
-
-    Raises:
-        ValueError: if change_type is not one of the allowed values.
+        The ID of the created proposal node.
     """
     allowed = {"new_flow", "update_connector", "deprecate_skill"}
     if change_type not in allowed:
@@ -766,11 +876,38 @@ def propose_change(change_type: str, details: Dict) -> str:
 
     proposal_id = f"{change_type.replace('_', '')}_proposal_{uuid.uuid4().hex[:8]}"
     details_json = json.dumps(details)
+    business_flow_id = details.get("business_flow_id")
+    project_id = details.get("project_id")
+    simulation_score = details.get("simulation_score")
+    flow_context = details.get("business_flow_context") or []
+    source_name = ""
+    if flow_context and isinstance(flow_context[0], dict):
+        source_name = flow_context[0].get("business_flow") or ""
+    proposal_name = f"Optimized {source_name}" if source_name else proposal_id
+    justification = details.get("justification", "")
 
     _run_write_cypher(
-        "CREATE (:Flow {id: $id, status: 'proposed', yaml_config: $details})",
-        id=proposal_id,
-        details=details_json,
+        """
+        CREATE (:Flow {
+            id: $id,
+            name: $name,
+            status: 'proposed',
+            yaml_config: $details,
+            project_id: $project_id,
+            business_flow_id: $business_flow_id,
+            avg_outcome_score: $simulation_score,
+            justification: $justification
+        })
+        """,
+        {
+            "id": proposal_id,
+            "name": proposal_name,
+            "details": details_json,
+            "project_id": project_id,
+            "business_flow_id": business_flow_id,
+            "simulation_score": simulation_score,
+            "justification": justification,
+        },
     )
     logger.info("Proposal %s created in Neo4j.", proposal_id)
     return proposal_id
@@ -785,37 +922,50 @@ def log_execution_trace(
     result_score: float,
     status: str = "completed",
 ) -> None:
-    """Create an ExecutionTrace bridge node linking a Flow (Graph B) to an Outcome (Graph A).
+    """Create an ExecutionTrace bridge node linking a Flow to an Outcome.
 
-    Called by simulator_node after every sandbox run so the Planner can learn
-    from accumulated simulation history on subsequent invocations.
+    Uses OPTIONAL MATCH so the trace is always written even if the Flow node
+    does not exist yet; the RAN_FLOW relationship is only created when matched.
     """
     trace_id = f"trace_{uuid.uuid4().hex[:8]}"
-    _run_write_cypher(
+    rows = _run_write_cypher(
         """
-        MATCH (f:Flow {id: $flow_id})
+        OPTIONAL MATCH (f:Flow {id: $flow_id})
         CREATE (et:ExecutionTrace {
             id:        $trace_id,
             status:    $status,
             timestamp: datetime()
         })
         CREATE (o:Outcome {score: $result_score, date: date()})
-        CREATE (et)-[:RAN_FLOW]->(f)
         CREATE (et)-[:RESULTED_IN]->(o)
+        WITH et, f
+        WHERE f IS NOT NULL
+        CREATE (et)-[:RAN_FLOW]->(f)
+        RETURN et.id AS trace_id, f.id AS flow_id
         """,
-        flow_id=flow_id,
-        trace_id=trace_id,
-        status=status,
-        result_score=result_score,
+        {
+            "flow_id": flow_id,
+            "trace_id": trace_id,
+            "status": status,
+            "result_score": result_score,
+        },
     )
-    logger.info("ExecutionTrace %s logged for flow %s (score=%.2f).", trace_id, flow_id, result_score)
+    if not rows or rows[0].get("flow_id") is None:
+        logger.warning(
+            "ExecutionTrace %s written but Flow '%s' was not found in Graph B — "
+            "RAN_FLOW relationship not created.",
+            trace_id,
+            flow_id,
+        )
+    else:
+        logger.info("ExecutionTrace %s logged for flow %s (score=%.2f).", trace_id, flow_id, result_score)
 
 
 def activate_proposal(proposal_id: str) -> None:
     """Mark a previously proposed Flow node as 'active'. Called by HumanApproval."""
     _run_write_cypher(
         "MATCH (f:Flow {id: $id}) SET f.status = 'active'",
-        id=proposal_id,
+        {"id": proposal_id},
     )
     logger.info("Proposal %s activated.", proposal_id)
 
@@ -824,8 +974,7 @@ def reject_proposal(proposal_id: str, reason: str) -> None:
     """Mark proposal as 'rejected' and store the rejection reason."""
     _run_write_cypher(
         "MATCH (f:Flow {id: $id}) SET f.status = 'rejected', f.rejection_reason = $reason",
-        id=proposal_id,
-        reason=reason,
+        {"id": proposal_id, "reason": reason},
     )
     logger.info("Proposal %s rejected: %s", proposal_id, reason)
 
@@ -834,7 +983,7 @@ def approve_skill_proposal(skill_id: str) -> None:
     """Mark a SkillProposal as approved. Called from Streamlit admin page."""
     _run_write_cypher(
         "MATCH (s:SkillProposal {id: $id}) SET s.status = 'approved'",
-        id=skill_id,
+        {"id": skill_id},
     )
     logger.info("SkillProposal %s approved.", skill_id)
 
@@ -843,8 +992,7 @@ def reject_skill_proposal(skill_id: str, reason: str = "") -> None:
     """Mark a SkillProposal as rejected. Called from Streamlit admin page."""
     _run_write_cypher(
         "MATCH (s:SkillProposal {id: $id}) SET s.status = 'rejected', s.rejection_reason = $reason",
-        id=skill_id,
-        reason=reason,
+        {"id": skill_id, "reason": reason},
     )
     logger.info("SkillProposal %s rejected: %s", skill_id, reason)
 
@@ -855,13 +1003,6 @@ def query_graph_semantic(query_text: str, top_k: int = 5) -> List[Dict]:
 
     Returns nodes whose description is semantically similar to query_text.
     Falls back to keyword CONTAINS search if no vector index exists.
-
-    Args:
-        query_text: Natural-language description of what to find.
-        top_k: Number of top results to return.
-
-    Returns:
-        List of dicts with id, name, description, label, score.
     """
     from src.graphrag.retriever import retrieve_semantic_context  # noqa: PLC0415
     return retrieve_semantic_context(query_text, top_k=top_k)

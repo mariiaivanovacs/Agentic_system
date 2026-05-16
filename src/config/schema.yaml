@@ -119,6 +119,14 @@ nodes:
     required: [id, name, project_id, scan_id, source_path, confidence]
     optional: [created_at, display_name, technical_description, stakeholder_description]
 
+  BusinessFlow:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, display_name, technical_description, stakeholder_description, source_paths, entrypoint, flow_type, action_verb, evidence_summary]
+
+  FlowStep:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, display_name, technical_description, stakeholder_description, order, step_type, primitive_id, primitive_label, evidence, evidence_summary]
+
   Integration:
     required: [id, name, project_id, scan_id, source_path, confidence]
     optional: [created_at, integration_type, display_name, technical_description, stakeholder_description]
@@ -281,6 +289,41 @@ relationships:
     from: Workflow
     to: Entity
     properties: []
+
+  HAS_BUSINESS_FLOW:
+    from: Project
+    to: BusinessFlow
+    properties: []
+
+  HAS_STEP:
+    from: BusinessFlow
+    to: FlowStep
+    properties: [order]
+
+  USES_PRIMITIVE:
+    from: FlowStep
+    to: Node
+    properties: []
+
+  ROUTE_CALLS_FUNCTION:
+    from: Route
+    to: Function
+    properties: [inferred]
+
+  FUNCTION_CALLS_FUNCTION:
+    from: Function
+    to: Function
+    properties: [inferred]
+
+  FUNCTION_READS_DATASTORE:
+    from: Function
+    to: DataStore
+    properties: [inferred]
+
+  FUNCTION_WRITES_DATASTORE:
+    from: Function
+    to: DataStore
+    properties: [inferred]
 
   SKILL_DERIVED_FROM_FUNCTION:
     from: Skill

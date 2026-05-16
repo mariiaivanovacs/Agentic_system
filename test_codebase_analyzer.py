@@ -58,12 +58,19 @@ const listCampaigns = () => [];
         labels = {node.label for node in system.code_nodes}
         project_id = stable_project_id(root)
 
-        assert {"Project", "Repository", "File", "Function", "Route", "Integration", "DataStore", "DatabaseModel"}.issubset(labels)
+        assert {"Project", "Repository", "File", "Function", "Route", "Integration", "DataStore", "DatabaseModel", "BusinessFlow", "FlowStep"}.issubset(labels)
         assert all(node.project_id == project_id for node in system.code_nodes)
         assert all(node.scan_id for node in system.code_nodes)
         assert any(rel.rel_type == "PROJECT_HAS_REPOSITORY" for rel in system.code_relationships)
         assert any(rel.rel_type == "FILE_DEFINES_ROUTE" for rel in system.code_relationships)
         assert any(rel.rel_type == "FILE_USES_DATASTORE" for rel in system.code_relationships)
+        assert any(rel.rel_type == "HAS_BUSINESS_FLOW" for rel in system.code_relationships)
+        assert any(rel.rel_type == "HAS_STEP" for rel in system.code_relationships)
+        assert any(rel.rel_type == "USES_PRIMITIVE" for rel in system.code_relationships)
+        flow_steps = [node for node in system.code_nodes if node.label == "FlowStep"]
+        assert flow_steps
+        assert all("order" in node.properties for node in flow_steps)
+        assert all("evidence" in node.properties for node in flow_steps)
         assert system.skills
 
 
@@ -81,7 +88,7 @@ def test_analyzer_ids_are_stable_for_repeated_scans() -> None:
 
 def test_schema_knows_software_graph_labels_and_relationships() -> None:
     validator = SchemaValidator()
-    for label in ["Project", "Repository", "File", "Function", "Route", "Integration", "DataStore", "Risk"]:
+    for label in ["Project", "Repository", "File", "Function", "Route", "Integration", "DataStore", "Risk", "BusinessFlow", "FlowStep"]:
         validator.validate_node(
             label,
             {
@@ -97,6 +104,10 @@ def test_schema_knows_software_graph_labels_and_relationships() -> None:
     validator.validate_edge("REPOSITORY_HAS_FILE", "Repository", "File")
     validator.validate_edge("FILE_DEFINES_FUNCTION", "File", "Function")
     validator.validate_edge("FILE_USES_DATASTORE", "File", "DataStore")
+    validator.validate_edge("HAS_BUSINESS_FLOW", "Project", "BusinessFlow")
+    validator.validate_edge("HAS_STEP", "BusinessFlow", "FlowStep")
+    validator.validate_edge("ROUTE_CALLS_FUNCTION", "Route", "Function")
+    validator.validate_edge("FUNCTION_READS_DATASTORE", "Function", "DataStore")
 
 
 def test_connector_units_are_read_only_and_registered() -> None:

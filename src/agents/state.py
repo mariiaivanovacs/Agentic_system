@@ -21,17 +21,24 @@ class AgentState(TypedDict):
     source_type: Optional[str]       # "website" | "codebase" | "api" | "database" | "hybrid"
     source_path: Optional[str]       # Local source folder used during indexing
     base_url: Optional[str]          # Root URL of the connected app
+    business_flow_id: Optional[str]  # Selected BusinessFlow node to optimize
+    business_flow_context: List[Dict]  # BusinessFlow/FlowStep graph evidence
 
     # ---- Planner output ----
     current_hypothesis: str          # Working theory the agent is testing
     identified_problem_flow: str     # Flow ID found to be underperforming
     failure_patterns: List[Dict]     # Historical bad matches from Graph A (for Generator)
     success_patterns: List[Dict]     # Historical good matches from Graph A (for Generator)
+    software_nodes: List[Dict]       # Project -> File -> Route -> Function -> DataStore
+    project_id: Optional[str]        # scopes all queries to one indexed project
 
     # ---- Generator / Critic cycle ----
-    proposed_flow_yaml: str          # YAML produced by the Generator node
+    proposed_flow_yaml: str          # YAML produced by the Generator node (backward compat)
+    recommended_actions: List[Dict]  # Generator output — primary recommendation list
     critic_passed: bool              # True if Critic approved the YAML
-    critic_feedback: str             # Issues raised by Critic (if any)
+    critic_feedback: str             # Issues raised by Critic (freetext, backward compat)
+    critic_evidence_ids: List[str]   # graph node IDs the Critic accepted as grounding
+    retry_context: Optional[Dict]    # structured retry payload from Critic or Evaluator
     retry_count: int                 # How many Generator→Critic loops so far
 
     # ---- Simulation ----
@@ -45,6 +52,8 @@ class AgentState(TypedDict):
 
     # ---- Human approval ----
     human_approval_required: bool
+    human_approved: Optional[bool]      # set via Command(resume=...) from run_resume
+    rejection_reason: Optional[str]     # set via Command(resume=...) from run_resume
 
     # ---- Terminal ----
     final_output: str

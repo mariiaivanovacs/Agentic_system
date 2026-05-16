@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Dict, List, Optional
 
 from src.graphrag.models import RetrievedContext
 
@@ -13,8 +14,13 @@ def _j(value) -> str:
     return json.dumps(value, indent=2, default=str)
 
 
-def build_agent_planner_prompt(goal: str, context: RetrievedContext) -> str:
+def build_agent_planner_prompt(
+    goal: str,
+    context: RetrievedContext,
+    software_nodes: Optional[List[Dict]] = None,
+) -> str:
     """Planner prompt for the existing LangGraph PlannerOutput schema."""
+    codebase_nodes = software_nodes if software_nodes is not None else context.software_nodes
     return f"""You are the Planner agent for EcoLink NeuroCore.
 
 You MUST reason from the retrieved GraphRAG context below. Do not invent graph facts.
@@ -22,6 +28,11 @@ You MUST reason from the retrieved GraphRAG context below. Do not invent graph f
 Goal: {goal}
 Target industry: {context.industry}
 Industry baseline score: {context.baseline_score} / 10
+
+== Codebase Evidence ==
+Real routes, functions, services, and data stores from the connected project.
+Ground your hypothesis in these nodes before referencing pattern data below.
+{_j(codebase_nodes)}
 
 == GraphRAG: Industry performance, worst first ==
 {_j(context.industry_stats)}
@@ -43,10 +54,6 @@ The Generator may only use skills from this graph inventory.
 
 == GraphRAG: Infrastructure status ==
 {_j(context.infra_status)}
-
-== GraphRAG: Connected software project facts ==
-Use these codebase facts first when planning. They are the connected project's real routes, functions, services, models, workflows, integrations, artifacts, and risks.
-{_j(context.software_nodes)}
 
 == GraphRAG: Optional website/code entities ==
 {_j(context.website_entities)}
