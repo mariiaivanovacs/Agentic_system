@@ -247,6 +247,37 @@ def _shell_html(
   }}
   .eventTitle  {{ font-weight: 700; margin-bottom: 4px; font-size: 13px; }}
   .eventDetail {{ color: #ded6c4; font-size: 12px; line-height: 1.38; white-space: pre-wrap; }}
+  .evDetails {{
+    margin-top: 7px; border-top: 1px solid rgba(75,74,61,.6);
+    padding-top: 5px;
+  }}
+  .evDetails summary {{
+    cursor: pointer; color: var(--muted); font-size: 11px; letter-spacing: .04em;
+    user-select: none; list-style: none; display: flex; align-items: center; gap: 5px;
+  }}
+  .evDetails summary::before {{ content: "▶"; font-size: 8px; transition: transform .15s; }}
+  .evDetails[open] summary::before {{ transform: rotate(90deg); }}
+  .evBody {{
+    margin-top: 6px; display: flex; flex-direction: column; gap: 4px;
+  }}
+  .evRow {{
+    display: flex; gap: 8px; font-size: 11px; align-items: baseline;
+  }}
+  .evRow span:first-child {{
+    color: var(--muted); min-width: 110px; flex-shrink: 0;
+  }}
+  .evRow span:last-child {{ color: #ded6c4; word-break: break-all; }}
+  .evRow code {{
+    font-family: ui-monospace, monospace; font-size: 10px;
+    background: rgba(255,255,255,.06); padding: 1px 4px; border-radius: 3px;
+    color: var(--blue);
+  }}
+  .evTag {{
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  }}
+  .evTag.ok  {{ background: rgba(68,194,154,.18); color: var(--accent); }}
+  .evTag.bad {{ background: rgba(220,102,102,.18); color: var(--bad); }}
   @media (max-width: 820px) {{
     .grid {{ grid-template-columns: 1fr; }}
   }}
@@ -391,10 +422,72 @@ function edgeIsRetry(fromId, toId) {{
 }}
 
 // ── event handling ────────────────────────────────────────────────────────────
-const state = {{ events: [], filter: "" }};
+const state = {{ events: [], filter: "", activeThread: "", loadingInitial: false }};
 
 function eventTime(ev) {{
   try {{ return new Date(ev.created_at).toLocaleTimeString(); }} catch {{ return ""; }}
+}}
+
+// ── evidence section builder ─────────────────────────────────────────────────
+function esc(v) {{
+  return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}}
+
+function buildEvidenceSection(ev) {{
+  const p = ev.payload || {{}};
+  const rows = [];
+
+  // Planner: GraphRAG counts + identified problem flow
+  if (p.graphrag) {{
+    const g = p.graphrag;
+    if (g.failure_patterns !== undefined)
+      rows.push(`<div class="evRow"><span>Failure patterns:</span><span>${{g.failure_patterns}}</span></div>`);
+    if (g.success_patterns !== undefined)
+      rows.push(`<div class="evRow"><span>Success patterns:</span><span>${{g.success_patterns}}</span></div>`);
+    if (g.available_skills !== undefined)
+      rows.push(`<div class="evRow"><span>Available skills:</span><span>${{g.available_skills}}</span></div>`);
+    if (g.active_flows !== undefined)
+      rows.push(`<div class="evRow"><span>Active flows:</span><span>${{g.active_flows}}</span></div>`);
+  }}
+  if (p.identified_problem_flow)
+    rows.push(`<div class="evRow"><span>Problem flow:</span><span><code>${{esc(p.identified_problem_flow)}}</code></span></div>`);
+  if (p.baseline_score !== undefined && ev.source === "planner")
+    rows.push(`<div class="evRow"><span>Baseline score:</span><span>${{p.baseline_score}}</span></div>`);
+
+  // Critic: grounded evidence node IDs
+  const eids = p.evidence_node_ids || [];
+  if (eids.length > 0) {{
+    const idHtml = eids.map(id => `<code>${{esc(id)}}</code>`).join(" ");
+    rows.push(`<div class="evRow"><span>Evidence nodes (${{eids.length}}):</span><span>${{idHtml}}</span></div>`);
+  }}
+
+  // Evaluator retry: failed metric
+  if (p.failed_metric) {{
+    const fm = p.failed_metric;
+    rows.push(`<div class="evRow"><span>Score:</span><span>${{fm.match_score !== undefined ? fm.match_score : "—"}} <span style="color:var(--muted)">/ threshold</span> ${{fm.threshold !== undefined ? fm.threshold : "—"}}</span></div>`);
+    if (fm.sim_status)
+      rows.push(`<div class="evRow"><span>Sim status:</span><span>${{esc(fm.sim_status)}}</span></div>`);
+  }}
+  if (p.llm_reason && (p.failed_metric || p.decision === "failure"))
+    rows.push(`<div class="evRow"><span>LLM reason:</span><span style="color:var(--muted)">${{esc(p.llm_reason)}}</span></div>`);
+
+  // Evaluator success: decision + deterministic score comparison
+  if (p.decision === "success" && p.sim_score !== undefined) {{
+    rows.push(
+      `<div class="evRow"><span>Decision:</span><span><span class="evTag ok">SUCCESS</span></span></div>` +
+      `<div class="evRow"><span>Score:</span><span>${{p.sim_score}} &gt; ${{p.threshold}} <span style="color:var(--muted)">(baseline ${{p.baseline_score}})</span></span></div>`
+    );
+    if (p.llm_reason)
+      rows.push(`<div class="evRow"><span>LLM reason:</span><span style="color:var(--muted)">${{esc(p.llm_reason)}}</span></div>`);
+  }}
+
+  if (rows.length === 0) return "";
+  return (
+    `<details class="evDetails">` +
+      `<summary>Evidence</summary>` +
+      `<div class="evBody">${{rows.join("")}}</div>` +
+    `</details>`
+  );
 }}
 
 function renderFeed() {{
@@ -413,10 +506,43 @@ function renderFeed() {{
       `</div>` +
       `<div class="eventTitle">${{ev.title || ""}}</div>` +
       `<div class="eventDetail">${{ev.detail || ""}}</div>` +
+      buildEvidenceSection(ev) +
     `</article>`
   ).join("") ||
   `<div class="event"><div class="eventTitle">No events yet</div>` +
   `<div class="eventDetail">Start an agent run, sandbox run, website ingest, or approval action.</div></div>`;
+}}
+
+function updateActiveThread(ev) {{
+  if (!ev || !ev.thread_id) return;
+  if (ev.source === "ui" && ev.target === "planner") {{
+    state.activeThread = ev.thread_id;
+    return;
+  }}
+  if (!state.activeThread) state.activeThread = ev.thread_id;
+}}
+
+function activeNodeFor(ev) {{
+  if (!ev) return "";
+  if (ev.source && nodeColors[ev.source]) return ev.source;
+  if (ev.target && nodeColors[ev.target]) return ev.target;
+  return "";
+}}
+
+function animateEvent(ev) {{
+  const nodeId = activeNodeFor(ev);
+  if (!nodeId) return;
+  resetNetwork();
+  activateNode(nodeId);
+  if (ev.source && ev.target) activateEdge(ev.source, ev.target, edgeIsRetry(ev.source, ev.target));
+}}
+
+function replayLatestActiveEvent() {{
+  updateActiveThread(state.events[state.events.length - 1]);
+  const latest = [...state.events].reverse().find(ev =>
+    (!state.activeThread || ev.thread_id === state.activeThread) && activeNodeFor(ev)
+  );
+  if (latest) animateEvent(latest);
 }}
 
 function addEvent(ev) {{
@@ -425,12 +551,15 @@ function addEvent(ev) {{
   state.events.push(ev);
   state.events = state.events.slice(-500);
 
-  resetNetwork();
-  if (ev.source) activateNode(ev.source);
-  if (ev.source && ev.target) activateEdge(ev.source, ev.target, edgeIsRetry(ev.source, ev.target));
+  updateActiveThread(ev);
+  const belongsToActiveRun = !state.activeThread || ev.thread_id === state.activeThread;
+  if (!state.loadingInitial && belongsToActiveRun) animateEvent(ev);
 
   const lastSeen = document.getElementById("lastSeen");
-  if (lastSeen) lastSeen.textContent = `${{ev.event_type || "event"}} · ${{eventTime(ev)}}`;
+  if (lastSeen) {{
+    const threadLabel = state.activeThread ? ` · thread ${{state.activeThread}}` : "";
+    lastSeen.textContent = `${{ev.event_type || "event"}} · ${{eventTime(ev)}}${{threadLabel}}`;
+  }}
   renderFeed();
 }}
 
@@ -445,7 +574,12 @@ async function loadInitial() {{
   try {{
     const res  = await fetch(`${{apiBase}}/events?limit=200`);
     const rows = await res.json();
-    rows.forEach(addEvent);
+    state.loadingInitial = true;
+    rows
+      .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0))
+      .forEach(addEvent);
+    state.loadingInitial = false;
+    replayLatestActiveEvent();
   }} catch (_) {{}}
 }}
 

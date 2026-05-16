@@ -163,7 +163,7 @@ def test_5_simulate_flow_mock():
     print(f"  metrics   : {result.get('metrics', {})}")
 
     assert result["status"] == "success"
-    assert result["metrics"]["match_score"] == 8.7, "Mock should return 8.7 for semantic_similarity"
+    assert result["metrics"]["match_score"] == 8.5, "Mock should return 8.5 for semantic_similarity"
     print("  PASS")
 
 

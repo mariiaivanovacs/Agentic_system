@@ -21,7 +21,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+except ModuleNotFoundError:
+    SqliteSaver = None
+    from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agents.nodes import (
@@ -101,5 +105,8 @@ def build_graph():
         {"human_approval": "human_approval", "generator": "generator", END: END},
     )
 
-    checkpointer = SqliteSaver.from_conn_string(str(CHECKPOINT_DB))
+    if SqliteSaver is None:
+        checkpointer = MemorySaver()
+    else:
+        checkpointer = SqliteSaver.from_conn_string(str(CHECKPOINT_DB))
     return graph.compile(checkpointer=checkpointer)

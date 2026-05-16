@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -258,13 +261,16 @@ def load_traces() -> pd.DataFrame:
             """
             MATCH (et:ExecutionTrace)-[:RAN_FLOW]->(f:Flow)
             OPTIONAL MATCH (et)-[:RESULTED_IN]->(o:Outcome)
-            RETURN et.id AS trace_id,
-                   f.id AS flow_id,
-                   et.status AS status,
-                   o.score AS score,
-                   toString(et.timestamp) AS timestamp
+            RETURN et.id                          AS trace_id,
+                   f.id                           AS flow_id,
+                   f.name                         AS flow_name,
+                   et.status                      AS status,
+                   o.score                        AS score,
+                   et.baseline_score              AS baseline_score,
+                   et.skills_applied              AS skills_applied,
+                   toString(et.timestamp)         AS timestamp
             ORDER BY timestamp DESC
-            LIMIT 50
+            LIMIT 100
             """
         )
     )
@@ -684,17 +690,28 @@ def load_active_skills() -> pd.DataFrame:
 
 @st.cache_data(ttl=20)
 def load_skill_proposals(status: str | None = None) -> pd.DataFrame:
+    primitive_labels = [
+        "Project", "Repository", "File", "Route", "Function", "Service",
+        "DataStore", "DatabaseModel", "DatabaseTable", "Integration",
+        "Risk", "BusinessFlow", "FlowStep",
+    ]
     if status:
         query = f"""
         MATCH (s)
         WHERE 'SkillProposal' IN labels(s)
           AND s.status = {json.dumps(status)}
+          AND none(label IN labels(s) WHERE label IN {json.dumps(primitive_labels)})
+          AND NOT s.id STARTS WITH 'project_'
+          AND NOT s.id STARTS WITH 'skill_project_'
         RETURN properties(s) AS props
         """
     else:
-        query = """
+        query = f"""
         MATCH (s)
         WHERE 'SkillProposal' IN labels(s)
+          AND none(label IN labels(s) WHERE label IN {json.dumps(primitive_labels)})
+          AND NOT s.id STARTS WITH 'project_'
+          AND NOT s.id STARTS WITH 'skill_project_'
         RETURN properties(s) AS props
         """
     rows = []
@@ -936,84 +953,85 @@ def _graph_return_clause() -> str:
     return """
            elementId(n) AS source_id,
            labels(n) AS source_labels,
-           coalesce(n.display_name, n.name, n.id, n.path, elementId(n)) AS source_name,
-           n.status AS source_status,
-           n.avg_outcome_score AS source_score,
-           n.industry AS source_industry,
-           n.stage AS source_stage,
-           n.pain_points AS source_pain,
-           n.revenue AS source_revenue,
-           n.expertise AS source_expertise,
-           n.success_score AS source_success,
-           n.available AS source_available,
-           n.current_load AS source_load,
-           n.region AS source_region,
-           n.performance_score AS source_perf,
-           n.error_rate AS source_error,
-           n.project_id AS source_project_id,
-           n.scan_id AS source_scan_id,
-           n.source_path AS source_path,
-           n.path AS source_file_path,
-           n.confidence AS source_confidence,
-           n.description AS source_description,
-           n.technical_description AS source_technical_description,
-           coalesce(n.stakeholder_description, n.business_description) AS source_stakeholder_description,
-           n.method AS source_method,
-           coalesce(n.route_path, n.route) AS source_route,
-           n.storage_type AS source_storage_type,
-           n.primitive_type AS source_primitive_type,
-           n.risk_type AS source_risk_type,
-           n.severity AS source_severity,
-           n.entrypoint AS source_entrypoint,
-           n.flow_type AS source_flow_type,
-           n.evidence_summary AS source_evidence_summary,
-           n.source_paths AS source_source_paths,
-           n.order AS source_order,
-           n.step_type AS source_step_type,
-           n.primitive_id AS source_primitive_id,
-           n.primitive_label AS source_primitive_label,
-           n.evidence AS source_evidence,
+           coalesce(properties(n).display_name, properties(n).name, properties(n).id, properties(n).path, elementId(n)) AS source_name,
+           properties(n).status AS source_status,
+           properties(n).avg_outcome_score AS source_score,
+           properties(n).industry AS source_industry,
+           properties(n).stage AS source_stage,
+           properties(n).pain_points AS source_pain,
+           properties(n).revenue AS source_revenue,
+           properties(n).expertise AS source_expertise,
+           properties(n).success_score AS source_success,
+           properties(n).available AS source_available,
+           properties(n).current_load AS source_load,
+           properties(n).region AS source_region,
+           properties(n).performance_score AS source_perf,
+           properties(n).error_rate AS source_error,
+           properties(n).project_id AS source_project_id,
+           properties(n).scan_id AS source_scan_id,
+           properties(n).source_path AS source_path,
+           properties(n).path AS source_file_path,
+           properties(n).confidence AS source_confidence,
+           properties(n).description AS source_description,
+           properties(n).technical_description AS source_technical_description,
+           coalesce(properties(n).stakeholder_description, properties(n).business_description) AS source_stakeholder_description,
+           properties(n).method AS source_method,
+           coalesce(properties(n).route_path, properties(n).route) AS source_route,
+           properties(n).storage_type AS source_storage_type,
+           properties(n).primitive_type AS source_primitive_type,
+           properties(n).risk_type AS source_risk_type,
+           properties(n).severity AS source_severity,
+           properties(n).entrypoint AS source_entrypoint,
+           properties(n).flow_type AS source_flow_type,
+           properties(n).evidence_summary AS source_evidence_summary,
+           properties(n).source_paths AS source_source_paths,
+           properties(n).order AS source_order,
+           properties(n).step_type AS source_step_type,
+           properties(n).primitive_id AS source_primitive_id,
+           properties(n).primitive_label AS source_primitive_label,
+           properties(n).evidence AS source_evidence,
            type(r) AS rel_type,
            elementId(m) AS target_id,
            labels(m) AS target_labels,
-           coalesce(m.display_name, m.name, m.id, m.path, elementId(m)) AS target_name,
-           m.status AS target_status,
-           m.avg_outcome_score AS target_score,
-           m.industry AS target_industry,
-           m.stage AS target_stage,
-           m.pain_points AS target_pain,
-           m.revenue AS target_revenue,
-           m.expertise AS target_expertise,
-           m.success_score AS target_success,
-           m.available AS target_available,
-           m.current_load AS target_load,
-           m.region AS target_region,
-           m.performance_score AS target_perf,
-           m.error_rate AS target_error,
-           m.project_id AS target_project_id,
-           m.scan_id AS target_scan_id,
-           m.source_path AS target_path,
-           m.path AS target_file_path,
-           m.confidence AS target_confidence,
-           m.description AS target_description,
-           m.technical_description AS target_technical_description,
-           coalesce(m.stakeholder_description, m.business_description) AS target_stakeholder_description,
-           m.method AS target_method,
-           coalesce(m.route_path, m.route) AS target_route,
-           m.storage_type AS target_storage_type,
-           m.primitive_type AS target_primitive_type,
-           m.risk_type AS target_risk_type,
-           m.severity AS target_severity,
-           m.entrypoint AS target_entrypoint,
-           m.flow_type AS target_flow_type,
-           m.evidence_summary AS target_evidence_summary,
-           m.source_paths AS target_source_paths,
-           m.order AS target_order,
-           m.step_type AS target_step_type,
-           m.primitive_id AS target_primitive_id,
-           m.primitive_label AS target_primitive_label,
-           m.evidence AS target_evidence
+           coalesce(properties(m).display_name, properties(m).name, properties(m).id, properties(m).path, elementId(m)) AS target_name,
+           properties(m).status AS target_status,
+           properties(m).avg_outcome_score AS target_score,
+           properties(m).industry AS target_industry,
+           properties(m).stage AS target_stage,
+           properties(m).pain_points AS target_pain,
+           properties(m).revenue AS target_revenue,
+           properties(m).expertise AS target_expertise,
+           properties(m).success_score AS target_success,
+           properties(m).available AS target_available,
+           properties(m).current_load AS target_load,
+           properties(m).region AS target_region,
+           properties(m).performance_score AS target_perf,
+           properties(m).error_rate AS target_error,
+           properties(m).project_id AS target_project_id,
+           properties(m).scan_id AS target_scan_id,
+           properties(m).source_path AS target_path,
+           properties(m).path AS target_file_path,
+           properties(m).confidence AS target_confidence,
+           properties(m).description AS target_description,
+           properties(m).technical_description AS target_technical_description,
+           coalesce(properties(m).stakeholder_description, properties(m).business_description) AS target_stakeholder_description,
+           properties(m).method AS target_method,
+           coalesce(properties(m).route_path, properties(m).route) AS target_route,
+           properties(m).storage_type AS target_storage_type,
+           properties(m).primitive_type AS target_primitive_type,
+           properties(m).risk_type AS target_risk_type,
+           properties(m).severity AS target_severity,
+           properties(m).entrypoint AS target_entrypoint,
+           properties(m).flow_type AS target_flow_type,
+           properties(m).evidence_summary AS target_evidence_summary,
+           properties(m).source_paths AS target_source_paths,
+           properties(m).order AS target_order,
+           properties(m).step_type AS target_step_type,
+           properties(m).primitive_id AS target_primitive_id,
+           properties(m).primitive_label AS target_primitive_label,
+           properties(m).evidence AS target_evidence
     """
+
 
 
 @st.cache_data(ttl=20)
@@ -1120,6 +1138,7 @@ def run_agent(
     project_id: str | None = None,
     business_flow_id: str | None = None,
     source_path: str | None = None,
+    proposal_only: bool = False,
 ) -> tuple[int, str, str, str | None]:
     env = os.environ.copy()
     cmd = [sys.executable, "main.py", "--goal", goal]
@@ -1129,6 +1148,8 @@ def run_agent(
         cmd.extend(["--business-flow-id", business_flow_id])
     if source_path:
         cmd.extend(["--source-path", source_path])
+    if proposal_only:
+        cmd.append("--proposal-only")
     result = subprocess.run(
         cmd,
         cwd=ROOT,
@@ -1159,6 +1180,18 @@ def proposal_payload(raw: Any) -> str:
         return str(raw)
 
 
+def parse_proposal_payload(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
 def compact_list(values: Any, limit: int = 4) -> str:
     if not values:
         return "None"
@@ -1170,6 +1203,149 @@ def compact_list(values: Any, limit: int = 4) -> str:
     shown = clean[:limit]
     suffix = f" +{len(clean) - limit} more" if len(clean) > limit else ""
     return ", ".join(shown) + suffix
+
+
+def flow_needs_optimization(row: pd.Series, threshold: float = 8.5) -> tuple[bool, str]:
+    score = float(row.get("score") or 0)
+    risks = row.get("risks") or []
+    if isinstance(risks, str):
+        risks = [risks] if risks else []
+    if score >= threshold and not risks:
+        return (
+            False,
+            f"This flow already looks optimized from the graph evidence: score {score:.1f} is above the {threshold:.1f} threshold and no explicit risks were detected.",
+        )
+    if risks:
+        return True, "Optimization is available because this flow has graph-detected risks to review."
+    return True, f"Optimization is available because this flow score is below the {threshold:.1f} threshold."
+
+
+def _chain_items(chain: Any, fallback: Any = None) -> list[str]:
+    if isinstance(chain, list):
+        values = [
+            str(item.get("step") or item.get("name") or item.get("primitive") or item)
+            for item in chain
+        ]
+    elif isinstance(chain, str):
+        values = [part.strip() for part in re.split(r"\s*(?:->|→)\s*", chain) if part.strip()]
+    else:
+        values = []
+    if not values and fallback:
+        return _chain_items(fallback)
+    return values
+
+
+def render_flow_chips(items: list[str], accent: str = "#0f7b63") -> None:
+    if not items:
+        st.caption("No ordered graph chain captured.")
+        return
+    chips = ""
+    for i, item in enumerate(items[:8]):
+        chips += (
+            f"<span style='display:inline-block;border:1px solid rgba(15,123,99,.35);"
+            f"background:#f5fbf8;color:#19211f;border-radius:999px;padding:5px 10px;"
+            f"font-size:.75rem;margin:3px 4px 3px 0;'>{item}</span>"
+        )
+        if i < min(len(items), 8) - 1:
+            chips += f"<span style='color:{accent};font-weight:700;margin-right:4px;'>→</span>"
+    if len(items) > 8:
+        chips += f"<span style='color:#65706d;font-size:.75rem;'>+{len(items) - 8} more</span>"
+    st.markdown(chips, unsafe_allow_html=True)
+
+
+def render_human_proposal_card(
+    *,
+    title: str,
+    before_summary: dict[str, Any],
+    proposed_summary: dict[str, Any],
+    justification: str | None = None,
+) -> None:
+    before_chain = _chain_items(
+        before_summary.get("ordered_chain"),
+        before_summary.get("graph_evidence", {}).get("steps") if isinstance(before_summary.get("graph_evidence"), dict) else None,
+    )
+    actions = proposed_summary.get("recommended_actions") or []
+    action_text = [
+        str(action.get("description") or action.get("action_type") or "")
+        for action in actions
+        if isinstance(action, dict) and (action.get("description") or action.get("action_type"))
+    ]
+    if not action_text and proposed_summary.get("hypothesis"):
+        action_text = [str(proposed_summary.get("hypothesis"))]
+
+    st.markdown(f"#### {title}")
+    c_before, c_after = st.columns(2)
+    with c_before:
+        st.markdown("**Before**")
+        st.caption(before_summary.get("business_flow") or "Selected business flow")
+        render_flow_chips(before_chain)
+        if before_summary.get("baseline_score") is not None:
+            st.metric("Baseline", round(float(before_summary.get("baseline_score") or 0), 2))
+    with c_after:
+        st.markdown("**Proposed Now**")
+        st.caption(proposed_summary.get("title") or "Human-review proposal")
+        if action_text:
+            for action in action_text[:4]:
+                st.markdown(f"- {action}")
+        else:
+            st.caption("No action summary captured.")
+        st.success(f"Code changed: {proposed_summary.get('code_mutation', 'none')}")
+    if justification:
+        st.info(justification)
+
+
+def render_sandbox_review(result: dict[str, Any]) -> None:
+    """Show sandbox output as an operator-readable review instead of raw JSON."""
+    status = str(result.get("status") or "unknown")
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    traces = result.get("traces") if isinstance(result.get("traces"), list) else []
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Status", status.title())
+    c2.metric("Score", metrics.get("match_score", "n/a"))
+    c3.metric("Sample Size", metrics.get("sample_size", len(traces) or "n/a"))
+    c4.metric("Latency", f"{metrics.get('latency_ms')} ms" if metrics.get("latency_ms") is not None else "n/a")
+
+    if result.get("error_log"):
+        st.error(result.get("error_log"))
+
+    if metrics:
+        before = metrics.get("sandbox_baseline_score")
+        after = metrics.get("match_score")
+        if before is not None and after is not None:
+            st.markdown("**Sandbox comparison**")
+            render_flow_chips([
+                f"Baseline score {round(float(before), 2)}",
+                f"Candidate score {round(float(after), 2)}",
+                "Human review required",
+            ])
+
+    if traces:
+        st.markdown("**Simulation trace sample**")
+        trace_df = pd.DataFrame(traces[:20])
+        display_table(trace_df, height=260)
+    else:
+        st.caption("No trace rows were returned for this sandbox run.")
+
+
+def summarize_agent_failure(output: str, exit_code: int | None = None) -> str:
+    text = output or ""
+    if "RESOURCE_EXHAUSTED" in text or "monthly spending cap" in text:
+        return (
+            "The agent stopped in the planner because the Gemini API returned "
+            "`429 RESOURCE_EXHAUSTED`: the Google AI Studio project has exceeded "
+            "its monthly spending cap. No proposal was created and no code was changed."
+        )
+    if "Neo4j connectivity check failed" in text or "Unable to retrieve routing information" in text:
+        return (
+            "The agent could not reach Neo4j, so it could not load the selected "
+            "BusinessFlow graph evidence. No proposal was created."
+        )
+    if "Agent run timed out" in text:
+        return "The agent run timed out before reaching a proposal. No code was changed."
+    if exit_code and exit_code != 0:
+        return f"The agent process exited with code {exit_code} before creating a proposal."
+    return "The critic/evaluator did not find a grounded improvement for this flow."
 
 
 def workflow_sentence(row: pd.Series) -> str:
@@ -1728,6 +1904,9 @@ with st.sidebar:
             "Real-Time Agents",
             "Flows",
             "Agentic Architecture",
+            "Retry Inspector",
+            "History",
+            "Chat",
         ],
         label_visibility="collapsed",
     )
@@ -1779,6 +1958,8 @@ database_required_pages = {
     "Graph Display",
     "Flows",
     "Agentic Architecture",
+    "History",
+    "Chat",
 }
 if neo4j_error and page in database_required_pages:
     st.error(neo4j_error)
@@ -1989,6 +2170,12 @@ if page == "Project Review":
             else:
                 display_table(storage, height=300)
             st.markdown("### Sandbox Connector Units")
+            st.info(
+                "Current sandbox data units are inspection-only: they prepare schema/sample snapshots "
+                "from CSV or SQL sources for analysis. They do not create tables, write rows, or create "
+                "new executable connector units inside the sandbox. New connectors are currently graph/indexer "
+                "artifacts or human-review proposals, not sandbox mutations."
+            )
             connector_rows = [
                 {
                     "connector_id": connector_id,
@@ -1999,10 +2186,13 @@ if page == "Project Review":
                 for connector_id, connector_cls in CONNECTOR_REGISTRY.items()
             ]
             display_table(pd.DataFrame(connector_rows), height=160)
-            st.code(
-                "Codebase -> DataStore detection -> CSV_Connector / SQL_Connector -> sandbox snapshot -> agent recommendation",
-                language="text",
-            )
+            render_flow_chips([
+                "Codebase/DataStore detected",
+                "CSV or SQL connector inspects source",
+                "Sandbox snapshot is prepared",
+                "Agent proposes reviewable change",
+                "Human approves or rejects",
+            ])
         with tab_legacy:
             st.caption("Existing seeded/demo graph data remains visible here for migration context only.")
             cols = st.columns(6)
@@ -2318,19 +2508,26 @@ elif page == "Flows":
         </div>
         """, unsafe_allow_html=True)
         st.caption(sel_chain)
+        can_optimize, optimization_reason = flow_needs_optimization(sel_row)
+        if can_optimize:
+            st.info(optimization_reason)
+        else:
+            st.success(optimization_reason)
 
         opt_phase = st.session_state.get("opt_phase", "idle")
         opt_slot = st.empty()
 
         def opt_anim(phase="idle", flow_name=""):
             phases_map = {
-                "idle":       (-1, f"Ready — click Optimize to improve '{flow_name}'"),
+                "idle":       (-1, f"Ready — review '{flow_name}'"),
                 "reading":    (0,  f"Planner reading '{flow_name}' skills and history from Neo4j..."),
-                "thinking":   (1,  f"Generator asking Gemini AI how to improve '{flow_name}'..."),
-                "proposing":  (2,  f"Critic validating the proposed replacement flow..."),
-                "validating": (3,  f"Simulator testing the new flow in sandbox..."),
-                "done":       (4,  f"Complete — improved version of '{flow_name}' saved as proposal"),
-                "error":      (-2, "No new proposals were created — try again in a moment"),
+                "thinking":   (1,  f"Generator drafting a proposal-only alternative for '{flow_name}'..."),
+                "proposing":  (2,  f"Critic validating the proposal against graph evidence..."),
+                "validating": (3,  f"Simulator validating the proposed workflow without changing code..."),
+                "evaluating": (4,  f"Evaluator comparing sandbox metrics against the baseline..."),
+                "approval":   (5,  f"Human Approval waiting for a decision on '{flow_name}'..."),
+                "done":       (6,  f"Complete — explanation and proposal saved for '{flow_name}'"),
+                "error":      (-2, "Optimization stopped — review the agent output below"),
             }
             active, msg = phases_map.get(phase, phases_map["idle"])
             agents = [
@@ -2338,6 +2535,8 @@ elif page == "Flows":
                 ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
                 ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
                 ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
+                ("Evaluator", "Compares score",        "#7b4eb3", "#eee4ff"),
+                ("Approval",  "Awaits admin",          "#b04a72", "#ffe3ef"),
             ]
             cards = ""
             for i, (name, role, color, bg) in enumerate(agents):
@@ -2355,10 +2554,10 @@ elif page == "Flows":
                 else:
                     dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d8d1c2;margin-right:5px;flex-shrink:0;"></span>'
                 cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#65706d;line-height:1.3;">{role}</div></div>'
-                if i < 3:
+                if i < len(agents) - 1:
                     ac = color if (is_a or is_d) else "#d8d1c2"
                     cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:16px;">&rarr;</div>'
-            pct = max(0, int(active / 4 * 100)) if active >= 0 else 0
+            pct = max(0, int(active / 6 * 100)) if active >= 0 else 0
             if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
             elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
             elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
@@ -2369,7 +2568,7 @@ elif page == "Flows":
 @keyframes shimmer{{to{{left:140%}}}}
 </style>
 <div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
-<div style="display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
+<div style="display:grid;grid-template-columns:1fr 20px 1fr 20px 1fr 20px 1fr 20px 1fr 20px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
 <div style="background:#ede8df;border-radius:999px;height:2px;margin-bottom:9px;overflow:hidden;">
 <div style="background:#0f7b63;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
 <div style="background:{sb};border:1px solid {sbd};border-radius:7px;padding:8px 12px;font-size:.76rem;color:{sc};font-weight:500;">{msg}</div>
@@ -2390,16 +2589,17 @@ elif page == "Flows":
                     </div>
                     <div style="font-size:18px;color:#d8d1c2;align-self:center;">&rarr;</div>
                     <div>
-                        <div style="font-size:.68rem;color:#65706d;">After</div>
-                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">New proposed flow</div>
-                        <div style="font-size:.72rem;color:#167447;">Score: sandbox-validated</div>
+                        <div style="font-size:.68rem;color:#65706d;">Proposed</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">Human-review proposal only</div>
+                        <div style="font-size:.72rem;color:#167447;">No code changed</div>
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            st.info("Review the generated proposal below.")
+            st.info("Review the generated proposal below. It is a visual/text explanation, not a code mutation.")
 
-        if st.button("Optimize this flow", type="primary", use_container_width=True):
+        optimize_label = "Already optimized" if not can_optimize else "Optimize this flow"
+        if st.button(optimize_label, type="primary", use_container_width=True, disabled=not can_optimize):
             steps = sel_row.get("steps") or []
             primitive_ids = [
                 step.get("primitive_id")
@@ -2422,14 +2622,17 @@ elif page == "Flows":
             }
             optimize_payload = json.loads(json.dumps(optimize_payload, default=str))
             goal = (
-                f"Optimize the business flow named '{sel_name}'. Current score is {sel_score_f:.1f}. "
+                f"Create a proposal-only optimization analysis for the business flow named '{sel_name}'. Current score is {sel_score_f:.1f}. "
                 "Analyse its BusinessFlow, FlowStep, primitive graph evidence, historical failures, "
-                "and sandbox result. Propose a better version with justification."
+                "and sandbox result. Return a visual/text before-vs-proposed explanation with justification. "
+                "Do not mutate real code and do not generate modify_code/code_patch actions."
             )
             st.session_state["opt_phase"] = "reading"
             st.session_state["last_optimize_payload"] = optimize_payload
             opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
+            thread_id = uuid.uuid4().hex[:8]
             publish_event(
+                thread_id=thread_id,
                 source="ui",
                 target="planner",
                 event_type="started",
@@ -2438,12 +2641,62 @@ elif page == "Flows":
                 payload=optimize_payload,
             )
 
+            repo_path = str(project.get("repo_path") or "")
+
+            before_flows = load_flows()
+            before_proposal_ids = set()
+            if not before_flows.empty:
+                before_proposal_ids = set(
+                    before_flows[
+                        (before_flows["status"].fillna("") == "proposed")
+                        & (before_flows["business_flow_id"].fillna("") == str(sel_row.get("id")))
+                    ]["id"].tolist()
+                )
+
+            phase_rank = {
+                "reading": 0,
+                "thinking": 1,
+                "proposing": 2,
+                "validating": 3,
+                "evaluating": 4,
+                "approval": 5,
+                "done": 6,
+                "error": 99,
+            }
+            phase_agent = {
+                "reading": ("planner", "generator", "Planner is reading graph evidence"),
+                "thinking": ("generator", "critic", "Generator is drafting actions"),
+                "proposing": ("critic", "simulator", "Critic is validating the proposal"),
+                "validating": ("simulator", "evaluator", "Simulator is testing in sandbox"),
+                "evaluating": ("evaluator", "human_approval", "Evaluator is comparing results"),
+                "approval": ("human_approval", "", "Human approval is required"),
+            }
+
+            def advance_phase(next_phase: str) -> None:
+                current = st.session_state.get("opt_phase", "idle")
+                if phase_rank.get(next_phase, -1) < phase_rank.get(current, -1):
+                    return
+                st.session_state["opt_phase"] = next_phase
+                opt_slot.markdown(opt_anim(next_phase, sel_name), unsafe_allow_html=True)
+                src, target, title = phase_agent.get(next_phase, ("ui", "", next_phase))
+                publish_event(
+                    thread_id=thread_id,
+                    source=src,
+                    target=target,
+                    event_type="phase",
+                    title=title,
+                    detail=sel_name,
+                    payload=optimize_payload,
+                )
+
+            advance_phase("reading")
             cmd = [
                 sys.executable, "main.py", "--goal", goal,
+                "--thread-id", thread_id,
                 "--project-id", project["project_id"],
                 "--business-flow-id", str(sel_row.get("id")),
+                "--proposal-only",
             ]
-            repo_path = str(project.get("repo_path") or "")
             if repo_path:
                 cmd.extend(["--source-path", repo_path])
 
@@ -2456,59 +2709,92 @@ elif page == "Flows":
                 text=True,
                 bufsize=1,
             )
-            stdout_lines = []
-            for raw_line in proc.stdout:
+            stdout_lines: list[str] = []
+            deadline = time.monotonic() + 240
+            code = 124
+            stderr = ""
+            while True:
+                if proc.poll() is not None:
+                    code = proc.returncode
+                    remaining = proc.stdout.read() if proc.stdout else ""
+                    if remaining:
+                        stdout_lines.append(remaining)
+                    break
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    stderr = "Agent run timed out after 240 seconds."
+                    code = 124
+                    break
+                ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+                if not ready:
+                    continue
+                raw_line = proc.stdout.readline()
+                if not raw_line:
+                    continue
                 stdout_lines.append(raw_line)
-                ll = raw_line.lower()
-                if any(x in ll for x in ["query_graph", "querying", "reading", "graph", "neo4j"]):
-                    if st.session_state.get("opt_phase") != "reading":
-                        st.session_state["opt_phase"] = "reading"
-                        opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["gemini", "llm", "generat", "propose", "200 ok"]):
-                    if st.session_state.get("opt_phase") != "thinking":
-                        st.session_state["opt_phase"] = "thinking"
-                        opt_slot.markdown(opt_anim("thinking", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["critic", "validat", "check"]):
-                    if st.session_state.get("opt_phase") != "proposing":
-                        st.session_state["opt_phase"] = "proposing"
-                        opt_slot.markdown(opt_anim("proposing", sel_name), unsafe_allow_html=True)
-                elif any(x in ll for x in ["simulat", "sandbox"]):
-                    if st.session_state.get("opt_phase") != "validating":
-                        st.session_state["opt_phase"] = "validating"
-                        opt_slot.markdown(opt_anim("validating", sel_name), unsafe_allow_html=True)
+                marker = raw_line.lower()
+                if "[planner]" in marker:
+                    advance_phase("reading")
+                elif "[generator]" in marker or "generator" in marker:
+                    advance_phase("thinking")
+                elif "[critic]" in marker or "critic" in marker:
+                    advance_phase("proposing")
+                elif "[simulator]" in marker or "sandbox" in marker:
+                    advance_phase("validating")
+                elif "[evaluator]" in marker or "evaluator" in marker:
+                    advance_phase("evaluating")
+                elif "approval required" in marker or "[human_approval]" in marker:
+                    advance_phase("approval")
 
-            proc.wait()
             stdout = "".join(stdout_lines)
+            combined_output = stdout if not stderr else f"{stdout}\n\nDiagnostics:\n{stderr}"
             clear_data_cache()
 
             updated_flows = load_flows()
-            has_proposals = not updated_flows[updated_flows["status"].fillna("") == "proposed"].empty
+            after_proposal_ids = set()
+            if not updated_flows.empty:
+                after_proposal_ids = set(
+                    updated_flows[
+                        (updated_flows["status"].fillna("") == "proposed")
+                        & (updated_flows["business_flow_id"].fillna("") == str(sel_row.get("id")))
+                    ]["id"].tolist()
+                )
+            new_proposal_ids = sorted(after_proposal_ids - before_proposal_ids)
             st.session_state["last_optimize_result"] = {
                 "flow": sel_name,
-                "exit_code": proc.returncode,
-                "stdout": stdout,
+                "thread_id": thread_id,
+                "exit_code": code,
+                "stdout": combined_output,
+                "failure_summary": summarize_agent_failure(combined_output, code),
+                "new_proposal_ids": new_proposal_ids,
                 "payload": optimize_payload,
             }
 
-            if has_proposals and proc.returncode == 0:
+            if new_proposal_ids and code == 0:
                 st.session_state["opt_phase"] = "done"
                 opt_slot.markdown(opt_anim("done", sel_name), unsafe_allow_html=True)
-                st.success("Optimization complete — review the new proposal below.")
+                st.success(f"Optimization complete — proposal {new_proposal_ids[0]} is ready below.")
             else:
                 st.session_state["opt_phase"] = "error"
                 opt_slot.markdown(opt_anim("error", sel_name), unsafe_allow_html=True)
-                st.warning("No new proposals were created. Review the agent output below.")
+                if code != 0:
+                    st.error(summarize_agent_failure(combined_output, code))
+                else:
+                    st.warning(summarize_agent_failure(combined_output, code))
 
         if "last_optimize_result" in st.session_state:
             result = st.session_state["last_optimize_result"]
-            with st.expander("Last optimization evidence", expanded=False):
-                st.write({
-                    "flow": result.get("flow"),
-                    "exit_code": result.get("exit_code"),
-                    "sandbox_scope": "isolated code sandbox when modify_code actions are generated; otherwise flow sandbox",
-                })
-                st.json(result.get("payload", {}))
-                st.code(result.get("stdout") or "(no stdout)", language="text")
+            payload = result.get("payload", {}) or {}
+            st.markdown("### Last Optimization Review")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Flow", result.get("flow") or "Selected flow")
+            c2.metric("Agent Exit", result.get("exit_code"))
+            c3.metric("New Proposals", len(result.get("new_proposal_ids", [])))
+            render_flow_chips(_chain_items(payload.get("ordered_chain"), payload.get("steps")))
+            if result.get("new_proposal_ids"):
+                st.success("A human-review proposal was created. No real project code was changed.")
+            else:
+                st.warning(result.get("failure_summary") or summarize_agent_failure(result.get("stdout", ""), result.get("exit_code")))
 
         st.divider()
         st.subheader("Pending Optimizations")
@@ -2544,17 +2830,51 @@ elif page == "Flows":
                     clear_data_cache()
                     st.rerun()
             with c3:
-                st.write({
-                    "name": row.get("name"),
-                    "avg_score": row.get("avg_score"),
-                    "business_flow_id": row.get("business_flow_id"),
-                    "skills": row.get("skills"),
-                })
-                if row.get("justification"):
-                    st.info(row.get("justification"))
-            payload = proposal_payload(row.get("yaml_config"))
-            if payload:
-                st.code(payload, language="json")
+                parsed_payload = parse_proposal_payload(row.get("yaml_config"))
+                before_summary = parsed_payload.get("before_summary") or {}
+                proposed_summary = parsed_payload.get("proposed_summary") or {}
+                if before_summary or proposed_summary:
+                    render_human_proposal_card(
+                        title=str(row.get("name") or row.get("id")),
+                        before_summary=before_summary,
+                        proposed_summary=proposed_summary,
+                        justification=row.get("justification"),
+                    )
+                else:
+                    st.markdown(f"#### {row.get('name') or row.get('id')}")
+                    st.caption(f"Business flow: {row.get('business_flow_id') or 'legacy proposal'}")
+                    st.metric("Proposed score", row.get("avg_score"))
+                    if row.get("justification"):
+                        st.info(row.get("justification"))
+
+        # ── Inline skill approval notice ─────────────────────────────────────
+        # If any pending SkillProposals exist (created by the generator when it
+        # referenced skills that don't yet exist in Graph B), surface them here
+        # so the admin can approve without leaving the flow review context.
+        _pending_skills = load_skill_proposals()
+        _pending_skills = _pending_skills[_pending_skills["status"].fillna("") == "proposed"]
+        if not _pending_skills.empty:
+            with st.container(border=True):
+                st.markdown(
+                    f"**⚠️ {len(_pending_skills)} skill proposal(s) awaiting approval**  \n"
+                    "The generator referenced skills that don't exist in Graph B. "
+                    "The Critic will reject flows that use unapproved skills. "
+                    "Review and approve the ones you want to allow."
+                )
+                for _, _sk in _pending_skills.iterrows():
+                    _c1, _c2, _c3 = st.columns([3, 1, 1])
+                    _c1.markdown(f"**`{_sk['id']}`** — {_sk.get('purpose') or _sk.get('name', '')}")
+                    with _c2:
+                        if st.button("Approve", key=f"inline_sk_approve_{_sk['id']}", type="primary", use_container_width=True):
+                            approve_skill_proposal(_sk["id"])
+                            clear_data_cache()
+                            st.rerun()
+                    with _c3:
+                        if st.button("Reject", key=f"inline_sk_reject_{_sk['id']}", use_container_width=True):
+                            reject_skill_proposal(_sk["id"], "Rejected from Flows page")
+                            clear_data_cache()
+                            st.rerun()
+        # ─────────────────────────────────────────────────────────────────────
 
         with st.expander("Supporting pipelines, database flows, sandbox, and web evidence"):
             support_tabs = st.tabs(["Software Pipelines", "Database Flows", "Sandbox", "Optional Web Evidence"])
@@ -2590,7 +2910,7 @@ elif page == "Flows":
                     else:
                         st.error(result.get("error_log", "Sandbox run failed."))
                 if "last_sandbox_result" in st.session_state:
-                    st.json(st.session_state["last_sandbox_result"])
+                    render_sandbox_review(st.session_state["last_sandbox_result"])
             with support_tabs[3]:
                 default_source = str((ROOT.parent / "fundraising_app" / "Crowd-Funding-App").resolve())
                 url = st.text_input("Website URL", value="http://127.0.0.1:5173", key="flow_ingest_url")
@@ -3058,7 +3378,7 @@ elif page == "Agentic Architecture":
         c1.metric("Connector Units", len(CONNECTOR_REGISTRY))
         c2.metric("Mode", "Read-only")
         c3.metric("Mutation", "Blocked")
-        c4.metric("Output", "Recommendation JSON")
+        c4.metric("Output", "Review summary")
         st.code(
             """Existing project code
   -> Project software graph
@@ -3082,13 +3402,23 @@ elif page == "Agentic Architecture":
         ]
         display_table(pd.DataFrame(connector_rows), height=180)
         st.markdown("### Recommendation Actions")
-        st.json(
-            [
-                {"action_type": "create_connector", "target": "DataStore", "sandbox_only": True},
-                {"action_type": "modify_workflow", "target": "Workflow", "sandbox_only": True},
-                {"action_type": "add_validation", "target": "Route or Function", "sandbox_only": True},
-                {"action_type": "flag_risk", "target": "Risk", "sandbox_only": True},
-            ]
+        st.info(
+            "Connector creation is not an executable sandbox action yet. The sandbox can inspect "
+            "CSV/SQL sources, prepare snapshots, simulate workflow proposals, and return reviewable "
+            "recommendations. New connector creation must remain a human-reviewed proposal until a "
+            "dedicated connector proposal/apply path exists."
+        )
+        display_table(
+            pd.DataFrame(
+                [
+                    {"action_type": "modify_workflow", "target": "Workflow", "sandbox_effect": "simulate proposal"},
+                    {"action_type": "add_validation", "target": "Route or Function", "sandbox_effect": "recommend guardrail"},
+                    {"action_type": "add_observability", "target": "Runtime path", "sandbox_effect": "recommend tracing/metrics"},
+                    {"action_type": "flag_risk", "target": "Risk", "sandbox_effect": "surface issue for review"},
+                    {"action_type": "request_admin_approval", "target": "Unknown capability", "sandbox_effect": "block execution"},
+                ]
+            ),
+            height=220,
         )
 
     with tab_graphrag:
@@ -3187,9 +3517,405 @@ elif page == "Infrastructure":
         chart_data = servers[["name", "load_percent"]].set_index("name")
         st.bar_chart(chart_data)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Skill Registry
+# ─────────────────────────────────────────────────────────────────────────────
+# (Skill Registry was removed as a separate page — skill proposals now appear
+#  inline on the Flows page and are manageable from the Chat page.)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Retry Inspector
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Retry Inspector":
+    st.subheader("Retry Inspector")
+    st.caption(
+        "Every time the Critic or Evaluator rejects a proposal, the structured retry "
+        "context is recorded here. Use this to understand why the agent looped and what "
+        "it was told to fix before regenerating."
+    )
+
+    all_events = read_events(limit=500)
+
+    # Collect all critic/evaluator rejection events that carry retry data
+    retry_events = [
+        e for e in all_events
+        if e.get("source") in ("critic", "evaluator")
+        and e.get("event_type") == "decision"
+        and (
+            e.get("payload", {}).get("retry_count") is not None
+            or e.get("payload", {}).get("failed_metric")
+            or e.get("payload", {}).get("issues")
+        )
+    ]
+
+    if not retry_events:
+        st.info(
+            "No retry events found. Run an agent optimization — retries will appear here "
+            "whenever the Critic rejects a flow or the Evaluator finds the simulation score "
+            "insufficient."
+        )
+    else:
+        # Group by thread_id, most-recent thread first
+        by_thread: dict = {}
+        for e in retry_events:
+            tid = e.get("thread_id", "unknown")
+            by_thread.setdefault(tid, []).append(e)
+
+        threads_sorted = sorted(
+            by_thread.keys(),
+            key=lambda t: by_thread[t][-1].get("created_at", ""),
+            reverse=True,
+        )
+
+        col_sel, col_stat = st.columns([3, 1])
+        with col_sel:
+            selected_thread = st.selectbox(
+                "Thread",
+                threads_sorted,
+                format_func=lambda t: f"{t}  ({len(by_thread[t])} rejection(s))",
+            )
+        with col_stat:
+            st.metric("Total retries", len(by_thread[selected_thread]))
+
+        st.divider()
+
+        for idx, event in enumerate(by_thread[selected_thread], 1):
+            source   = event.get("source", "")
+            payload  = event.get("payload", {})
+            ts       = event.get("created_at", "")[:19].replace("T", " ")
+            retry_no = payload.get("retry_count", idx)
+
+            # Header pill
+            src_color = "#e07845" if source == "critic" else "#9a70cc"
+            src_icon  = "🔍" if source == "critic" else "📊"
+            st.markdown(
+                f"<span style='background:{src_color}22;border:1px solid {src_color};"
+                f"border-radius:6px;padding:4px 10px;font-size:13px;font-weight:700'>"
+                f"{src_icon} {source.title()} — retry #{retry_no}</span>"
+                f"<span style='color:#b8b09c;font-size:11px;margin-left:10px'>{ts}</span>",
+                unsafe_allow_html=True,
+            )
+
+            if source == "critic":
+                issues   = payload.get("issues", [])
+                evidence = payload.get("evidence_node_ids", [])
+
+                if issues:
+                    st.markdown("**Issues found (deterministic checks):**")
+                    for issue in issues:
+                        st.error(issue, icon="⛔")
+
+                if evidence:
+                    st.success(
+                        f"Graph-grounded evidence accepted: {', '.join(str(e) for e in evidence[:6])}"
+                        + (" …" if len(evidence) > 6 else ""),
+                        icon="✅",
+                    )
+                else:
+                    st.warning("No evidence_node_ids were accepted — flow had no graph grounding.", icon="⚠️")
+
+                detail = event.get("detail", "")
+                if detail:
+                    st.caption(f"Detail: {detail}")
+
+            elif source == "evaluator":
+                fm = payload.get("failed_metric", {})
+                if fm:
+                    c1, c2, c3 = st.columns(3)
+                    score     = fm.get("match_score", 0.0)
+                    threshold = fm.get("threshold", 0.0)
+                    delta     = round(score - threshold, 2) if isinstance(score, (int, float)) else None
+                    c1.metric("Simulation score",    score)
+                    c2.metric("Required threshold",  threshold)
+                    c3.metric("Gap",                 delta, delta_color="inverse")
+                    st.caption(f"Sim status: {fm.get('sim_status', '?')}")
+
+                llm_reason = payload.get("llm_reason", "")
+                if llm_reason:
+                    st.info(f"**LLM reasoning:** {llm_reason}", icon="💬")
+
+            st.markdown("")  # spacing between retries
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: History
+# ─────────────────────────────────────────────────────────────────────────────
 elif page == "History":
-    tab1, tab2 = st.tabs(["Matches", "Execution Traces"])
-    with tab1:
+    st.subheader("History")
+
+    tab_traces, tab_matches = st.tabs(["Execution Traces", "Matches"])
+
+    with tab_traces:
+        st.caption(
+            "Every sandbox simulation logged by the agent. "
+            "Skills Applied shows which skill pipeline ran. "
+            "Baseline is the within-sample random-shuffle score the proposed flow was compared against."
+        )
+        traces = load_traces()
+        if traces.empty:
+            st.info("No execution traces yet. Run an agent optimization to populate this table.")
+        else:
+            # Derive improvement column
+            if "score" in traces.columns and "baseline_score" in traces.columns:
+                traces["improvement"] = (
+                    traces["score"].astype(float) - traces["baseline_score"].astype(float)
+                ).round(2)
+
+            # Display table with key columns first
+            display_cols = [c for c in
+                ["timestamp", "flow_name", "status", "score", "baseline_score", "improvement", "skills_applied", "trace_id", "flow_id"]
+                if c in traces.columns]
+            display_table(traces[display_cols], height=420)
+
+            # Score vs baseline chart
+            chart_df = traces[["timestamp", "score", "baseline_score"]].dropna().copy()
+            if not chart_df.empty and len(chart_df) > 1:
+                st.markdown("**Score vs baseline over time**")
+                chart_df = chart_df.sort_values("timestamp").reset_index(drop=True)
+                chart_df["timestamp"] = chart_df["timestamp"].str[:16]
+                st.line_chart(chart_df.set_index("timestamp")[["score", "baseline_score"]])
+
+            # Skill combination ranking
+            if "skills_applied" in traces.columns:
+                st.markdown("**Top skill combinations by average score**")
+                skill_rows = []
+                for _, row in traces.iterrows():
+                    skills = row.get("skills_applied")
+                    score  = row.get("score")
+                    if skills and score is not None:
+                        combo = " → ".join(skills) if isinstance(skills, list) else str(skills)
+                        try:
+                            skill_rows.append({"skills": combo, "score": float(score)})
+                        except (TypeError, ValueError):
+                            pass
+                if skill_rows:
+                    import pandas as _pd
+                    combo_df = _pd.DataFrame(skill_rows)
+                    ranking  = (
+                        combo_df.groupby("skills")["score"]
+                        .agg(["mean", "count"])
+                        .rename(columns={"mean": "avg_score", "count": "runs"})
+                        .round(2)
+                        .sort_values("avg_score", ascending=False)
+                        .reset_index()
+                    )
+                    display_table(ranking, height=260)
+
+    with tab_matches:
         display_table(load_matches(), height=520)
-    with tab2:
-        display_table(load_traces(), height=520)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Chat  — admin conversation with the agentic system
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Chat":
+    st.subheader("Chat")
+    st.caption(
+        "Ask questions about the system, review pending actions, or give commands. "
+        "The assistant has live access to proposals, skill requests, traces, events, "
+        "and flow performance data."
+    )
+
+    # ── System context (gathered fresh each page load) ────────────────────────
+    def _chat_context() -> str:
+        lines = ["== EcoLink NeuroCore — live system state =="]
+
+        # Pending flow proposals
+        try:
+            _flows = run_read(
+                "MATCH (f:Flow {status:'proposed'}) "
+                "RETURN f.id AS id, f.name AS name, f.avg_outcome_score AS score, "
+                "       f.justification AS justification LIMIT 10"
+            )
+            if _flows:
+                lines.append(f"\n--- Pending flow proposals ({len(_flows)}) ---")
+                for r in _flows:
+                    lines.append(f"  {r['id']}  name={r.get('name','')}  score={r.get('score','')}  justification={str(r.get('justification',''))[:120]}")
+            else:
+                lines.append("\nNo pending flow proposals.")
+        except Exception:
+            pass
+
+        # Pending skill proposals
+        try:
+            _skills = run_read(
+                "MATCH (s:SkillProposal {status:'proposed'}) "
+                "RETURN s.id AS id, s.name AS name, s.purpose AS purpose, s.proposed_by AS by LIMIT 20"
+            )
+            if _skills:
+                lines.append(f"\n--- Pending skill proposals ({len(_skills)}) ---")
+                for r in _skills:
+                    lines.append(f"  {r['id']}  name={r.get('name','')}  purpose={str(r.get('purpose',''))[:100]}  proposed_by={r.get('by','')}")
+            else:
+                lines.append("\nNo pending skill proposals.")
+        except Exception:
+            pass
+
+        # Recent execution traces
+        try:
+            _traces = run_read(
+                "MATCH (et:ExecutionTrace)-[:RAN_FLOW]->(f:Flow) "
+                "OPTIONAL MATCH (et)-[:RESULTED_IN]->(o:Outcome) "
+                "RETURN f.id AS flow_id, et.status AS status, o.score AS score, "
+                "       et.skills_applied AS skills, et.baseline_score AS baseline, "
+                "       toString(et.timestamp) AS ts "
+                "ORDER BY ts DESC LIMIT 10"
+            )
+            if _traces:
+                lines.append(f"\n--- Recent execution traces ({len(_traces)}) ---")
+                for r in _traces:
+                    lines.append(
+                        f"  flow={r.get('flow_id','')}  status={r.get('status','')}  "
+                        f"score={r.get('score','')}  baseline={r.get('baseline','')}  "
+                        f"skills={r.get('skills',[])}  ts={str(r.get('ts',''))[:16]}"
+                    )
+        except Exception:
+            pass
+
+        # Last 10 retry events
+        try:
+            _evts = [
+                e for e in read_events(limit=200)
+                if e.get("source") in ("critic", "evaluator")
+                and e.get("event_type") == "decision"
+            ][-10:]
+            if _evts:
+                lines.append(f"\n--- Recent retry events ({len(_evts)}) ---")
+                for e in _evts:
+                    p = e.get("payload", {})
+                    lines.append(
+                        f"  [{e.get('source')}] retry#{p.get('retry_count','?')}  "
+                        f"issues={p.get('issues',[])}  "
+                        f"failed_metric={p.get('failed_metric',{})}  "
+                        f"thread={e.get('thread_id','')}"
+                    )
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
+    # ── Action executor: parse commands from assistant response ───────────────
+    def _execute_actions(text: str) -> list[str]:
+        """Detect and execute simple action keywords in the assistant reply."""
+        import re as _re
+        executed = []
+
+        # APPROVE_SKILL <id>
+        for m in _re.finditer(r"APPROVE_SKILL\s+([^\s,\n]+)", text, _re.IGNORECASE):
+            skill_id = m.group(1).strip("`\"'")
+            try:
+                approve_skill_proposal(skill_id)
+                executed.append(f"✅ Approved skill: `{skill_id}`")
+            except Exception as exc:
+                executed.append(f"❌ Could not approve `{skill_id}`: {exc}")
+
+        # REJECT_SKILL <id>
+        for m in _re.finditer(r"REJECT_SKILL\s+([^\s,\n]+)", text, _re.IGNORECASE):
+            skill_id = m.group(1).strip("`\"'")
+            try:
+                reject_skill_proposal(skill_id, "Rejected via Chat")
+                executed.append(f"🚫 Rejected skill: `{skill_id}`")
+            except Exception as exc:
+                executed.append(f"❌ Could not reject `{skill_id}`: {exc}")
+
+        # APPROVE_PROPOSAL <id>
+        for m in _re.finditer(r"APPROVE_PROPOSAL\s+([^\s,\n]+)", text, _re.IGNORECASE):
+            prop_id = m.group(1).strip("`\"'")
+            try:
+                activate_proposal(prop_id)
+                executed.append(f"✅ Approved proposal: `{prop_id}`")
+            except Exception as exc:
+                executed.append(f"❌ Could not approve `{prop_id}`: {exc}")
+
+        # REJECT_PROPOSAL <id>
+        for m in _re.finditer(r"REJECT_PROPOSAL\s+([^\s,\n]+)", text, _re.IGNORECASE):
+            prop_id = m.group(1).strip("`\"'")
+            reason_m = _re.search(r"reason[:\s]+(.+)", text, _re.IGNORECASE)
+            reason = reason_m.group(1)[:200] if reason_m else "Rejected via Chat"
+            try:
+                reject_proposal(prop_id, reason)
+                executed.append(f"🚫 Rejected proposal: `{prop_id}`")
+            except Exception as exc:
+                executed.append(f"❌ Could not reject `{prop_id}`: {exc}")
+
+        if executed:
+            clear_data_cache()
+        return executed
+
+    # ── LLM response generator ────────────────────────────────────────────────
+    def _generate_response(history: list[dict], user_msg: str) -> str:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI as _Gemini
+            from langchain_core.messages import HumanMessage as _HM, AIMessage as _AI, SystemMessage as _SM
+
+            _llm = _Gemini(
+                model="gemini-2.5-flash",
+                google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
+                temperature=0.3,
+            )
+
+            ctx = _chat_context()
+            system = f"""You are the EcoLink NeuroCore admin assistant.
+You have access to the live system state below and can answer questions, explain decisions, and take actions.
+
+{ctx}
+
+You can execute the following commands by including them in your response:
+  APPROVE_SKILL <skill_id>      — approve a pending SkillProposal
+  REJECT_SKILL  <skill_id>      — reject a pending SkillProposal
+  APPROVE_PROPOSAL <proposal_id> — activate a pending flow proposal
+  REJECT_PROPOSAL  <proposal_id> — reject a pending flow proposal
+
+Always explain what you are doing before issuing a command.
+Be concise. Use markdown for structure. If you don't know something, say so."""
+
+            msgs = [_SM(content=system)]
+            for m in history[-10:]:  # keep last 10 turns in context
+                if m["role"] == "user":
+                    msgs.append(_HM(content=m["content"]))
+                else:
+                    msgs.append(_AI(content=m["content"]))
+            msgs.append(_HM(content=user_msg))
+
+            return _llm.invoke(msgs).content
+        except Exception as exc:
+            return f"⚠️ Could not reach the language model: {exc}"
+
+    # ── Chat UI ───────────────────────────────────────────────────────────────
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # Render existing messages
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Input box
+    if user_input := st.chat_input("Ask about the system, explain a retry, approve a skill…"):
+        # Show user message immediately
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        st.session_state["chat_history"].append({"role": "user", "content": user_input})
+
+        # Generate and show assistant response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                reply = _generate_response(st.session_state["chat_history"][:-1], user_input)
+            st.markdown(reply)
+
+            # Execute any action commands found in the reply
+            actions = _execute_actions(reply)
+            if actions:
+                st.markdown("---")
+                for a in actions:
+                    st.markdown(a)
+                reply += "\n\n---\n" + "\n".join(actions)
+
+        st.session_state["chat_history"].append({"role": "assistant", "content": reply})
+
+    # Sidebar clear button
+    with st.sidebar:
+        if st.button("Clear chat", key="clear_chat_btn"):
+            st.session_state["chat_history"] = []
+            st.rerun()

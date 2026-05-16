@@ -397,6 +397,9 @@ def generator_node(state: AgentState) -> dict:
     software_nodes = state.get("software_nodes", [])
     source_path = state.get("source_path") or ""
     business_flow_context = state.get("business_flow_context", [])
+    proposal_only = bool(state.get("proposal_only"))
+    selected_business_flow = bool(business_flow_context)
+    restrict_to_existing_capabilities = proposal_only or selected_business_flow
 
     # ── Graph B: valid skills with descriptions ───────────────────────────────
     valid_skills: List[Dict] = query_graph.invoke({
@@ -456,7 +459,16 @@ def generator_node(state: AgentState) -> dict:
     )
 
     code_patch_section = ""
-    if source_path and software_nodes:
+    if proposal_only:
+        code_patch_section = """
+== Proposal-only mode ==
+This run is for visualization and human review only.
+Do NOT generate modify_code actions or code_patch payloads.
+Do NOT claim that code has changed.
+Recommend workflow, validation, observability, or risk-flag proposals only.
+Do NOT generate create_skill actions. If a missing capability is genuinely required,
+use request_admin_approval and explain the missing capability in plain language."""
+    elif source_path and software_nodes:
         code_patch_section = f"""
 == Code Modification (source_path is set: {source_path}) ==
 You MAY also include modify_code actions alongside modify_workflow actions.
@@ -467,6 +479,20 @@ For modify_code actions, populate code_patch with:
   description: what this change does
 Use the Codebase Evidence nodes above to identify which files to modify.
 Only propose changes you are confident about based on the graph evidence."""
+
+    allowed_action_types = (
+        "modify_workflow | add_validation | add_observability | flag_risk | request_admin_approval"
+        if restrict_to_existing_capabilities
+        else "create_skill | modify_workflow | modify_code | add_validation | add_observability | flag_risk | request_admin_approval"
+    )
+    missing_capability_instruction = (
+        "Do not propose new skills for selected codebase BusinessFlows. Stay grounded in the existing "
+        "BusinessFlow/FlowStep/primitive graph. If the existing graph lacks a capability, use "
+        "request_admin_approval rather than create_skill."
+        if restrict_to_existing_capabilities
+        else "Do not invent new executable node types. If a missing capability is required, "
+        "use create_skill/request_admin_approval so it remains a proposal until reviewed."
+    )
 
     prompt = f"""You are an Ecosystem Architect for EcoLink, a mentor–startup matching platform.
 
@@ -493,19 +519,20 @@ Success pattern examples:
 {json.dumps(valid_skills, indent=2)}
 
 == Valid connector IDs ==
-{json.dumps([{{"id": c["id"], "type": c["type"]}} for c in valid_connectors], indent=2)}
+{json.dumps([{"id": c["id"], "type": c["type"]} for c in valid_connectors], indent=2)}
 
 == Healthy servers (pick one for runs_on) ==
 {healthy_servers}
 
 Generate recommended_actions to address the hypothesis. Each action MUST have:
-- action_type: one of create_skill | modify_workflow | modify_code | add_validation | add_observability | flag_risk | request_admin_approval
+- action_type: one of {allowed_action_types}
 - target_node_id: an ID from the Codebase Evidence or graph above
 - evidence_node_ids: IDs from the Codebase Evidence that justify the action
 - description: what this action does and why
 
-Do not invent new executable node types. If a missing capability is required,
-use create_skill/request_admin_approval so it remains a proposal until reviewed.
+In proposal-only mode, action_type MUST NOT be modify_code and MUST NOT include code_patch.
+
+{missing_capability_instruction}
 
 For the primary modify_workflow action include a complete flow_yaml that:
 1. Has flow_id: flow_proposal_{industry_slug}_v<N>
@@ -518,6 +545,13 @@ For the primary modify_workflow action include a complete flow_yaml that:
 Return GeneratorOutput: recommended_actions list + hypothesis_tested."""
 
     output: GeneratorOutput = _structured_invoke(_llm(), prompt, GeneratorOutput)
+
+    if restrict_to_existing_capabilities:
+        output.recommended_actions = [
+            action
+            for action in output.recommended_actions
+            if action.action_type not in {"modify_code", "create_skill"}
+        ]
 
     # Extract the first modify_workflow action's YAML for backward-compat fields
     modify_action = next(
@@ -536,11 +570,18 @@ Return GeneratorOutput: recommended_actions list + hypothesis_tested."""
                 referenced_skills, _ = _extract_flow_references(flow_def)
                 unknown_referenced = referenced_skills - valid_skill_ids
                 if unknown_referenced:
-                    logger.warning(
-                        "Generator referenced unknown skills %s — writing SkillProposals.",
-                        unknown_referenced,
-                    )
-                    _propose_unknown_skills(unknown_referenced, goal_industry)
+                    if restrict_to_existing_capabilities:
+                        logger.warning(
+                            "Generator referenced unknown skills %s in selected BusinessFlow/proposal-only mode; "
+                            "not writing SkillProposal nodes.",
+                            unknown_referenced,
+                        )
+                    else:
+                        logger.warning(
+                            "Generator referenced unknown skills %s — writing SkillProposals.",
+                            unknown_referenced,
+                        )
+                        _propose_unknown_skills(unknown_referenced, goal_industry)
         except yaml.YAMLError:
             pass
 
@@ -646,7 +687,7 @@ def critic_node(state: AgentState) -> dict:
                 )
 
         if not referenced_skills:
-            local_issues.append("No skills found in steps[*].skill.")
+            local_issues.append("No skills found in steps[*].skill or steps[*].skill_id.")
 
     # Step 3: validate evidence_node_ids for each recommended_action.
     # Primary check uses elementId(n) (graph-native, as spec requires).
@@ -692,7 +733,7 @@ def critic_node(state: AgentState) -> dict:
     if local_issues:
         suggestions = (
             "Regenerate the YAML using only valid skill IDs from Graph B, "
-            "a healthy runs_on server, steps[*].skill references, "
+            "a healthy runs_on server, steps[*].skill or steps[*].skill_id references, "
             "and evidence_node_ids that exist in the graph."
         )
         _emit_node_event(
@@ -767,7 +808,7 @@ def critic_node(state: AgentState) -> dict:
 
 Check the following and return is_valid + any issues found:
 1. YAML is syntactically correct.
-2. Every skill referenced in `steps[*].skill` exists in the valid skills list.
+2. Every skill referenced in `steps[*].skill` or `steps[*].skill_id` exists in the valid skills list.
 3. Every connector referenced (if any) exists in the valid connectors list.
 4. The `runs_on` server has load < 80% and error_rate < 3%.
 5. Steps are logically ordered and the flow makes sense for a matching system.
@@ -854,7 +895,43 @@ def simulator_node(state: AgentState) -> dict:
         if a.get("action_type") == "modify_code" and a.get("code_patch")
     ]
 
-    if source_path and code_actions:
+    if state.get("proposal_only") and state.get("business_flow_id"):
+        flow_context = state.get("business_flow_context") or []
+        selected_flow = flow_context[0] if flow_context and isinstance(flow_context[0], dict) else {}
+        steps = selected_flow.get("steps") if isinstance(selected_flow.get("steps"), list) else []
+        evidence_ids = {
+            evidence_id
+            for action in recommended_actions
+            if isinstance(action, dict)
+            for evidence_id in action.get("evidence_node_ids", [])
+            if evidence_id
+        }
+        confidence = float(selected_flow.get("confidence") or 0)
+        result = {
+            "status": "success" if recommended_actions and evidence_ids else "fail",
+            "metrics": {
+                "match_score": round(confidence * 10, 2) if confidence else 0.0,
+                "review_confidence": round(confidence, 3) if confidence else 0.0,
+                "grounded_actions": len(recommended_actions),
+                "evidence_count": len(evidence_ids),
+                "sample_size": len(steps),
+                "validation_mode": "graph_review",
+            },
+            "error_log": None if recommended_actions and evidence_ids else (
+                "Proposal-only BusinessFlow review needs at least one action with graph evidence."
+            ),
+            "traces": [
+                {
+                    "action_type": action.get("action_type"),
+                    "target_node_id": action.get("target_node_id"),
+                    "evidence_count": len(action.get("evidence_node_ids", [])),
+                    "description": action.get("description"),
+                }
+                for action in recommended_actions
+                if isinstance(action, dict)
+            ],
+        }
+    elif source_path and code_actions:
         patches = [a["code_patch"] for a in code_actions]
         _emit_node_event(
             state,
@@ -866,6 +943,24 @@ def simulator_node(state: AgentState) -> dict:
             payload={"patch_count": len(patches), "source_path": source_path},
         )
         result: Dict = _code_sandbox(source_path, patches)
+        if result.get("status") != "success" and flow_yaml:
+            _emit_node_event(
+                state,
+                source="simulator",
+                target="evaluator",
+                event_type="message",
+                title="Code sandbox patch failed; falling back to flow sandbox",
+                detail=result.get("error_log", "Code patch did not apply cleanly."),
+                payload={"code_sandbox_result": result},
+            )
+            snapshot_id = f"snapshot_{app_id}" if app_id else "snapshot_2025_q4"
+            flow_result = simulate_flow.invoke({
+                "flow_yaml": flow_yaml,
+                "dataset_snapshot_id": snapshot_id,
+            })
+            flow_result["code_sandbox_result"] = result
+            flow_result["sandbox_fallback"] = "flow"
+            result = flow_result
     elif flow_yaml:
         snapshot_id = f"snapshot_{app_id}" if app_id else "snapshot_2025_q4"
         result = simulate_flow.invoke({
@@ -907,12 +1002,18 @@ def simulator_node(state: AgentState) -> dict:
             "infra_error": infra_error,
         }
 
-    if problem_flow_id:
+    if problem_flow_id and not (state.get("proposal_only") and state.get("business_flow_id")):
         sim_score = metrics.get("match_score", 0.0) if status == "success" else 0.0
+        # Collect skills_applied across all traces (any trace captures the full list)
+        traces = result.get("traces", [])
+        skills_applied = traces[0].get("skills_applied", []) if traces else []
+        sandbox_baseline = metrics.get("sandbox_baseline_score")
         log_execution_trace(
             flow_id=problem_flow_id,
             result_score=sim_score,
             status=status,
+            skills_applied=skills_applied,
+            sandbox_baseline_score=sandbox_baseline,
         )
 
     msg = (
@@ -983,35 +1084,75 @@ def evaluator_node(state: AgentState) -> dict:
             "retry_count": MAX_RETRIES,   # force END routing; infra errors are not retryable
         }
 
-    # LLM provides reasoning and a revised hypothesis on failure — does NOT decide.
+    # Prefer the within-sample random baseline (same snapshot, same scale) over
+    # the historical baseline for the decision threshold.  The within-sample
+    # baseline is stored in metrics.sandbox_baseline_score by sandbox_task.py.
+    sim_score          = latest.get("metrics", {}).get("match_score", 0.0)
+    sim_status         = latest.get("status", "fail")
+    sandbox_baseline   = latest.get("metrics", {}).get("sandbox_baseline_score")
+    effective_baseline = sandbox_baseline if sandbox_baseline is not None else baseline_score
+    threshold          = effective_baseline * IMPROVEMENT_THRESHOLD
+    comparison_note    = (
+        f"within-sample random baseline ({effective_baseline})"
+        if sandbox_baseline is not None
+        else f"historical baseline ({baseline_score})"
+    )
+    proposal_only_business_flow = bool(state.get("proposal_only") and state.get("business_flow_id"))
+    decision_rule = (
+        "For this proposal-only BusinessFlow review, success means the critic passed, "
+        "the simulation command completed, and at least one recommended action cites graph evidence. "
+        "Do not reject only because the generic EcoLink matching sandbox score did not beat its baseline."
+        if proposal_only_business_flow
+        else f"The decision will be computed deterministically (sim_score > {round(threshold, 3)})."
+    )
+    evaluator_task = (
+        "1. Explain the before-vs-proposed BusinessFlow recommendation in plain English (reason field).\n"
+        "2. If the proposal lacks concrete graph evidence, propose an updated_hypothesis that stays grounded in the selected flow."
+        if proposal_only_business_flow
+        else (
+            "1. Explain what the simulation result means in plain English (reason field).\n"
+            "2. If the score did NOT beat the threshold, propose an updated_hypothesis that\n"
+            "   takes a meaningfully different approach than the current one."
+        )
+    )
+
+    # LLM provides reasoning and a revised hypothesis — does NOT make the decision.
     prompt = f"""You are the Evaluator agent for EcoLink NeuroCore.
 
 Problem flow: {problem_flow}
 Hypothesis under test: {hypothesis}
-Historical baseline average score: {baseline_score}
+Historical baseline (GraphRAG): {baseline_score}
+Comparison baseline used: {comparison_note}
+Threshold to beat:  {round(threshold, 3)}  (= baseline × {IMPROVEMENT_THRESHOLD})
 
 == Simulation result ==
 {json.dumps(latest, indent=2)}
 
-The decision will be computed deterministically (score > baseline * {IMPROVEMENT_THRESHOLD}).
+{decision_rule}
 Your job is to:
-1. Explain what the simulation result means in plain English (reason field).
-2. If the score did NOT beat the threshold, propose an updated_hypothesis that
-   takes a meaningfully different approach than the current one.
+{evaluator_task}
 
 Do NOT include a decision field — that is computed automatically."""
 
     output: EvaluatorOutput = _structured_invoke(_llm(), prompt, EvaluatorOutput)
 
-    # Deterministic decision — LLM cannot override this
-    sim_score = latest.get("metrics", {}).get("match_score", 0.0)
-    sim_status = latest.get("status", "fail")
-    threshold = baseline_score * IMPROVEMENT_THRESHOLD
-    decision = (
-        "success"
-        if sim_status == "success" and sim_score > threshold
-        else "failure"
-    )
+    # Deterministic decision — LLM cannot override this. Proposal-only
+    # BusinessFlow runs are graph-review proposals, not EcoLink match-quality
+    # experiments, so the generic matching sandbox score should not block a
+    # grounded UI/codebase optimization proposal.
+    if state.get("proposal_only") and state.get("business_flow_id"):
+        has_grounded_actions = any(
+            action.get("evidence_node_ids")
+            for action in state.get("recommended_actions", [])
+            if isinstance(action, dict)
+        )
+        decision = "success" if has_grounded_actions and sim_status == "success" else "failure"
+    else:
+        decision = (
+            "success"
+            if sim_status == "success" and sim_score > threshold
+            else "failure"
+        )
     logger.info(
         "Evaluator: reason='%s' | deterministic decision=%s "
         "(sim_score=%.2f, sim_status=%s, threshold=%.2f)",
@@ -1026,6 +1167,23 @@ Do NOT include a decision field — that is computed automatically."""
     }
 
     if decision == "success":
+        flow_context = state.get("business_flow_context", [])
+        selected_flow = flow_context[0] if flow_context and isinstance(flow_context[0], dict) else {}
+        before_chain = selected_flow.get("ordered_chain") or selected_flow.get("steps") or ""
+        before_summary = {
+            "business_flow": selected_flow.get("business_flow") or problem_flow,
+            "ordered_chain": before_chain,
+            "baseline_score": baseline_score,
+            "graph_evidence": selected_flow,
+        }
+        proposed_summary = {
+            "title": "Proposed workflow optimization",
+            "hypothesis": hypothesis,
+            "proposal_mode": "visual_text_only" if state.get("proposal_only") else "sandbox_proposal",
+            "code_mutation": "none",
+            "recommended_actions": state.get("recommended_actions", []),
+            "flow_yaml": state.get("proposed_flow_yaml", ""),
+        }
         proposal_id = propose_change.invoke({
             "change_type": "new_flow",
             "details": {
@@ -1035,9 +1193,13 @@ Do NOT include a decision field — that is computed automatically."""
                 "baseline_score": baseline_score,
                 "project_id": state.get("project_id"),
                 "business_flow_id": state.get("business_flow_id"),
-                "business_flow_context": state.get("business_flow_context", []),
+                "business_flow_context": flow_context,
                 "recommended_actions": state.get("recommended_actions", []),
                 "sandbox_result": latest,
+                "proposal_mode": proposed_summary["proposal_mode"],
+                "code_mutation": "none",
+                "before_summary": before_summary,
+                "proposed_summary": proposed_summary,
                 "justification": output.reason,
             },
         })

@@ -491,8 +491,10 @@ def create_skill_modification_proposal(
     set_clauses = [
         "s.reason = $reason",
         "s.proposed_by = $proposed_by",
-        "s.status = coalesce(s.status, 'proposed')",
+        "s.status = 'proposed'",
         "s.created_at = coalesce(s.created_at, datetime())",
+        "s.updated_at = datetime()",
+        "s.rejection_reason = null",
     ]
     params = {
         "skill_id": skill_id,
@@ -527,34 +529,40 @@ def create_skill_modification_proposal(
 
 def get_skill_modification_proposals(status: str | None = None) -> list[dict]:
     """Return all SkillModificationProposal nodes, optionally filtered by status."""
+    def _normalise(rows: list[dict]) -> list[dict]:
+        normalised = []
+        for row in rows:
+            props = row.get("props") or {}
+            normalised.append({
+                "id": props.get("id"),
+                "reason": props.get("reason"),
+                "status": props.get("status"),
+                "proposed_by": props.get("proposed_by"),
+                "created_at": row.get("created_at"),
+                "proposed_name": props.get("proposed_name"),
+                "proposed_description": props.get("proposed_description"),
+                "proposed_performance_score": props.get("proposed_performance_score"),
+                "proposed_avg_execution_ms": props.get("proposed_avg_execution_ms"),
+                "proposed_language": props.get("proposed_language"),
+            })
+        return normalised
+
     if status:
-        return run_query(
+        return _normalise(run_query(
             """
             MATCH (s:SkillModificationProposal {status: $status})
-            RETURN s.id AS id, s.reason AS reason, s.status AS status,
-                   s.proposed_by AS proposed_by, toString(s.created_at) AS created_at,
-                   s.proposed_name AS proposed_name,
-                   s.proposed_description AS proposed_description,
-                   s.proposed_performance_score AS proposed_performance_score,
-                   s.proposed_avg_execution_ms AS proposed_avg_execution_ms,
-                   s.proposed_language AS proposed_language
+            RETURN properties(s) AS props, toString(s.created_at) AS created_at
             ORDER BY s.created_at DESC
             """,
             {"status": status},
-        )
-    return run_query(
+        ))
+    return _normalise(run_query(
         """
         MATCH (s:SkillModificationProposal)
-        RETURN s.id AS id, s.reason AS reason, s.status AS status,
-               s.proposed_by AS proposed_by, toString(s.created_at) AS created_at,
-               s.proposed_name AS proposed_name,
-               s.proposed_description AS proposed_description,
-               s.proposed_performance_score AS proposed_performance_score,
-               s.proposed_avg_execution_ms AS proposed_avg_execution_ms,
-               s.proposed_language AS proposed_language
+        RETURN properties(s) AS props, toString(s.created_at) AS created_at
         ORDER BY s.created_at DESC
         """
-    )
+    ))
 
 
 def approve_skill_modification(skill_id: str) -> dict:

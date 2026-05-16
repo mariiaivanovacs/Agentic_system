@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     base_url: Optional[str]          # Root URL of the connected app
     business_flow_id: Optional[str]  # Selected BusinessFlow node to optimize
     business_flow_context: List[Dict]  # BusinessFlow/FlowStep graph evidence
+    proposal_only: bool              # True when UI wants explanation/proposal only, no code patch actions
 
     # ---- Planner output ----
     current_hypothesis: str          # Working theory the agent is testing

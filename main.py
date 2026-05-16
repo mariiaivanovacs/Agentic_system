@@ -125,6 +125,7 @@ def run_new(
     project_id: str | None = None,
     business_flow_id: str | None = None,
     source_path: str | None = None,
+    proposal_only: bool = False,
 ) -> None:
     from src.agents.graph import build_graph
     from src.agents.tools import verify_neo4j_connection
@@ -146,6 +147,7 @@ def run_new(
             "project_id": project_id,
             "business_flow_id": business_flow_id,
             "source_path": source_path,
+            "proposal_only": proposal_only,
         },
     )
 
@@ -167,6 +169,7 @@ def run_new(
         "base_url": None,
         "business_flow_id": business_flow_id,
         "business_flow_context": [],
+        "proposal_only": proposal_only,
         "current_hypothesis": "",
         "identified_problem_flow": "",
         "failure_patterns": [],
@@ -329,6 +332,7 @@ def main() -> None:
     parser.add_argument("--project-id", default=None, help="Project graph ID to scope optimization")
     parser.add_argument("--business-flow-id", default=None, help="BusinessFlow node ID to optimize")
     parser.add_argument("--source-path", default=None, help="Local source folder for isolated code sandbox")
+    parser.add_argument("--proposal-only", action="store_true", help="Create a visual/text proposal only; do not generate code patch actions")
     parser.add_argument("--approve", action="store_true", help="Approve the pending proposal")
     parser.add_argument("--reject", action="store_true", help="Reject the pending proposal")
     parser.add_argument("--reason", default="No reason provided", help="Rejection reason")
@@ -347,6 +351,7 @@ def main() -> None:
             project_id=args.project_id,
             business_flow_id=args.business_flow_id,
             source_path=args.source_path,
+            proposal_only=args.proposal_only,
         )
     else:
         parser.print_help()

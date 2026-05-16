@@ -262,11 +262,7 @@ def planner_node(state: AgentState) -> dict:
 
 Goal: {goal}
 
-<<<<<<< HEAD
 == Historical flow performance via ExecutionTrace (Graph A) ==
-=======
-== Active flow performance ==
->>>>>>> 6bdee9ce98af43e5b4907b349d5e5f066d2b96e5
 {json.dumps(flow_scores, indent=2)}
 
 == Active flows with their skills (Graph B) ==
@@ -412,7 +408,6 @@ def critic_node(state: AgentState) -> dict:
         for sid, s in infra.items()
     }
 
-<<<<<<< HEAD
     # P1 wiring: use GraphRAG-aware critic prompt when available
     goal = state.get("goal", "")
     if _GRAPHRAG_AVAILABLE:
@@ -442,75 +437,6 @@ def critic_node(state: AgentState) -> dict:
         prompt = _inline_critic_prompt(
             flow_yaml, syntax_error, valid_skills, valid_connectors, infra_summary
         )
-=======
-    local_issues: List[str] = []
-    if syntax_error:
-        local_issues.append(f"YAML syntax/schema error: {syntax_error}")
-    else:
-        referenced_skills, referenced_connectors = _extract_flow_references(flow_def)
-        unknown_skills = sorted(referenced_skills - valid_skills)
-        unknown_connectors = sorted(referenced_connectors - valid_connectors)
-        if unknown_skills:
-            local_issues.append(f"Unknown skill IDs: {unknown_skills}")
-        if unknown_connectors:
-            local_issues.append(f"Unknown connector IDs: {unknown_connectors}")
-
-        runs_on = flow_def.get("runs_on")
-        if not runs_on:
-            local_issues.append("Missing required runs_on server ID.")
-        elif runs_on not in infra:
-            local_issues.append(f"Unknown runs_on server ID: {runs_on}")
-        else:
-            stats = infra[runs_on]
-            if stats["load"] >= 0.80 or stats["error_rate"] >= 0.03:
-                local_issues.append(
-                    f"Server {runs_on} is not healthy "
-                    f"(load={stats['load']:.0%}, error_rate={stats['error_rate']:.1%})."
-                )
-
-        if not referenced_skills:
-            local_issues.append("No skills found in steps[*].skill.")
-
-    if local_issues:
-        suggestions = (
-            "Regenerate the YAML using only valid skill IDs from Graph B, "
-            "a healthy runs_on server, and steps[*].skill references."
-        )
-        return {
-            "messages": [
-                AIMessage(content=f"Critic result: FAIL\nIssues: {local_issues}")
-            ],
-            "critic_passed": False,
-            "critic_feedback": suggestions,
-            "retry_count": retry_count + 1,
-        }
-
-    prompt = f"""You are the Critic agent for EcoLink NeuroCore. Review the proposed flow YAML.
-
-== Proposed YAML ==
-{flow_yaml}
-
-== Syntax check result ==
-{"PASS" if syntax_error is None else f"FAIL: {syntax_error}"}
-
-== Valid skill IDs in Graph B ==
-{sorted(valid_skills)}
-
-== Valid connector IDs in Graph B ==
-{sorted(valid_connectors)}
-
-== Server infrastructure status ==
-{json.dumps(infra_summary, indent=2)}
-
-Check the following and return is_valid + any issues found:
-1. YAML is syntactically correct.
-2. Every skill referenced in `steps[*].skill` exists in the valid skills list.
-3. Every connector referenced (if any) exists in the valid connectors list.
-4. The `runs_on` server has load < 80% and error_rate < 3%.
-5. Steps are logically ordered and the flow makes sense for a matching system.
-
-Set is_valid=True only if ALL checks pass."""
->>>>>>> 6bdee9ce98af43e5b4907b349d5e5f066d2b96e5
 
     output: CriticOutput = _structured_invoke(_llm(), prompt, CriticOutput)
 

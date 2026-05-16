@@ -160,6 +160,13 @@ def _run_write_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
 
 _WRITE_KEYWORDS = ("CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DETACH", "CALL")
 _WRITE_KEYWORD_RE = re.compile(r"\b(" + "|".join(_WRITE_KEYWORDS) + r")\b", re.IGNORECASE)
+_CYPHER_STRING_RE = re.compile(r"'([^'\\]|\\.)*'|\"([^\"\\]|\\.)*\"")
+
+
+def _cypher_without_literals(cypher_query: str) -> str:
+    """Remove string literals before checking for write keywords."""
+    without_strings = _CYPHER_STRING_RE.sub("''", cypher_query)
+    return re.sub(r"//.*", "", without_strings)
 
 
 @tool
@@ -182,7 +189,7 @@ def query_graph(cypher_query: str) -> List[Dict]:
         MATCH (f:Flow {status: 'active'})-[:USES_SKILL]->(s:Skill)
         RETURN f.id AS flow_id, collect(s.id) AS skills
     """
-    match = _WRITE_KEYWORD_RE.search(cypher_query)
+    match = _WRITE_KEYWORD_RE.search(_cypher_without_literals(cypher_query))
     if match:
         raise ValueError(
             f"Write operation '{match.group(1).upper()}' is not permitted via query_graph. "
@@ -230,53 +237,82 @@ def _build_snapshot(
     """
     _SAMPLE: dict = {
         "companies": [
-            {"id": "C-01", "name": "Nexus AI", "industry": "Fintech"},
-            {"id": "C-02", "name": "Etech Finance", "industry": "Fintech"},
+            {
+                "id": "C-01", "name": "Nexus AI", "industry": "Fintech",
+                "description": "AI-powered payments startup", "pain_points": "scaling payments infrastructure",
+            },
+            {
+                "id": "C-02", "name": "Etech Finance", "industry": "Fintech",
+                "description": "B2B lending platform", "pain_points": "credit risk scoring",
+            },
         ],
         "mentors": [
-            {"id": "M-99", "name": "Dr. Kuan Studio", "expertise": ["Finance", "Scaling"]},
-            {"id": "M-88", "name": "Darveen Ventures", "expertise": ["Marketing", "Product"]},
+            {
+                "id": "M-99", "name": "Dr. Kuan Studio",
+                "expertise": ["Finance", "Scaling", "Payments"],
+                "description": "Fintech scaling expert with payments background",
+            },
+            {
+                "id": "M-88", "name": "Darveen Ventures",
+                "expertise": ["Marketing", "Product", "B2B"],
+                "description": "B2B product and go-to-market specialist",
+            },
         ],
     }
     try:
+        _company_fields = (
+            "RETURN c.id AS id, c.name AS name, c.industry AS industry, "
+            "c.description AS description, c.pain_points AS pain_points "
+        )
+        _mentor_fields = (
+            "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise, "
+            "m.description AS description "
+        )
+
         if app_id:
             company_rows = _run_read_cypher(
-                "MATCH (c:Company) WHERE c.app_id = $app_id "
-                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
-                "LIMIT 15",
+                f"MATCH (c:Company) WHERE c.app_id = $app_id {_company_fields}LIMIT 15",
                 {"app_id": app_id},
             )
             if not company_rows:
                 logger.info("No Company nodes for app_id=%s; using full graph.", app_id)
                 company_rows = _run_read_cypher(
-                    "MATCH (c:Company) WHERE c.industry = $industry "
-                    "RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15"
+                    f"MATCH (c:Company) WHERE c.industry = $industry {_company_fields}LIMIT 15"
                     if industry
-                    else "MATCH (c:Company) RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15",
+                    else f"MATCH (c:Company) {_company_fields}LIMIT 15",
                     {"industry": industry} if industry else {},
                 )
         elif industry:
             company_rows = _run_read_cypher(
-                "MATCH (c:Company) WHERE c.industry = $industry "
-                "RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15",
+                f"MATCH (c:Company) WHERE c.industry = $industry {_company_fields}LIMIT 15",
                 {"industry": industry},
             )
         else:
             company_rows = _run_read_cypher(
-                "MATCH (c:Company) RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15"
+                f"MATCH (c:Company) {_company_fields}LIMIT 15"
             )
 
         mentor_rows = _run_read_cypher(
-            "MATCH (m:Mentor) "
-            "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise LIMIT 10"
+            f"MATCH (m:Mentor) {_mentor_fields}LIMIT 10"
         )
 
         companies = [
-            {"id": r["id"], "name": r["name"], "industry": r.get("industry", "")}
+            {
+                "id":          r["id"],
+                "name":        r["name"],
+                "industry":    r.get("industry", ""),
+                "description": r.get("description", "") or "",
+                "pain_points": r.get("pain_points", "") or "",
+            }
             for r in company_rows
         ]
         mentors = [
-            {"id": r["id"], "name": r["name"], "expertise": r.get("expertise") or []}
+            {
+                "id":          r["id"],
+                "name":        r["name"],
+                "expertise":   r.get("expertise") or [],
+                "description": r.get("description", "") or "",
+            }
             for r in mentor_rows
         ]
 
@@ -294,30 +330,55 @@ def _build_snapshot(
         return _sanitize_snapshot(_SAMPLE)  # type: ignore[return-value]
 
 
-def _parse_sandbox_output(stdout: str) -> Optional[List[dict]]:
-    """Extract the JSON trace list from between DATA_STREAM_START/END markers."""
+def _parse_sandbox_output(stdout: str) -> Optional[tuple[List[dict], Optional[float]]]:
+    """Extract traces and optional sandbox_baseline_score from DATA_STREAM markers.
+
+    Returns (traces, sandbox_baseline_score).  Handles two payload shapes:
+      - Legacy list:  [{"company_id": ..., ...}, ...]
+      - New dict:     {"traces": [...], "sandbox_baseline_score": 4.5}
+    """
     if "DATA_STREAM_START" not in stdout or "DATA_STREAM_END" not in stdout:
         return None
     start = stdout.index("DATA_STREAM_START") + len("DATA_STREAM_START")
     end = stdout.index("DATA_STREAM_END")
     try:
-        return json.loads(stdout[start:end].strip())
+        parsed = json.loads(stdout[start:end].strip())
     except json.JSONDecodeError:
         return None
 
+    if isinstance(parsed, list):
+        return parsed, None
+    if isinstance(parsed, dict):
+        return parsed.get("traces", []), parsed.get("sandbox_baseline_score")
+    return None
 
-def _traces_to_metrics(traces: List[dict], latency_ms: int) -> Dict:
+
+def _traces_to_metrics(
+    traces: List[dict],
+    latency_ms: int,
+    sandbox_baseline_score: Optional[float] = None,
+) -> Dict:
     scores = [
         t.get("simulated_outcome_score", 0.0)
         for t in traces
         if t.get("status") == "SIMULATION_SUCCESS"
     ]
     avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-    return {"match_score": avg_score, "latency_ms": latency_ms, "sample_size": len(scores)}
+    metrics: Dict = {"match_score": avg_score, "latency_ms": latency_ms, "sample_size": len(scores)}
+    if sandbox_baseline_score is not None:
+        metrics["sandbox_baseline_score"] = sandbox_baseline_score
+    return metrics
 
 
 def _mock_sandbox(flow_yaml: str) -> Dict:
-    """Deterministic local simulation based on skills present in the YAML."""
+    """Deterministic simulation scoring all 6 real skills by their expected performance tier.
+
+    Scores mirror what the real skill executor produces for typical Fintech/Healthtech data:
+      Tier A (semantic + domain-aware): 8.5–9.0  — multi-step intelligent pipelines
+      Tier B (single semantic):          7.5–8.0  — meaningful but unfiltered matching
+      Tier C (structural only):          6.5–7.5  — industry/expertise depth boosts only
+      Tier D (random baseline):          2.8       — no intelligence, kept for comparison
+    """
     try:
         yaml.safe_load(flow_yaml)  # syntax check only
     except yaml.YAMLError as exc:
@@ -325,22 +386,53 @@ def _mock_sandbox(flow_yaml: str) -> Dict:
 
     text = flow_yaml.lower()
 
-    if "semantic_similarity" in text or "fuzzy_industry_match" in text:
+    # Tier A — best results: semantic reasoning + domain grounding
+    has_semantic   = "semantic_similarity"       in text
+    has_fuzzy      = "fuzzy_industry_match"      in text
+    has_pain       = "pain_point_match"          in text
+    has_filter     = "filter_by_industry_exact"  in text
+    has_depth      = "score_by_expertise_depth"  in text
+    has_random     = "random_shuffle"            in text
+
+    if not any([has_semantic, has_fuzzy, has_pain, has_filter, has_depth, has_random]):
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": "No recognised skills in flow. Use one of: semantic_similarity, "
+                         "filter_by_industry_exact, fuzzy_industry_match, pain_point_match, "
+                         "score_by_expertise_depth, random_shuffle.",
+        }
+
+    # Score = weighted sum of skills present
+    skill_weights = {
+        "semantic":  (has_semantic,  3.5),  # highest signal
+        "pain":      (has_pain,      2.5),  # contextual boost
+        "fuzzy":     (has_fuzzy,     2.0),  # moderate signal
+        "filter":    (has_filter,    1.5),  # structural
+        "depth":     (has_depth,     0.8),  # minor bonus
+    }
+    base = 5.0
+    score = base + sum(w for present, w in skill_weights.values() if present)
+    score = min(9.5, score)  # hard cap
+
+    if has_random and not any(p for p, _ in skill_weights.values()):
+        # pure random flow — explicit low score for comparison
         return {
             "status": "success",
-            "metrics": {"latency_ms": 245, "match_score": 8.7, "sample_size": 20},
+            "metrics": {"latency_ms": 80, "match_score": 2.8, "sample_size": 20,
+                        "sandbox_baseline_score": 2.8},
             "error_log": None,
         }
-    if "random_shuffle" in text:
-        return {
-            "status": "success",
-            "metrics": {"latency_ms": 80, "match_score": 2.8, "sample_size": 20},
-            "error_log": None,
-        }
+
     return {
-        "status": "fail",
-        "metrics": {},
-        "error_log": "Unrecognised skill combination — sandbox cannot assess this flow.",
+        "status": "success",
+        "metrics": {
+            "latency_ms": 180,
+            "match_score": round(score, 1),
+            "sample_size": 20,
+            "sandbox_baseline_score": 2.8,   # random baseline for relative comparison
+        },
+        "error_log": None,
     }
 
 
@@ -371,8 +463,9 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
         flow_name = "proposed_flow"
 
     env = os.environ.copy()
-    env["SNAPSHOT_DATA"] = json.dumps(snapshot)
-    env["PROPOSED_FLOW"] = str(flow_name)
+    env["SNAPSHOT_DATA"]       = json.dumps(snapshot)
+    env["PROPOSED_FLOW"]       = str(flow_name)
+    env["PROPOSED_FLOW_YAML"]  = flow_yaml          # full YAML for real skill execution
 
     t0 = time.time()
     try:
@@ -401,8 +494,8 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
             "error_log": proc.stderr or f"Sandbox exited with code {proc.returncode}",
         }
 
-    traces = _parse_sandbox_output(proc.stdout)
-    if traces is None:
+    parsed = _parse_sandbox_output(proc.stdout)
+    if parsed is None:
         return {
             "status": "fail",
             "metrics": {},
@@ -412,9 +505,10 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
             ),
         }
 
+    traces, sandbox_baseline = parsed
     return {
         "status": "success",
-        "metrics": _traces_to_metrics(traces, latency_ms),
+        "metrics": _traces_to_metrics(traces, latency_ms, sandbox_baseline),
         "error_log": None,
         "traces": traces,
     }
@@ -462,10 +556,11 @@ def _poll_cloud_logging_for_traces(
         combined = "\n".join(parts)
 
         if "DATA_STREAM_START" in combined and "DATA_STREAM_END" in combined:
-            traces = _parse_sandbox_output(combined)
-            if traces is not None:
+            parsed = _parse_sandbox_output(combined)
+            if parsed is not None:
+                traces, _ = parsed
                 logger.info("Parsed %d traces from Cloud Logging for %s.", len(traces), execution_id)
-                return traces
+                return parsed   # return full tuple so caller can extract baseline
 
         time.sleep(_POLL_S)
 
@@ -534,9 +629,10 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
             container_overrides=[
                 run_v2.RunJobRequest.Overrides.ContainerOverride(
                     env=[
-                        run_v2.EnvVar(name="SNAPSHOT_DATA", value=json.dumps(snapshot)),
-                        run_v2.EnvVar(name="PROPOSED_FLOW", value=flow_name),
-                        run_v2.EnvVar(name="CAPABILITY_TOKEN", value=token),
+                        run_v2.EnvVar(name="SNAPSHOT_DATA",      value=json.dumps(snapshot)),
+                        run_v2.EnvVar(name="PROPOSED_FLOW",      value=flow_name),
+                        run_v2.EnvVar(name="PROPOSED_FLOW_YAML", value=flow_yaml),
+                        run_v2.EnvVar(name="CAPABILITY_TOKEN",   value=token),
                     ]
                 )
             ]
@@ -561,8 +657,8 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
     execution_id = execution.name.split("/")[-1]
     logger.info("Cloud Run execution %s completed in %dms.", execution_id, latency_ms)
 
-    traces = _poll_cloud_logging_for_traces(project, region, job, execution_id)
-    if traces is None:
+    parsed = _poll_cloud_logging_for_traces(project, region, job, execution_id)
+    if parsed is None:
         return {
             "status": "fail",
             "metrics": {},
@@ -572,9 +668,10 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
             ),
         }
 
+    traces, sandbox_baseline = parsed
     return {
         "status": "success",
-        "metrics": _traces_to_metrics(traces, latency_ms),
+        "metrics": _traces_to_metrics(traces, latency_ms, sandbox_baseline),
         "error_log": None,
         "traces": traces,
     }
@@ -921,9 +1018,13 @@ def log_execution_trace(
     flow_id: str,
     result_score: float,
     status: str = "completed",
+    skills_applied: Optional[List[str]] = None,
+    sandbox_baseline_score: Optional[float] = None,
 ) -> None:
     """Create an ExecutionTrace bridge node linking a Flow to an Outcome.
 
+    Persists skills_applied and sandbox_baseline_score so the Planner can learn
+    which skill combinations produced the best improvements over the baseline.
     Uses OPTIONAL MATCH so the trace is always written even if the Flow node
     does not exist yet; the RAN_FLOW relationship is only created when matched.
     """
@@ -932,9 +1033,11 @@ def log_execution_trace(
         """
         OPTIONAL MATCH (f:Flow {id: $flow_id})
         CREATE (et:ExecutionTrace {
-            id:        $trace_id,
-            status:    $status,
-            timestamp: datetime()
+            id:              $trace_id,
+            status:          $status,
+            timestamp:       datetime(),
+            skills_applied:  $skills_applied,
+            baseline_score:  $sandbox_baseline_score
         })
         CREATE (o:Outcome {score: $result_score, date: date()})
         CREATE (et)-[:RESULTED_IN]->(o)
@@ -944,10 +1047,12 @@ def log_execution_trace(
         RETURN et.id AS trace_id, f.id AS flow_id
         """,
         {
-            "flow_id": flow_id,
-            "trace_id": trace_id,
-            "status": status,
-            "result_score": result_score,
+            "flow_id":               flow_id,
+            "trace_id":              trace_id,
+            "status":                status,
+            "result_score":          result_score,
+            "skills_applied":        skills_applied or [],
+            "sandbox_baseline_score": sandbox_baseline_score,
         },
     )
     if not rows or rows[0].get("flow_id") is None:
@@ -958,7 +1063,12 @@ def log_execution_trace(
             flow_id,
         )
     else:
-        logger.info("ExecutionTrace %s logged for flow %s (score=%.2f).", trace_id, flow_id, result_score)
+        logger.info(
+            "ExecutionTrace %s logged for flow %s (score=%.2f, baseline=%.2f, skills=%s).",
+            trace_id, flow_id, result_score,
+            sandbox_baseline_score or 0.0,
+            skills_applied or [],
+        )
 
 
 def activate_proposal(proposal_id: str) -> None:

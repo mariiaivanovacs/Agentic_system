@@ -15,7 +15,7 @@ def _extract_flow_references(flow_def: dict) -> tuple[set[str], set[str]]:
     for step in flow_def.get("steps", []) or []:
         if not isinstance(step, dict):
             continue
-        skill = step.get("skill")
+        skill = step.get("skill") or step.get("skill_id")
         if skill:
             skills.add(str(skill))
         connector = step.get("connector") or step.get("connector_id")
