@@ -41,6 +41,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 RUNS_DIR = Path(".agent_runs")
+AGENT_NODE_NAMES = {
+    "planner",
+    "generator",
+    "critic",
+    "simulator",
+    "evaluator",
+    "human_approval",
+}
 
 
 def _separator(title: str = "") -> None:
@@ -93,6 +101,25 @@ def _print_state_summary(state: dict) -> None:
     if state.get("final_output"):
         _separator("Final Output")
         print(f"  {state['final_output']}")
+
+
+def _publish_live_log(
+    *,
+    thread_id: str,
+    node_name: str,
+    title: str,
+    detail: str,
+    payload: dict | None = None,
+) -> None:
+    source = node_name if node_name in AGENT_NODE_NAMES else "agent"
+    publish_event(
+        thread_id=thread_id,
+        source=source,
+        event_type="log",
+        title=title,
+        detail=detail[:1800],
+        payload={"node": node_name, **(payload or {})},
+    )
 
 
 def _save_run_record(thread_id: str, state: dict) -> None:
@@ -168,7 +195,7 @@ def run_new(
         "source_path": source_path,
         "base_url": None,
         "business_flow_id": business_flow_id,
-        "business_flow_context": [],
+        "business_flow_context": None,
         "proposal_only": proposal_only,
         "current_hypothesis": "",
         "identified_problem_flow": "",
@@ -178,6 +205,7 @@ def run_new(
         "project_id": project_id,
         "proposed_flow_yaml": "",
         "recommended_actions": [],
+        "skills_referenced": [],
         "critic_passed": False,
         "critic_feedback": "",
         "critic_evidence_ids": [],
@@ -194,17 +222,32 @@ def run_new(
         "final_output": "",
     }
 
-    # Stream node-by-node so the user sees progress.
-    # Nodes emit their own events via _emit_node_event() — main.py does NOT
-    # re-publish per-node events to avoid duplicates in Live Agent Comms.
+    # Stream node-by-node so the user sees progress. Nodes emit semantic events
+    # internally; main.py adds terminal-style live logs for the dashboard.
     try:
         for step in graph.stream(initial_state, config=config, stream_mode="updates"):
             for node_name, updates in step.items():
-                print(f"[{node_name.upper()}] ✓")
+                node_line = f"[{node_name.upper()}] ✓"
+                print(node_line)
+                _publish_live_log(
+                    thread_id=thread_id,
+                    node_name=node_name,
+                    title=f"{node_name.replace('_', ' ').title()} completed",
+                    detail=node_line,
+                    payload={"status": "completed"},
+                )
                 if isinstance(updates, dict):
                     for m in updates.get("messages", []):
                         if hasattr(m, "content"):
-                            print(f"  → {m.content}")
+                            content = str(m.content)
+                            print(f"  → {content}")
+                            _publish_live_log(
+                                thread_id=thread_id,
+                                node_name=node_name,
+                                title=f"{node_name.replace('_', ' ').title()} output",
+                                detail=content,
+                                payload={"status": "message"},
+                            )
     except Exception as exc:
         publish_event(
             thread_id=thread_id,

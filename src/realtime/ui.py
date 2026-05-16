@@ -36,6 +36,9 @@ AGENT_ICONS = {
 
 EVENT_TYPE_ICONS = {
     "message":          "💬",
+    "thinking":         "⏳",
+    "phase":            "↻",
+    "log":              ">_",
     "decision":         "⚖️",
     "result":           "✅",
     "approval_required":"⏸️",
@@ -135,13 +138,14 @@ def _shell_html(
   }}
   .topbar {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }}
   .title  {{ font-family: Georgia, "Times New Roman", serif; font-size: 24px; flex: 1; }}
-  .grid   {{ display: grid; grid-template-columns: minmax(380px, 1.3fr) minmax(270px, .7fr); gap: 12px; }}
+  .grid   {{ display: grid; grid-template-columns: minmax(420px, 1.15fr) minmax(320px, .85fr); gap: 12px; }}
   .mapOnly {{ grid-template-columns: 1fr; }}
   .panel  {{ border: 1px solid var(--line); border-radius: 8px;
     background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.022));
     box-shadow: 0 16px 40px rgba(0,0,0,.28); overflow: hidden; position: relative; }}
   .panelHead {{ display: flex; align-items: center; justify-content: space-between;
     gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }}
+  .networkStage {{ height: 520px; background: transparent; position: relative; }}
   #network-container {{ height: 520px; background: transparent; }}
   .legend {{ display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 14px 10px; border-top: 1px solid var(--line); }}
   .legend span {{ color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; font-size: 11px; }}
@@ -158,6 +162,21 @@ def _shell_html(
   button {{ border: 1px solid rgba(68,194,154,.45); background: rgba(68,194,154,.1);
     color: var(--accent); border-radius: 7px; padding: 7px 11px; cursor: pointer; }}
   .feed {{ height: 450px; overflow: auto; padding: 10px 12px 12px; }}
+  .logsPanel {{ grid-column: 1 / -1; }}
+  .logFeed {{
+    height: 190px; overflow: auto; padding: 10px 12px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    background: rgba(0,0,0,.22);
+  }}
+  .logLine {{
+    display: grid; grid-template-columns: 72px 112px 1fr; gap: 10px;
+    padding: 5px 0; border-bottom: 1px solid rgba(75,74,61,.35);
+    color: #ded6c4; font-size: 11px; line-height: 1.35;
+  }}
+  .logLine:last-child {{ border-bottom: none; }}
+  .logTime {{ color: var(--muted); }}
+  .logNode {{ color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }}
+  .logText {{ white-space: pre-wrap; word-break: break-word; }}
 
   /* ── vis.js tooltip ── */
   .vis-tooltip {{
@@ -214,6 +233,9 @@ def _shell_html(
   .event.approved            {{ border-left-color: var(--blue);   }}
   .event.started             {{ border-left-color: var(--purple); }}
   .event.tool_call           {{ border-left-color: var(--orange); }}
+  .event.thinking,
+  .event.phase,
+  .event.log                 {{ border-left-color: var(--accent); }}
   .event.new {{ animation: card-flash .6s ease-out; }}
   @keyframes card-flash {{
     0%   {{ background: rgba(68,194,154,.18); }}
@@ -264,7 +286,8 @@ def _shell_html(
         <span>Agent network</span>
         <span id="activeAgentLabel" style="color:var(--muted)">idle</span>
       </div>
-      <div id="network-container" style="position:relative">
+      <div class="networkStage">
+        <div id="network-container"></div>
         <div id="think-overlay">
           <span class="think-icon" id="think-icon">⚗️</span>
           <span id="think-name">running</span>
@@ -279,7 +302,7 @@ def _shell_html(
         <span style="letter-spacing:2px">&#xB7;&#xB7;&#xB7; retry</span>
       </div>
     </section>
-    {'<section class="panel"><div class="panelHead"><span>Realtime event feed</span><span id="lastSeen">waiting…</span></div><div class="feedControls"><input id="threadFilter" placeholder="Filter by thread id" /><button id="clearFilter">All</button></div><div id="feed" class="feed"></div></section>' if live else ''}
+    {'<section class="panel"><div class="panelHead"><span>Realtime event feed</span><span id="lastSeen">waiting…</span></div><div class="feedControls"><input id="threadFilter" placeholder="Filter by thread id" /><button id="clearFilter">All</button></div><div id="feed" class="feed"></div></section><section class="panel logsPanel"><div class="panelHead"><span>Live execution logs</span><span id="logCount">0 lines</span></div><div id="logFeed" class="logFeed"></div></section>' if live else ''}
   </div>
 </div>
 
@@ -490,6 +513,10 @@ function buildEvidenceSection(ev) {{
     );
     if (p.llm_reason) rows.push(`<div class="evRow"><span>LLM reason:</span><span style="color:var(--muted)">${{esc(p.llm_reason)}}</span></div>`);
   }}
+  if (p.metrics) {{
+    const keys = Object.keys(p.metrics).slice(0, 8);
+    if (keys.length) rows.push(`<div class="evRow"><span>Metrics:</span><span>${{keys.map(k => `<code>${{esc(k)}}=${{esc(p.metrics[k])}}</code>`).join(" ")}}</span></div>`);
+  }}
   if (rows.length === 0) return "";
   return `<details class="evDetails"><summary>Evidence</summary><div class="evBody">${{rows.join("")}}</div></details>`;
 }}
@@ -519,6 +546,25 @@ function renderFeed() {{
   `<div class="event"><div class="eventTitle">No events yet</div><div class="eventDetail">Start an agent run or trigger a sandbox to see live updates.</div></div>`;
 }}
 
+function renderLogs() {{
+  const logFeed = document.getElementById("logFeed");
+  if (!logFeed) return;
+  const rows = state.events
+    .filter(ev => ev.event_type === "log" || ev.event_type === "thinking" || ev.event_type === "phase")
+    .filter(ev => !state.filter || (ev.thread_id || "").includes(state.filter))
+    .slice(-180);
+  const logCount = document.getElementById("logCount");
+  if (logCount) logCount.textContent = `${{rows.length}} lines`;
+  logFeed.innerHTML = rows.map(ev => {{
+    const node = (ev.payload && ev.payload.node) || ev.source || "agent";
+    const text = ev.event_type === "log"
+      ? `${{ev.title || ""}}${{ev.detail ? "\\n" + ev.detail : ""}}`
+      : `${{ev.title || ""}}${{ev.detail ? " — " + ev.detail : ""}}`;
+    return `<div class="logLine"><span class="logTime">${{eventTime(ev)}}</span><span class="logNode">${{esc(node)}}</span><span class="logText">${{esc(text)}}</span></div>`;
+  }}).join("") || `<div class="logLine"><span class="logTime">--:--</span><span class="logNode">system</span><span class="logText">Waiting for an agent execution.</span></div>`;
+  logFeed.scrollTop = logFeed.scrollHeight;
+}}
+
 function addEvent(ev) {{
   if (!ev || !ev.event_id) return;
   if (state.events.some(e => e.event_id === ev.event_id)) return;
@@ -544,12 +590,17 @@ function addEvent(ev) {{
     setTimeout(() => feed.firstElementChild?.classList.remove("new"), 700);
   }}
 
-  // Auto-stop pulsing after 4 seconds of inactivity
+  renderLogs();
+
+  // Thinking/log/phase events represent active work, so keep the current node
+  // visibly alive until the next semantic event arrives.
   clearTimeout(window._pulseTimeout);
-  window._pulseTimeout = setTimeout(() => {{
-    _stopPulse();
-    resetNetwork();
-  }}, 4000);
+  if (!["thinking", "log", "phase"].includes(ev.event_type)) {{
+    window._pulseTimeout = setTimeout(() => {{
+      _stopPulse();
+      resetNetwork();
+    }}, 6000);
+  }}
 }}
 
 // ── initial load + WebSocket ──────────────────────────────────────────────────
@@ -584,12 +635,13 @@ function connect() {{
 loadInitial();
 connect();
 renderFeed();
+renderLogs();
 
 const fi = document.getElementById("threadFilter");
 if (fi) {{
-  fi.addEventListener("input", () => {{ state.filter = fi.value.trim(); renderFeed(); }});
+  fi.addEventListener("input", () => {{ state.filter = fi.value.trim(); renderFeed(); renderLogs(); }});
   document.getElementById("clearFilter").addEventListener("click", () => {{
-    state.filter = ""; fi.value = ""; renderFeed();
+    state.filter = ""; fi.value = ""; renderFeed(); renderLogs();
   }});
 }}
 </script>

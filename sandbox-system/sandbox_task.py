@@ -186,6 +186,23 @@ SKILL_REGISTRY: dict = {
     "pain_point_match":          skill_pain_point_match,
 }
 
+SKILL_ALIASES: dict = {
+    "skill_semantic_similarity": "semantic_similarity",
+    "skill_filter_by_industry_exact": "filter_by_industry_exact",
+    "skill_fuzzy_industry_match": "fuzzy_industry_match",
+    "skill_random_shuffle": "random_shuffle",
+    "skill_score_by_expertise_depth": "score_by_expertise_depth",
+    "skill_pain_point_match": "pain_point_match",
+    "skill_score_calculator": "score_by_expertise_depth",
+}
+
+
+def _resolve_skill(skill_id: str) -> tuple[str, object]:
+    canonical = SKILL_ALIASES.get(skill_id, skill_id)
+    if canonical not in SKILL_REGISTRY and canonical.startswith("skill_"):
+        canonical = canonical.removeprefix("skill_")
+    return canonical, SKILL_REGISTRY.get(canonical)
+
 
 # --------------------------------------------------------------------------- #
 # Flow YAML normalisation                                                       #
@@ -250,14 +267,14 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
         skill_id = step.get("skill")
         if not skill_id:
             continue
-        params   = step.get("params") or {}
-        skill_fn = SKILL_REGISTRY.get(skill_id)
+        params   = step.get("params") or step.get("input") or {}
+        canonical_skill, skill_fn = _resolve_skill(str(skill_id))
         if skill_fn:
             candidates = skill_fn(candidates, params)
-            applied.append(skill_id)
+            applied.append(canonical_skill)
             n = len(candidates)
             avg = round(sum(x["score"] for x in candidates) / n, 2) if n else 0.0
-            print(f"  [{skill_id}] {n} candidates, avg_score={avg}")
+            print(f"  [{canonical_skill}] {n} candidates, avg_score={avg}")
         else:
             print(f"  WARNING: Unknown skill '{skill_id}' — skipping step.")
 

@@ -79,10 +79,20 @@ ROUTE_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 JS_FUNCTION_RE = re.compile(
-    r"""(?:function\s+([A-Za-z_$][\w$]*)\s*\(|const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(|export\s+function\s+([A-Za-z_$][\w$]*)\s*\()"""
+    r"""(?:
+        (?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\( |
+        (?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=> |
+        (?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?function\b
+    )""",
+    re.VERBOSE,
 )
 CLASS_RE = re.compile(r"\bclass\s+([A-Za-z_$][\w$]*)")
+JSX_EVENT_RE = re.compile(
+    r"""\b(on[A-Z][A-Za-z0-9_]*)\s*=\s*\{\s*(?:([A-Za-z_$][\w$]*)|(?:async\s*)?\([^}]*?\)\s*=>)""",
+    re.MULTILINE,
+)
 MODEL_HINT_RE = re.compile(r"(model|schema|table|entity)", re.IGNORECASE)
+DATA_SHAPE_HINT_RE = re.compile(r"(dto|type|types|interface|props|payload|request|response|input|args)", re.IGNORECASE)
 INTEGRATION_HINTS = {
     "stripe": "Stripe",
     "sendgrid": "SendGrid",
@@ -164,6 +174,7 @@ ACTION_VERBS = {
     "upload",
     "validate",
     "verify",
+    "view",
 }
 WRITE_ACTION_VERBS = {
     "add",
@@ -214,6 +225,30 @@ FLOW_STOPWORDS = {
     "utils",
     "view",
     "views",
+}
+BUSINESS_FILE_HINTS = {
+    "admin",
+    "auth",
+    "bot",
+    "campaign",
+    "checkout",
+    "command",
+    "dashboard",
+    "form",
+    "handler",
+    "handlers",
+    "login",
+    "message",
+    "middleware",
+    "order",
+    "payment",
+    "profile",
+    "reply",
+    "router",
+    "screen",
+    "signup",
+    "suggestion",
+    "user",
 }
 
 
@@ -307,6 +342,74 @@ def _flow_signature(text: str, *, allow_fallback: bool = False) -> tuple[str, st
             display = " ".join(meaningful).title()
             return _slug(display), display, meaningful[0]
     return None
+
+
+def _decorator_name(expr: ast.AST) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _decorator_name(expr.value)
+        return f"{base}.{expr.attr}" if base else expr.attr
+    if isinstance(expr, ast.Call):
+        name = _decorator_name(expr.func)
+        args: list[str] = []
+        for arg in expr.args[:2]:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                args.append(arg.value)
+            elif isinstance(arg, ast.Call):
+                args.append(_decorator_name(arg.func))
+            else:
+                args.append(type(arg).__name__)
+        return f"{name}({', '.join(args)})" if args else f"{name}()"
+    return ""
+
+
+def _decorator_is_entrypoint(name: str) -> bool:
+    lowered = name.lower()
+    return any(
+        token in lowered
+        for token in (
+            "route",
+            "router",
+            "message",
+            "command",
+            "callback",
+            "started",
+            "event",
+            "webhook",
+            "get(",
+            "post(",
+            "put(",
+            "patch(",
+            "delete(",
+        )
+    )
+
+
+def _source_has_business_hint(source_path: str) -> bool:
+    tokens = set(_tokens(source_path))
+    return bool(tokens & BUSINESS_FILE_HINTS)
+
+
+def _file_can_define_business_flow(node: CodeNodeSpec) -> bool:
+    ext = str(node.properties.get("extension") or "").lower()
+    if ext not in {".py", ".js", ".jsx", ".ts", ".tsx", ".sol"}:
+        return False
+    path = node.source_path.lower()
+    if any(
+        part in path
+        for part in (
+            "package.json",
+            "package-lock.json",
+            "tsconfig",
+            "nest-cli",
+            ".eslintrc",
+            "spec.",
+            ".test.",
+        )
+    ):
+        return False
+    return _source_has_business_hint(node.source_path)
 
 
 def stable_project_id(path: str | Path) -> str:
@@ -460,6 +563,7 @@ class CodebaseAnalyzer(BaseIndexer):
                 nodes[node.id] = node
                 rel_type = {
                     "Function": "FILE_DEFINES_FUNCTION",
+                    "Route": "FILE_DEFINES_ROUTE",
                     "Service": "FILE_DEFINES_SERVICE",
                     "DatabaseModel": "FILE_DEFINES_MODEL",
                     "Entity": "FILE_DEFINES_ENTITY",
@@ -514,6 +618,7 @@ class CodebaseAnalyzer(BaseIndexer):
         nodes: list[CodeNodeSpec] = []
         for item in ast.walk(tree):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and not item.name.startswith("_"):
+                decorator_names = [_decorator_name(dec) for dec in item.decorator_list]
                 nodes.append(
                     ctx.node(
                         "Function",
@@ -523,10 +628,30 @@ class CodebaseAnalyzer(BaseIndexer):
                         line=item.lineno,
                         async_function=isinstance(item, ast.AsyncFunctionDef),
                         docstring=(ast.get_docstring(item) or "")[:240],
+                        decorators=[name for name in decorator_names if name],
                     )
                 )
+                for dec_name in decorator_names:
+                    if dec_name and _decorator_is_entrypoint(dec_name):
+                        route_name = f"{item.name}: {dec_name.replace('CommandStart()', 'Command: start')}"
+                        nodes.append(
+                            ctx.node(
+                                "Route",
+                                f"{rel_path}:{item.name}:{route_name}",
+                                route_name,
+                                rel_path,
+                                confidence=0.82,
+                                route_path=route_name,
+                                handler=item.name,
+                            )
+                        )
             elif isinstance(item, ast.ClassDef) and not item.name.startswith("_"):
-                label = "DatabaseModel" if MODEL_HINT_RE.search(item.name) else "Service"
+                if MODEL_HINT_RE.search(item.name):
+                    label = "DatabaseModel"
+                elif DATA_SHAPE_HINT_RE.search(item.name):
+                    label = "Entity"
+                else:
+                    label = "Service"
                 nodes.append(ctx.node(label, f"{rel_path}:{item.name}", item.name, rel_path, line=item.lineno))
         return nodes
 
@@ -551,9 +676,40 @@ class CodebaseAnalyzer(BaseIndexer):
             for match in JS_FUNCTION_RE.finditer(text):
                 name = next(value for value in match.groups() if value)
                 nodes.append(ctx.node("Function", f"{rel_path}:{name}", name, rel_path, confidence=0.78))
+            for index, match in enumerate(JSX_EVENT_RE.finditer(text), start=1):
+                event_name = match.group(1)
+                handler_name = match.group(2)
+                name = handler_name or f"{event_name}_{index}"
+                nodes.append(
+                    ctx.node(
+                        "Route",
+                        f"{rel_path}:jsx:{event_name}:{index}",
+                        f"{event_name} event",
+                        rel_path,
+                        confidence=0.68,
+                        route_path=event_name,
+                        handler=handler_name,
+                    )
+                )
+                if not handler_name:
+                    nodes.append(
+                        ctx.node(
+                            "Function",
+                            f"{rel_path}:inline:{event_name}:{index}",
+                            name,
+                            rel_path,
+                            confidence=0.58,
+                            inline_event=event_name,
+                        )
+                    )
             for match in CLASS_RE.finditer(text):
                 name = match.group(1)
-                label = "DatabaseModel" if MODEL_HINT_RE.search(name) else "Service"
+                if MODEL_HINT_RE.search(name):
+                    label = "DatabaseModel"
+                elif DATA_SHAPE_HINT_RE.search(name):
+                    label = "Entity"
+                else:
+                    label = "Service"
                 nodes.append(ctx.node(label, f"{rel_path}:{name}", name, rel_path, confidence=0.76))
 
         if file_path.suffix.lower() == ".sol":
@@ -641,7 +797,11 @@ class CodebaseAnalyzer(BaseIndexer):
         for node in nodes.values():
             if node.label not in candidate_labels:
                 continue
-            allow_fallback = node.label in {"Route", "Function", "Service", "Workflow"}
+            if node.label == "File" and not _file_can_define_business_flow(node):
+                continue
+            allow_fallback = node.label in {"Route", "Function", "Service", "Workflow"} or (
+                node.label == "File" and _file_can_define_business_flow(node)
+            )
             signature = _flow_signature(f"{node.name} {node.source_path}", allow_fallback=allow_fallback)
             if not signature:
                 continue

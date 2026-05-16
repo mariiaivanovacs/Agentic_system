@@ -145,6 +145,9 @@ class GraphWriter:
                 {"project_id": project_id, "labels": sorted(CODE_NODE_LABELS - {"Project"})},
             )
 
+        node_rows_by_label: dict[str, list[dict]] = {}
+        discovered_rows: list[dict] = []
+        function_rows: list[dict] = []
         for node in system.code_nodes:
             self._validate_code_node(node)
             props = {
@@ -156,49 +159,64 @@ class GraphWriter:
                 "confidence": node.confidence,
                 **node.properties,
             }
-            session.run(
-                f"""
-                MERGE (n:`{node.label}` {{id: $id}})
-                SET n += $props
-                """,
-                {"id": node.id, "props": props},
-            )
+            node_rows_by_label.setdefault(node.label, []).append({"id": node.id, "props": props})
             if node.label != "Project":
-                session.run(
-                    """
-                    MATCH (n {id: $node_id})
-                    MATCH (r:IndexRun {id: $run_id})
-                    MERGE (n)-[:DISCOVERED_BY]->(r)
-                    """,
-                    {"node_id": node.id, "run_id": run_id},
-                )
+                discovered_rows.append({"node_id": node.id})
+            if node.label == "Function":
+                function_rows.append({
+                    "skill_id": f"skill_{_slug(node.id)}",
+                    "function_id": node.id,
+                })
 
-        for rel in system.code_relationships:
+        for label, rows in node_rows_by_label.items():
             session.run(
                 f"""
-                MATCH (a {{id: $from_id}})
-                MATCH (b {{id: $to_id}})
-                MERGE (a)-[r:`{rel.rel_type}`]->(b)
-                SET r += $props
+                UNWIND $rows AS row
+                MERGE (n:`{label}` {{id: row.id}})
+                SET n += row.props
                 """,
-                {
-                    "from_id": rel.from_id,
-                    "to_id": rel.to_id,
-                    "props": rel.properties,
-                },
+                {"rows": rows},
             )
 
-        for node in system.code_nodes:
-            if node.label != "Function":
-                continue
-            skill_id = f"skill_{_slug(node.id)}"
+        if discovered_rows:
             session.run(
                 """
-                MATCH (s:Skill {id: $skill_id})
-                MATCH (fn:Function {id: $function_id})
+                UNWIND $rows AS row
+                MATCH (n {id: row.node_id})
+                MATCH (r:IndexRun {id: $run_id})
+                MERGE (n)-[:DISCOVERED_BY]->(r)
+                """,
+                {"rows": discovered_rows, "run_id": run_id},
+            )
+
+        rel_rows_by_type: dict[str, list[dict]] = {}
+        for rel in system.code_relationships:
+            rel_rows_by_type.setdefault(rel.rel_type, []).append({
+                "from_id": rel.from_id,
+                "to_id": rel.to_id,
+                "props": rel.properties,
+            })
+        for rel_type, rows in rel_rows_by_type.items():
+            session.run(
+                f"""
+                UNWIND $rows AS row
+                MATCH (a {{id: row.from_id}})
+                MATCH (b {{id: row.to_id}})
+                MERGE (a)-[r:`{rel_type}`]->(b)
+                SET r += row.props
+                """,
+                {"rows": rows},
+            )
+
+        if function_rows:
+            session.run(
+                """
+                UNWIND $rows AS row
+                MATCH (s:Skill {id: row.skill_id})
+                MATCH (fn:Function {id: row.function_id})
                 MERGE (s)-[:SKILL_DERIVED_FROM_FUNCTION]->(fn)
                 """,
-                {"skill_id": skill_id, "function_id": node.id},
+                {"rows": function_rows},
             )
 
         project_id = system.metadata.get("project_id")

@@ -118,39 +118,57 @@ def get_website_entities(limit: int = 30) -> list[dict[str, Any]]:
     )
 
 
-def get_software_nodes(limit: int = 60) -> list[dict[str, Any]]:
-    return _run(
-        f"""
-        MATCH (n)
-        WHERE any(label IN labels(n) WHERE label IN [
-            'Project', 'Repository', 'File', 'Route', 'Service', 'Function',
-            'DatabaseModel', 'DatabaseTable', 'DataStore', 'Entity', 'Workflow',
-            'BusinessFlow', 'FlowStep',
-            'Integration', 'Artifact', 'Risk'
-        ])
-        RETURN labels(n)[0] AS type,
-               n.id AS id,
-               n.name AS name,
-               n.project_id AS project_id,
-               n.source_path AS source_path,
-               n.confidence AS confidence
-        ORDER BY type, source_path, name
-        LIMIT {int(limit)}
-        """
+def get_software_nodes(
+    project_id: str | None = None,
+    app_id: str | None = None,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    from src.agents.tools import _run_read_cypher  # noqa: PLC0415
+
+    _label_set = (
+        "'Project', 'Repository', 'File', 'Route', 'Service', 'Function', "
+        "'DatabaseModel', 'DatabaseTable', 'DataStore', 'Entity', 'Workflow', "
+        "'BusinessFlow', 'FlowStep', 'Integration', 'Artifact', 'Risk'"
+    )
+    where_parts = [f"any(label IN labels(n) WHERE label IN [{_label_set}])"]
+    params: dict[str, Any] = {"lim": limit}
+    if project_id:
+        where_parts.append("(n.project_id = $project_id OR n.id = $project_id)")
+        params["project_id"] = project_id
+    elif app_id:
+        where_parts.append("n.app_id = $app_id")
+        params["app_id"] = app_id
+
+    return _run_read_cypher(
+        "MATCH (n) WHERE "
+        + " AND ".join(where_parts)
+        + " RETURN labels(n)[0] AS _label,"
+        "  elementId(n) AS element_id,"
+        "  n.id AS id,"
+        "  n.name AS name,"
+        "  n.project_id AS project_id,"
+        "  n.app_id AS app_id,"
+        "  n.source_path AS source_path,"
+        "  n.path AS path,"
+        "  n.description AS description,"
+        "  n.confidence AS confidence"
+        " ORDER BY _label, source_path, name"
+        " LIMIT $lim",
+        params,
     )
 
 
 def get_learning_events(industry: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
-    industry_clause = f"AND l.industry = {json.dumps(industry)}" if industry else ""
-    rows = _run(
-        f"""
-        MATCH (l)
-        WHERE 'LearningEvent' IN labels(l)
-        {industry_clause}
-        RETURN properties(l) AS props
-        LIMIT {int(limit)}
-        """
+    from src.agents.tools import _run_read_cypher  # noqa: PLC0415
+    cypher = (
+        "MATCH (l) WHERE 'LearningEvent' IN labels(l)"
+        + (" AND l.industry = $industry" if industry else "")
+        + " RETURN properties(l) AS props LIMIT $lim"
     )
+    params: dict[str, Any] = {"lim": limit}
+    if industry:
+        params["industry"] = industry
+    rows = _run_read_cypher(cypher, params)
     return [row.get("props", {}) for row in rows]
 
 
@@ -159,8 +177,14 @@ def retrieve_context(
     goal: str = "",
     min_score: float = 7.0,
     max_score: float = 4.0,
+    project_id: str | None = None,
+    app_id: str | None = None,
 ) -> RetrievedContext:
-    """Retrieve live graph context. This does not fall back to synthetic data."""
+    """Retrieve live graph context. This does not fall back to synthetic data.
+
+    project_id / app_id scope the software_nodes query so the planner receives
+    only nodes from the connected project rather than the entire graph.
+    """
     graph_queries = _load_graph_queries()
 
     industry_stats = get_industry_stats()
@@ -180,7 +204,7 @@ def retrieve_context(
         infra_status=get_infrastructure_status.invoke({}),
         learning_events=get_learning_events(selected_industry),
         website_entities=get_website_entities(),
-        software_nodes=get_software_nodes(),
+        software_nodes=get_software_nodes(project_id=project_id, app_id=app_id),
         baseline_score=baseline_score,
     )
     logger.info(

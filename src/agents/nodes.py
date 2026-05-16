@@ -185,40 +185,39 @@ def planner_node(state: AgentState) -> dict:
     selected_project_id = state.get("project_id") or ""
     selected_business_flow_id = state.get("business_flow_id") or ""
 
-    # Query the connected project's codebase graph before retrieve_context so we
-    # can pass real software evidence into the prompt.
-    software_nodes: List[Dict] = []
-    if selected_project_id:
-        where_clause = f"WHERE n.project_id = {json.dumps(selected_project_id)} OR n.id = {json.dumps(selected_project_id)}"
-    elif app_id:
-        where_clause = f"WHERE n.app_id = {json.dumps(app_id)}"
-    else:
-        where_clause = ""
-    for label in ("Project", "BusinessFlow", "FlowStep", "File", "Route", "Function", "DataStore"):
-        try:
-            rows: List[Dict] = query_graph.invoke({
-                "cypher_query": (
-                    f"MATCH (n:{label}) {where_clause} "
-                    "RETURN elementId(n) AS element_id, n.id AS id, n.name AS name, "
-                    "n.path AS path, n.source_path AS source_path, "
-                    "n.description AS description, n.app_id AS app_id, n.project_id AS project_id "
-                    "LIMIT 20"
-                )
-            })
-            for row in rows:
-                row["_label"] = label
-            software_nodes.extend(rows)
-        except Exception:
-            pass
+    _emit_node_event(
+        state,
+        source="planner",
+        target="generator",
+        event_type="thinking",
+        title="Planner is reading graph evidence",
+        detail=goal,
+        payload={
+            "project_id": selected_project_id,
+            "business_flow_id": selected_business_flow_id,
+            "proposal_only": bool(state.get("proposal_only")),
+        },
+    )
 
-    # Resolve project_id from the first Project node found, fall back to app_id
+    # Fetch project-scoped codebase evidence via the retriever (single parameterized query).
+    # business_flow_context is still queried separately because it needs ordered steps.
+    context = retrieve_context(
+        goal=goal,
+        project_id=selected_project_id or None,
+        app_id=app_id or None,
+    )
+
+    # software_nodes starts from retriever output; augmented below with BusinessFlow detail.
+    software_nodes: List[Dict] = list(context.software_nodes)
+
+    # Resolve project_id from retrieved Project node, fall back to app_id
     project_node = next((n for n in software_nodes if n.get("_label") == "Project"), None)
     project_id = selected_project_id or (project_node.get("id") if project_node else (app_id or None))
 
-    business_flow_context: List[Dict] = []
+    business_flow_context: Optional[Dict] = None
     if selected_business_flow_id:
         try:
-            business_flow_context = query_graph.invoke({
+            _bfc_rows = query_graph.invoke({
                 "cypher_query": f"""
                 MATCH (bf:BusinessFlow {{id: {json.dumps(selected_business_flow_id)}}})
                 OPTIONAL MATCH (bf)-[hs:HAS_STEP]->(step:FlowStep)
@@ -250,8 +249,9 @@ def planner_node(state: AgentState) -> dict:
                 LIMIT 1
                 """
             })
-            if business_flow_context:
-                flow_record = business_flow_context[0]
+            if _bfc_rows:
+                flow_record = _bfc_rows[0]
+                business_flow_context = flow_record
                 software_nodes.append({
                     "_label": "BusinessFlow",
                     "id": flow_record.get("business_flow_id"),
@@ -270,7 +270,37 @@ def planner_node(state: AgentState) -> dict:
                 exc,
             )
 
-    context = retrieve_context(goal=goal)
+    # Guard: without any Skill nodes the generator will invent IDs the Critic rejects,
+    # causing a guaranteed 3-retry failure loop with no useful output.
+    if not context.available_skills:
+        logger.error(
+            "Graph B has no Skill nodes — aborting optimization (goal=%r). "
+            "Populate the skill inventory before running the agent.",
+            goal,
+        )
+        _emit_node_event(
+            state,
+            source="planner",
+            target="generator",
+            event_type="error",
+            title="Aborted: empty skill inventory",
+            detail=(
+                "Graph B contains no Skill nodes. The agent cannot produce grounded "
+                "flow proposals without a skill inventory. "
+                "Run the indexer or create Skill nodes in Neo4j, then re-run."
+            ),
+        )
+        return {
+            "messages": [
+                AIMessage(content=(
+                    "Optimization aborted: Graph B has no Skill nodes.\n"
+                    "The agent cannot generate grounded proposals without a skill inventory.\n"
+                    "Fix: run `python -m src.indexer.runner` or add Skill nodes to Neo4j, "
+                    "then re-run the agent."
+                ))
+            ],
+            "final_output": "aborted: empty skill inventory in Graph B",
+        }
 
     # Semantic GraphRAG augmentation — non-fatal
     semantic_query = f"{goal} {app_name}" if app_name else f"{goal} {context.industry}"
@@ -291,19 +321,12 @@ def planner_node(state: AgentState) -> dict:
         )
         semantic_section = f"\n\n== Semantically relevant skills (GraphRAG) ==\n{lines}"
 
-    selected_flow_section = ""
-    if business_flow_context:
-        selected_flow_section = (
-            "\n\n== Selected BusinessFlow to optimize ==\n"
-            f"{json.dumps(business_flow_context[0], indent=2)}\n"
-            "Use these BusinessFlow, FlowStep, and primitive IDs as the primary evidence. "
-            "Do not invent executable graph node types; if a missing capability is needed, "
-            "create a proposal action instead."
-        )
-
     prompt = (
-        build_agent_planner_prompt(goal, context, software_nodes=software_nodes)
-        + selected_flow_section
+        build_agent_planner_prompt(
+            goal, context,
+            software_nodes=software_nodes,
+            business_flow_context=business_flow_context,
+        )
         + semantic_section
     )
 
@@ -396,10 +419,25 @@ def generator_node(state: AgentState) -> dict:
     success_patterns = state.get("success_patterns", [])
     software_nodes = state.get("software_nodes", [])
     source_path = state.get("source_path") or ""
-    business_flow_context = state.get("business_flow_context", [])
+    business_flow_context = state.get("business_flow_context")
     proposal_only = bool(state.get("proposal_only"))
     selected_business_flow = bool(business_flow_context)
     restrict_to_existing_capabilities = proposal_only or selected_business_flow
+
+    _emit_node_event(
+        state,
+        source="generator",
+        target="critic",
+        event_type="thinking",
+        title="Generator is designing candidate actions",
+        detail=hypothesis or "Preparing proposal from graph evidence.",
+        payload={
+            "problem_flow": problem_flow,
+            "business_flow_id": state.get("business_flow_id"),
+            "proposal_only": proposal_only,
+            "has_source_path": bool(source_path),
+        },
+    )
 
     # ── Graph B: valid skills with descriptions ───────────────────────────────
     valid_skills: List[Dict] = query_graph.invoke({
@@ -452,7 +490,7 @@ def generator_node(state: AgentState) -> dict:
     )
     business_flow_section = (
         "\n== Selected BusinessFlow Evidence ==\n"
-        f"{json.dumps(business_flow_context[0], indent=2)}\n"
+        f"{json.dumps(business_flow_context, indent=2)}\n"
         "Optimize this exact ordered BusinessFlow/FlowStep chain. Every recommended "
         "action must cite at least one ID from this selected flow or its primitive steps.\n"
         if business_flow_context else ""
@@ -560,8 +598,10 @@ Return GeneratorOutput: recommended_actions list + hypothesis_tested."""
     )
     flow_yaml = modify_action.flow_yaml if modify_action else ""
 
-    # Surface any skills the LLM invented that don't exist in Graph B
+    # Surface any skills the LLM invented that don't exist in Graph B,
+    # and capture ALL referenced skill IDs so the evaluator can update metrics.
     valid_skill_ids = {s["id"] for s in valid_skills}
+    referenced_skills: set[str] = set()
     if flow_yaml:
         try:
             parsed = yaml.safe_load(flow_yaml)
@@ -609,6 +649,7 @@ Return GeneratorOutput: recommended_actions list + hypothesis_tested."""
         ],
         "proposed_flow_yaml": flow_yaml,
         "recommended_actions": [a.model_dump() for a in output.recommended_actions],
+        "skills_referenced": sorted(referenced_skills),
     }
 
 
@@ -627,6 +668,20 @@ def critic_node(state: AgentState) -> dict:
     retry_count = state.get("retry_count", 0)
     project_id = state.get("project_id")
 
+    _emit_node_event(
+        state,
+        source="critic",
+        target="simulator",
+        event_type="thinking",
+        title="Critic is validating proposal safety",
+        detail="Checking YAML, referenced skills, infrastructure, and graph evidence.",
+        payload={
+            "retry_count": retry_count,
+            "project_id": project_id,
+            "recommended_actions": len(state.get("recommended_actions", [])),
+        },
+    )
+
     # Step 1: parse YAML locally
     syntax_error: Optional[str] = None
     flow_def: dict = {}
@@ -639,17 +694,29 @@ def critic_node(state: AgentState) -> dict:
     except yaml.YAMLError as exc:
         syntax_error = str(exc)
 
-    # Step 2: load valid IDs from Graph B + approved SkillProposals
+    # Step 2: load valid records from Graph B + approved SkillProposals.
+    # Fetch full name/description so the same records feed both validation and the LLM prompt,
+    # eliminating the need for a second retrieve_context() call later.
     valid_skill_records: List[Dict] = query_graph.invoke({
-        "cypher_query": "MATCH (s:Skill) RETURN s.id AS id"
+        "cypher_query": (
+            "MATCH (s:Skill) "
+            "RETURN s.id AS id, s.name AS name, s.description AS description, "
+            "       s.performance_score AS performance_score"
+        )
     })
     approved_proposals: List[Dict] = query_graph.invoke({
-        "cypher_query": "MATCH (s:SkillProposal {status: 'approved'}) RETURN s.id AS id"
+        "cypher_query": (
+            "MATCH (s:SkillProposal {status: 'approved'}) "
+            "RETURN s.id AS id, s.name AS name"
+        )
     })
     valid_skills = {r["id"] for r in valid_skill_records} | {r["id"] for r in approved_proposals}
 
     valid_conn_records: List[Dict] = query_graph.invoke({
-        "cypher_query": "MATCH (c:Connector) RETURN c.id AS id"
+        "cypher_query": (
+            "MATCH (c:Connector) "
+            "RETURN c.id AS id, c.name AS name, c.type AS type, c.status AS status"
+        )
     })
     valid_connectors = {r["id"] for r in valid_conn_records}
 
@@ -689,7 +756,7 @@ def critic_node(state: AgentState) -> dict:
         if not referenced_skills:
             local_issues.append("No skills found in steps[*].skill or steps[*].skill_id.")
 
-    # Step 3: validate evidence_node_ids for each recommended_action.
+    # Step 3: validate evidence_node_ids and target_node_id for each recommended_action.
     # Primary check uses elementId(n) (graph-native, as spec requires).
     # Fallback to n.id for property-based IDs from older planner queries.
     valid_evidence: List[str] = []
@@ -729,6 +796,41 @@ def critic_node(state: AgentState) -> dict:
                     )
             except Exception as exc:
                 logger.warning("Could not verify evidence node %s: %s", nid, exc)
+
+        # Also verify target_node_id exists — the generator sees only software_nodes[:20]
+        # so it can reference nodes it cannot see for large codebases.
+        target_id = action.get("target_node_id", "")
+        if target_id:
+            try:
+                scope_clause = ""
+                if project_id:
+                    project_json = json.dumps(project_id)
+                    scope_clause = (
+                        "AND (n.project_id = "
+                        f"{project_json} OR n.id = {project_json} "
+                        "OR EXISTS { MATCH (:Project {id: "
+                        f"{project_json}"
+                        "})-[:HAS_BUSINESS_FLOW]->(:BusinessFlow)-[:HAS_STEP]->(n) } "
+                        "OR EXISTS { MATCH (:Project {id: "
+                        f"{project_json}"
+                        "})-[:HAS_BUSINESS_FLOW]->(:BusinessFlow)-[:HAS_STEP]->(:FlowStep)-[:USES_PRIMITIVE]->(n) })"
+                    )
+                tid_json = json.dumps(target_id)
+                target_result = query_graph.invoke({
+                    "cypher_query": (
+                        "MATCH (n) "
+                        f"WHERE (elementId(n) = {tid_json} OR n.id = {tid_json}) "
+                        f"{scope_clause} "
+                        "RETURN coalesce(n.id, elementId(n)) AS eid LIMIT 1"
+                    )
+                })
+                if not target_result:
+                    local_issues.append(
+                        f"Action '{action.get('action_type', '?')}' has an invalid "
+                        f"target_node_id (not found in graph): {target_id}"
+                    )
+            except Exception as exc:
+                logger.warning("Could not verify target_node_id %s: %s", target_id, exc)
 
     if local_issues:
         suggestions = (
@@ -774,46 +876,26 @@ def critic_node(state: AgentState) -> dict:
             "A flow with no graph grounding must be rejected."
         )
 
-    try:
-        context = retrieve_context(
-            industry=state.get("goal_industry") or None,
-            goal=state.get("goal", ""),
-        )
-        prompt = build_critic_prompt(flow_yaml, context, goal=state.get("goal", ""))
-        prompt += (
-            "\n\n== Local deterministic checks already passed ==\n"
-            f"Valid skill IDs: {sorted(valid_skills)}\n"
-            f"Valid connector IDs: {sorted(valid_connectors)}\n"
-            f"Server infrastructure status: {json.dumps(infra_summary, indent=2)}\n"
-        )
-        prompt += evidence_required_note
-    except Exception as exc:
-        logger.warning("GraphRAG critic context failed; using local critic prompt: %s", exc)
-        prompt = f"""You are the Critic agent for EcoLink NeuroCore. Review the proposed flow YAML.
-
-== Proposed YAML ==
-{flow_yaml}
-
-== Syntax check result ==
-{"PASS" if syntax_error is None else f"FAIL: {syntax_error}"}
-
-== Valid skill IDs in Graph B ==
-{sorted(valid_skills)}
-
-== Valid connector IDs in Graph B ==
-{sorted(valid_connectors)}
-
-== Server infrastructure status ==
-{json.dumps(infra_summary, indent=2)}
-
-Check the following and return is_valid + any issues found:
-1. YAML is syntactically correct.
-2. Every skill referenced in `steps[*].skill` or `steps[*].skill_id` exists in the valid skills list.
-3. Every connector referenced (if any) exists in the valid connectors list.
-4. The `runs_on` server has load < 80% and error_rate < 3%.
-5. Steps are logically ordered and the flow makes sense for a matching system.
-
-Set is_valid=True only if ALL checks pass.{evidence_required_note}"""
+    # Build the LLM prompt from state (already populated by the planner's retrieve_context call)
+    # plus the skill/connector records fetched above. This avoids a redundant Neo4j round-trip.
+    prompt = build_critic_prompt(
+        flow_yaml,
+        goal=state.get("goal", ""),
+        failure_patterns=state.get("failure_patterns", []),
+        success_patterns=state.get("success_patterns", []),
+        available_skills=valid_skill_records + approved_proposals,
+        available_connectors=valid_conn_records,
+        software_nodes=state.get("software_nodes", []),
+        infra_status=infra,
+        industry=state.get("goal_industry", ""),
+    )
+    prompt += (
+        "\n\n== Local deterministic checks already passed ==\n"
+        f"Valid skill IDs: {sorted(valid_skills)}\n"
+        f"Valid connector IDs: {sorted(valid_connectors)}\n"
+        f"Server infrastructure status: {json.dumps(infra_summary, indent=2)}\n"
+    )
+    prompt += evidence_required_note
 
     output: CriticOutput = _structured_invoke(_llm(), prompt, CriticOutput)
 
@@ -889,6 +971,21 @@ def simulator_node(state: AgentState) -> dict:
     problem_flow_id = state.get("identified_problem_flow", "")
     app_id = state.get("app_id") or ""
 
+    _emit_node_event(
+        state,
+        source="simulator",
+        target="evaluator",
+        event_type="thinking",
+        title="Simulator is preparing sandbox execution",
+        detail="Choosing code sandbox, flow sandbox, or graph-review validation.",
+        payload={
+            "source_path": source_path,
+            "has_flow_yaml": bool(flow_yaml),
+            "recommended_actions": len(recommended_actions),
+            "proposal_only": bool(state.get("proposal_only")),
+        },
+    )
+
     # Collect code patches from modify_code actions
     code_actions = [
         a for a in recommended_actions
@@ -896,8 +993,8 @@ def simulator_node(state: AgentState) -> dict:
     ]
 
     if state.get("proposal_only") and state.get("business_flow_id"):
-        flow_context = state.get("business_flow_context") or []
-        selected_flow = flow_context[0] if flow_context and isinstance(flow_context[0], dict) else {}
+        flow_context = state.get("business_flow_context")
+        selected_flow = flow_context if isinstance(flow_context, dict) else {}
         steps = selected_flow.get("steps") if isinstance(selected_flow.get("steps"), list) else []
         evidence_ids = {
             evidence_id
@@ -1056,6 +1153,20 @@ def evaluator_node(state: AgentState) -> dict:
     hypothesis = state.get("current_hypothesis", "")
     retry_count = state.get("retry_count", 0)
 
+    _emit_node_event(
+        state,
+        source="evaluator",
+        target="human_approval",
+        event_type="thinking",
+        title="Evaluator is comparing result to decision rule",
+        detail=hypothesis or "Reviewing sandbox metrics and graph evidence.",
+        payload={
+            "baseline_score": baseline_score,
+            "retry_count": retry_count,
+            "simulation_results": len(simulation_results),
+        },
+    )
+
     # Short-circuit: infrastructure errors are not flow failures — don't retry.
     # Set retry_count to MAX_RETRIES so _route_evaluator routes to END.
     latest_infra = (simulation_results[-1].get("infra_error") if simulation_results else None) \
@@ -1167,8 +1278,8 @@ Do NOT include a decision field — that is computed automatically."""
     }
 
     if decision == "success":
-        flow_context = state.get("business_flow_context", [])
-        selected_flow = flow_context[0] if flow_context and isinstance(flow_context[0], dict) else {}
+        flow_context = state.get("business_flow_context")
+        selected_flow = flow_context if isinstance(flow_context, dict) else {}
         before_chain = selected_flow.get("ordered_chain") or selected_flow.get("steps") or ""
         before_summary = {
             "business_flow": selected_flow.get("business_flow") or problem_flow,
@@ -1306,6 +1417,19 @@ def human_approval_node(state: AgentState) -> dict:
     sim_score = (
         sim_results[-1].get("metrics", {}).get("match_score", 0.0)
         if sim_results else 0.0
+    )
+
+    _emit_node_event(
+        state,
+        source="human_approval",
+        event_type="thinking",
+        title="Human approval is waiting for review",
+        detail=f"Proposal {proposal_id} is paused for approval.",
+        payload={
+            "proposal_id": proposal_id,
+            "baseline_score": baseline_score,
+            "simulation_score": sim_score,
+        },
     )
 
     response: Dict = interrupt({

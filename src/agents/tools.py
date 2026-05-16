@@ -514,15 +514,79 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
     }
 
 
+def _payloads_from_gcloud_logs(entries: list[dict]) -> str:
+    parts: list[str] = []
+    for entry in sorted(entries, key=lambda item: item.get("timestamp", "")):
+        if "textPayload" in entry:
+            parts.append(str(entry["textPayload"]))
+        elif "jsonPayload" in entry:
+            parts.append(json.dumps(entry["jsonPayload"]))
+        elif "protoPayload" in entry:
+            parts.append(json.dumps(entry["protoPayload"]))
+    return "\n".join(parts)
+
+
+def _poll_cloud_logging_with_gcloud(
+    project: str, region: str, job: str, execution_id: str, max_wait_s: int
+) -> Optional[tuple[List[dict], Optional[float]]]:
+    gcloud = shutil.which("gcloud")
+    if not gcloud:
+        logger.error("google-cloud-logging is not installed and gcloud CLI was not found.")
+        return None
+
+    log_filter = (
+        f'resource.type="cloud_run_job" '
+        f'resource.labels.job_name="{job}" '
+        f'resource.labels.location="{region}" '
+        f'logName="projects/{project}/logs/run.googleapis.com%2Fstdout" '
+        f'labels."run.googleapis.com/execution_name"="{execution_id}"'
+    )
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        proc = subprocess.run(
+            [
+                gcloud,
+                "logging",
+                "read",
+                log_filter,
+                "--project",
+                project,
+                "--limit",
+                "200",
+                "--format",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning("gcloud logging read failed: %s", proc.stderr[:300])
+        else:
+            try:
+                combined = _payloads_from_gcloud_logs(json.loads(proc.stdout or "[]"))
+            except json.JSONDecodeError:
+                combined = ""
+            if "DATA_STREAM_START" in combined and "DATA_STREAM_END" in combined:
+                parsed = _parse_sandbox_output(combined)
+                if parsed is not None:
+                    traces, _ = parsed
+                    logger.info("Parsed %d traces from gcloud logs for %s.", len(traces), execution_id)
+                    return parsed
+        time.sleep(5)
+    return None
+
+
 def _poll_cloud_logging_for_traces(
     project: str, region: str, job: str, execution_id: str
-) -> Optional[List[dict]]:
+) -> Optional[tuple[List[dict], Optional[float]]]:
     """Poll Cloud Logging until DATA_STREAM_START/END markers appear."""
     try:
         from google.cloud import logging as gcp_logging  # noqa: PLC0415
     except ImportError:
-        logger.error("google-cloud-logging is not installed.")
-        return None
+        logger.info("google-cloud-logging is not installed; falling back to gcloud logging read.")
+        return _poll_cloud_logging_with_gcloud(project, region, job, execution_id, max_wait_s=60)
 
     log_client = gcp_logging.Client(project=project)
     log_filter = (
@@ -530,7 +594,7 @@ def _poll_cloud_logging_for_traces(
         f'resource.labels.job_name="{job}" '
         f'resource.labels.location="{region}" '
         f'logName="projects/{project}/logs/run.googleapis.com%2Fstdout" '
-        f'labels."run.googleapis.com/execution-name"="{execution_id}"'
+        f'labels."run.googleapis.com/execution_name"="{execution_id}"'
     )
 
     _MAX_WAIT_S = 60
@@ -976,10 +1040,10 @@ def propose_change(change_type: str, details: Dict) -> str:
     business_flow_id = details.get("business_flow_id")
     project_id = details.get("project_id")
     simulation_score = details.get("simulation_score")
-    flow_context = details.get("business_flow_context") or []
+    flow_context = details.get("business_flow_context")
     source_name = ""
-    if flow_context and isinstance(flow_context[0], dict):
-        source_name = flow_context[0].get("business_flow") or ""
+    if isinstance(flow_context, dict):
+        source_name = flow_context.get("business_flow") or ""
     proposal_name = f"Optimized {source_name}" if source_name else proposal_id
     justification = details.get("justification", "")
 
@@ -1087,6 +1151,15 @@ def reject_proposal(proposal_id: str, reason: str) -> None:
         {"id": proposal_id, "reason": reason},
     )
     logger.info("Proposal %s rejected: %s", proposal_id, reason)
+
+
+def set_flow_container_url(flow_id: str, url: str) -> None:
+    """Store the deployed container URL on an active Flow node."""
+    _run_write_cypher(
+        "MATCH (f:Flow {id: $id}) SET f.container_url = $url",
+        {"id": flow_id, "url": url},
+    )
+    logger.info("Container URL set on flow %s: %s", flow_id, url)
 
 
 def approve_skill_proposal(skill_id: str) -> None:

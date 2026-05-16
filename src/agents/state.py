@@ -22,7 +22,7 @@ class AgentState(TypedDict):
     source_path: Optional[str]       # Local source folder used during indexing
     base_url: Optional[str]          # Root URL of the connected app
     business_flow_id: Optional[str]  # Selected BusinessFlow node to optimize
-    business_flow_context: List[Dict]  # BusinessFlow/FlowStep graph evidence
+    business_flow_context: Optional[Dict]  # BusinessFlow/FlowStep graph evidence (single record or None)
     proposal_only: bool              # True when UI wants explanation/proposal only, no code patch actions
 
     # ---- Planner output ----
@@ -36,6 +36,7 @@ class AgentState(TypedDict):
     # ---- Generator / Critic cycle ----
     proposed_flow_yaml: str          # YAML produced by the Generator node (backward compat)
     recommended_actions: List[Dict]  # Generator output — primary recommendation list
+    skills_referenced: List[str]     # Skill IDs extracted from the proposed flow YAML (feeds evaluator skill-update loop)
     critic_passed: bool              # True if Critic approved the YAML
     critic_feedback: str             # Issues raised by Critic (freetext, backward compat)
     critic_evidence_ids: List[str]   # graph node IDs the Critic accepted as grounding
