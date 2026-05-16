@@ -74,7 +74,25 @@ st.markdown(
         background-size: 26px 26px;
         color: var(--ink);
     }
-    h1, h2, h3 {
+    .stApp [data-testid="stAppViewContainer"],
+    .stApp [data-testid="stMain"],
+    .stApp [data-testid="stVerticalBlock"],
+    .stApp [data-testid="stMarkdownContainer"],
+    .stApp [data-testid="stMarkdownContainer"] p,
+    .stApp [data-testid="stMarkdownContainer"] li,
+    .stApp [data-testid="stMarkdownContainer"] span,
+    .stApp label,
+    .stApp p,
+    .stApp li {
+        color: var(--ink);
+    }
+    .stApp small,
+    .stApp caption,
+    .stApp [data-testid="stCaptionContainer"],
+    .stApp [data-testid="stMarkdownContainer"] code {
+        color: var(--muted);
+    }
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
         color: var(--ink);
         letter-spacing: 0;
     }
@@ -89,6 +107,64 @@ st.markdown(
     }
     section[data-testid="stSidebar"] * {
         color: #f7f1e4;
+    }
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span {
+        color: #f7f1e4;
+    }
+    .stApp div[data-testid="stAlert"] *,
+    .stApp div[data-testid="stExpander"] *,
+    .stApp div[data-baseweb="tab-list"] *,
+    .stApp div[data-testid="stRadio"] *,
+    .stApp div[data-testid="stSelectbox"] *,
+    .stApp div[data-testid="stTextInput"] *,
+    .stApp div[data-testid="stTextArea"] * {
+        color: var(--ink);
+    }
+    .stApp div[data-testid="stAlert"] {
+        background: rgba(255,250,240,.94);
+        border-color: var(--line);
+    }
+    .stApp div[data-testid="stExpander"] {
+        background: rgba(255,250,240,.78);
+        border-color: var(--line);
+    }
+    .stApp div[data-testid="stMetric"] label,
+    .stApp div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+    .stApp div[data-testid="stMetric"] [data-testid="stMetricValue"],
+    .stApp div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+        color: var(--ink);
+    }
+    .stApp div[data-testid="stDataFrame"] {
+        color: var(--ink);
+    }
+    .stApp input,
+    .stApp textarea {
+        color: var(--ink) !important;
+        background: #fffaf0 !important;
+    }
+    .stApp input::placeholder,
+    .stApp textarea::placeholder {
+        color: #8d8578 !important;
+    }
+    .stApp button[kind="secondary"],
+    .stApp button[data-testid="baseButton-secondary"] {
+        color: var(--ink);
+        background: #fffaf0;
+        border-color: var(--line);
+    }
+    .stApp button[kind="primary"],
+    .stApp button[data-testid="baseButton-primary"] {
+        color: #ffffff;
+        background: var(--accent);
+        border-color: var(--accent);
+    }
+    .stApp pre,
+    .stApp code {
+        color: #1f2a28;
+        background: #fffaf0;
     }
     div[data-testid="stMetric"] {
         background: rgba(255,250,240,.92);
@@ -932,6 +1008,8 @@ def _graph_rows_to_payload(rows: list[dict[str, Any]]) -> dict[str, list[dict[st
             "primitive_id": row.get(f"{prefix}_primitive_id"),
             "primitive_label": row.get(f"{prefix}_primitive_label"),
             "evidence": row.get(f"{prefix}_evidence"),
+            "business_flow_id": row.get(f"{prefix}_business_flow_id"),
+            "sandbox_only": row.get(f"{prefix}_sandbox_only"),
         }
 
     for row in rows:
@@ -947,6 +1025,113 @@ def _graph_rows_to_payload(rows: list[dict[str, Any]]) -> dict[str, list[dict[st
             )
 
     return {"nodes": list(nodes.values()), "edges": edges}
+
+
+def _append_optimized_flow_overlay(
+    payload: dict[str, list[dict[str, Any]]],
+    project_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Add approved sandbox-only optimization proposals to project graph payload."""
+    rows = run_read(
+        f"""
+        MATCH (f:Flow)
+        WHERE f.project_id = {json.dumps(project_id)}
+          AND f.business_flow_id IS NOT NULL
+          AND f.status IN ['active', 'approved']
+        RETURN elementId(f) AS element_id,
+               f.id AS id,
+               f.name AS name,
+               f.status AS status,
+               f.project_id AS project_id,
+               f.business_flow_id AS business_flow_id,
+               f.avg_outcome_score AS score,
+               f.justification AS justification
+        ORDER BY f.id DESC
+        LIMIT 30
+        """
+    )
+    if not rows:
+        return payload
+
+    existing_node_ids = {node["id"] for node in payload["nodes"]}
+    existing_edges = {
+        (edge.get("from"), edge.get("to"), edge.get("label"))
+        for edge in payload["edges"]
+    }
+
+    for row in rows:
+        node_id = row["element_id"]
+        overlay_node = {
+            "id": node_id,
+            "label": row.get("name") or row.get("id"),
+            "group": "Flow",
+            "status": "sandbox_approved",
+            "score": row.get("score"),
+            "project_id": row.get("project_id"),
+            "description": row.get("justification"),
+            "business_flow_id": row.get("business_flow_id"),
+            "sandbox_only": True,
+        }
+        if node_id in existing_node_ids:
+            for node in payload["nodes"]:
+                if node["id"] == node_id:
+                    node.update({k: v for k, v in overlay_node.items() if v is not None})
+                    break
+        else:
+            payload["nodes"].append(overlay_node)
+            existing_node_ids.add(node_id)
+
+        target_business_flow_id = row.get("business_flow_id")
+        target = next(
+            (
+                node for node in payload["nodes"]
+                if node.get("group") == "BusinessFlow"
+                and (
+                    node.get("primitive_id") == target_business_flow_id
+                    or node.get("label") == target_business_flow_id
+                    or node.get("id") == target_business_flow_id
+                )
+            ),
+            None,
+        )
+        if not target and target_business_flow_id:
+            matched = run_read(
+                f"""
+                MATCH (bf:BusinessFlow {{id: {json.dumps(target_business_flow_id)}}})
+                RETURN elementId(bf) AS element_id, bf.name AS name, bf.id AS id,
+                       bf.project_id AS project_id, bf.confidence AS confidence
+                LIMIT 1
+                """
+            )
+            if matched:
+                bf = matched[0]
+                target = {
+                    "id": bf["element_id"],
+                    "label": bf.get("name") or bf.get("id"),
+                    "group": "BusinessFlow",
+                    "status": None,
+                    "project_id": bf.get("project_id"),
+                    "confidence": bf.get("confidence"),
+                }
+                if target["id"] not in existing_node_ids:
+                    payload["nodes"].append(target)
+                    existing_node_ids.add(target["id"])
+
+        if target:
+            edge_key = (target["id"], node_id, "APPROVED_SANDBOX_OPTIMIZATION")
+            if edge_key not in existing_edges:
+                payload["edges"].append(
+                    {
+                        "from": target["id"],
+                        "to": node_id,
+                        "label": "APPROVED_SANDBOX_OPTIMIZATION",
+                        "color": {"color": "#c01818", "highlight": "#8b0000", "hover": "#8b0000"},
+                        "width": 3,
+                        "dashes": True,
+                    }
+                )
+                existing_edges.add(edge_key)
+    return payload
 
 
 def _graph_return_clause() -> str:
@@ -990,6 +1175,8 @@ def _graph_return_clause() -> str:
            properties(n).primitive_id AS source_primitive_id,
            properties(n).primitive_label AS source_primitive_label,
            properties(n).evidence AS source_evidence,
+           properties(n).business_flow_id AS source_business_flow_id,
+           properties(n).sandbox_only AS source_sandbox_only,
            type(r) AS rel_type,
            elementId(m) AS target_id,
            labels(m) AS target_labels,
@@ -1029,7 +1216,9 @@ def _graph_return_clause() -> str:
            properties(m).step_type AS target_step_type,
            properties(m).primitive_id AS target_primitive_id,
            properties(m).primitive_label AS target_primitive_label,
-           properties(m).evidence AS target_evidence
+           properties(m).evidence AS target_evidence,
+           properties(m).business_flow_id AS target_business_flow_id,
+           properties(m).sandbox_only AS target_sandbox_only
     """
 
 
@@ -1069,7 +1258,7 @@ def load_project_graph_payload(
         "Full Project Graph": [
             "Project", "Repository", "File", "Route", "Service", "Function",
             "DatabaseModel", "DatabaseTable", "DataStore", "Entity", "Workflow",
-            "BusinessFlow", "FlowStep", "Integration", "Artifact", "Risk", "Skill",
+            "BusinessFlow", "FlowStep", "Integration", "Artifact", "Risk", "Skill", "Flow",
         ],
         "Software Architecture": [
             "Project", "Repository", "File", "Route", "Service", "Function",
@@ -1077,7 +1266,7 @@ def load_project_graph_payload(
         ],
         "Workflow Pipeline": [
             "Project", "BusinessFlow", "FlowStep", "File", "Route", "Service",
-            "Function", "DatabaseModel", "DatabaseTable", "DataStore", "Integration", "Risk",
+            "Function", "DatabaseModel", "DatabaseTable", "DataStore", "Integration", "Risk", "Flow",
         ],
         "Storage & Risk": [
             "Project", "Repository", "File", "DataStore", "DatabaseModel",
@@ -1117,7 +1306,8 @@ def load_project_graph_payload(
         """
     )
 
-    return _graph_rows_to_payload(rows)
+    payload = _graph_rows_to_payload(rows)
+    return _append_optimized_flow_overlay(payload, project_id)
 
 
 def clear_data_cache() -> None:
@@ -1253,12 +1443,226 @@ def render_flow_chips(items: list[str], accent: str = "#0f7b63") -> None:
     st.markdown(chips, unsafe_allow_html=True)
 
 
+def _dot_escape(value: Any) -> str:
+    text = str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+    return text[:80]
+
+
+def _dot_id(prefix: str, index: int) -> str:
+    return f"{prefix}_{index}"
+
+
+def _step_label(step: Any, fallback: str = "Step") -> str:
+    if isinstance(step, dict):
+        return str(
+            step.get("step")
+            or step.get("name")
+            or step.get("id")
+            or step.get("primitive")
+            or step.get("action_type")
+            or fallback
+        )
+    return str(step or fallback)
+
+
+def proposed_flow_steps(proposed_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    flow_yaml = proposed_summary.get("flow_yaml") or ""
+    if flow_yaml:
+        try:
+            parsed = yaml.safe_load(flow_yaml) or {}
+            if isinstance(parsed, dict):
+                raw_steps = parsed.get("steps") or []
+                if isinstance(raw_steps, list) and raw_steps:
+                    return [
+                        {
+                            "label": _step_label(step, f"Step {i + 1}"),
+                            "kind": "Workflow step",
+                            "detail": (
+                                step.get("skill")
+                                or step.get("skill_id")
+                                or step.get("description")
+                                or ""
+                            ) if isinstance(step, dict) else "",
+                        }
+                        for i, step in enumerate(raw_steps)
+                    ]
+        except yaml.YAMLError:
+            pass
+
+    actions = proposed_summary.get("recommended_actions") or []
+    return [
+        {
+            "label": str(action.get("action_type") or f"Action {i + 1}"),
+            "kind": "Proposal action",
+            "detail": str(action.get("description") or ""),
+        }
+        for i, action in enumerate(actions)
+        if isinstance(action, dict)
+    ]
+
+
+def before_flow_steps(before_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    chain = _chain_items(
+        before_summary.get("ordered_chain"),
+        before_summary.get("graph_evidence", {}).get("steps")
+        if isinstance(before_summary.get("graph_evidence"), dict)
+        else None,
+    )
+    return [{"label": item, "kind": "Current step", "detail": ""} for item in chain]
+
+
+def flow_graph_dot(
+    *,
+    title: str,
+    steps: list[dict[str, Any]],
+    accent: str = "#0f7b63",
+) -> str:
+    if not steps:
+        steps = [{"label": "No steps captured", "kind": "Empty", "detail": ""}]
+    lines = [
+        "digraph G {",
+        "  graph [rankdir=LR, bgcolor=\"transparent\", pad=\"0.2\", nodesep=\"0.45\", ranksep=\"0.55\"];",
+        "  node [shape=box, style=\"rounded,filled\", fontname=\"Helvetica\", fontsize=10, margin=\"0.12,0.08\", color=\"#b7ad99\", fillcolor=\"#fffaf0\", fontcolor=\"#19211f\"];",
+        "  edge [color=\"#8f9f99\", penwidth=1.7, arrowsize=0.7];",
+        f"  label=\"{_dot_escape(title)}\";",
+        "  labelloc=\"t\";",
+        "  fontsize=12;",
+        "  fontname=\"Helvetica-Bold\";",
+    ]
+    for i, step in enumerate(steps[:12]):
+        node_id = _dot_id("s", i)
+        label = _dot_escape(step.get("label"))
+        detail = _dot_escape(step.get("detail"))
+        kind = _dot_escape(step.get("kind"))
+        fill = "#eef8f3" if i else "#e9f2ff"
+        color = accent if i else "#3267a8"
+        dot_label = f"{i + 1}. {label}"
+        if detail:
+            dot_label += f"\\n{detail[:70]}"
+        elif kind:
+            dot_label += f"\\n{kind}"
+        lines.append(
+            f"  {node_id} [label=\"{dot_label}\", fillcolor=\"{fill}\", color=\"{color}\"];"
+        )
+    for i in range(max(0, min(len(steps), 12) - 1)):
+        lines.append(f"  {_dot_id('s', i)} -> {_dot_id('s', i + 1)};")
+    if len(steps) > 12:
+        lines.append("  more [label=\"More steps hidden\", fillcolor=\"#f5f2eb\", color=\"#b7ad99\"];")
+        lines.append(f"  {_dot_id('s', 11)} -> more;")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render_optimized_flow_graph(
+    before_summary: dict[str, Any],
+    proposed_summary: dict[str, Any],
+) -> None:
+    proposed_steps = proposed_flow_steps(proposed_summary)
+    before_steps = before_flow_steps(before_summary)
+    st.markdown("**Current vs Optimized Flow**")
+    left, right = st.columns(2)
+    with left:
+        st.caption("Current detected flow")
+        st.graphviz_chart(
+            flow_graph_dot(
+                title="Current flow",
+                steps=before_steps,
+                accent="#3267a8",
+            ),
+            use_container_width=True,
+        )
+    with right:
+        st.caption("Optimized sandbox proposal")
+        st.graphviz_chart(
+            flow_graph_dot(
+                title="Optimized flow",
+                steps=proposed_steps,
+                accent="#c01818",
+            ),
+            use_container_width=True,
+        )
+    with st.expander("Open larger graph preview", expanded=False):
+        graph_tabs = st.tabs(["Optimized Flow", "Current Flow"])
+        with graph_tabs[0]:
+            st.graphviz_chart(
+                flow_graph_dot(
+                    title="Optimized sandbox flow - approved state is still not real code",
+                    steps=proposed_steps,
+                    accent="#c01818",
+                ),
+                use_container_width=True,
+            )
+        with graph_tabs[1]:
+            st.graphviz_chart(
+                flow_graph_dot(
+                    title="Current detected flow",
+                    steps=before_steps,
+                    accent="#3267a8",
+                ),
+                use_container_width=True,
+            )
+
+
+def render_admin_sandbox_preview(parsed_payload: dict[str, Any]) -> None:
+    sandbox = parsed_payload.get("sandbox_result") or {}
+    proposed = parsed_payload.get("proposed_summary") or {}
+    actions = proposed.get("recommended_actions") or parsed_payload.get("recommended_actions") or []
+    metrics = sandbox.get("metrics") if isinstance(sandbox.get("metrics"), dict) else {}
+    traces = sandbox.get("traces") if isinstance(sandbox.get("traces"), list) else []
+
+    with st.expander("Open Sandbox Preview", expanded=False):
+        st.caption("Review-only preview. It does not mutate the real project code.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Validation", str(sandbox.get("status") or "not run").title())
+        c2.metric("Mode", metrics.get("validation_mode", proposed.get("proposal_mode", "proposal")))
+        c3.metric("Actions", len(actions))
+        c4.metric("Evidence", metrics.get("evidence_count", "n/a"))
+
+        if sandbox.get("error_log"):
+            st.error(sandbox["error_log"])
+        elif metrics.get("validation_mode") == "graph_review":
+            st.success("Graph evidence review passed. The optimized flow is ready for human approval.")
+
+        if actions:
+            action_rows = []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                evidence = action.get("evidence_node_ids") or []
+                action_rows.append(
+                    {
+                        "action": action.get("action_type"),
+                        "target": compact_list([action.get("target_node_id")], 1),
+                        "evidence_nodes": len(evidence),
+                        "admin_summary": action.get("description"),
+                    }
+                )
+            if action_rows:
+                st.markdown("**Recommended changes**")
+                display_table(pd.DataFrame(action_rows), height=220)
+
+        if metrics:
+            metric_rows = [
+                {"metric": key, "value": value}
+                for key, value in metrics.items()
+                if key not in {"validation_mode"}
+            ]
+            if metric_rows:
+                st.markdown("**Validation metrics**")
+                display_table(pd.DataFrame(metric_rows), height=180)
+
+        if traces:
+            st.markdown("**Evidence trace**")
+            display_table(pd.DataFrame(traces[:12]), height=240)
+
+
 def render_human_proposal_card(
     *,
     title: str,
     before_summary: dict[str, Any],
     proposed_summary: dict[str, Any],
     justification: str | None = None,
+    parsed_payload: dict[str, Any] | None = None,
 ) -> None:
     before_chain = _chain_items(
         before_summary.get("ordered_chain"),
@@ -1292,6 +1696,9 @@ def render_human_proposal_card(
         st.success(f"Code changed: {proposed_summary.get('code_mutation', 'none')}")
     if justification:
         st.info(justification)
+    render_optimized_flow_graph(before_summary, proposed_summary)
+    if parsed_payload:
+        render_admin_sandbox_preview(parsed_payload)
 
 
 def render_sandbox_review(result: dict[str, Any]) -> None:
@@ -1413,6 +1820,7 @@ def graph_legend_html() -> str:
         ("Mentor", "#e7e0ff", "#5f4bb6"),
         ("Programme", "#f3e5ab", "#8b6d12"),
         ("Flow", "#fff0c2", "#a55b19"),
+        ("Approved sandbox optimization", "#ffd6d6", "#c01818"),
         ("Connector", "#ffd9cc", "#b54a2c"),
         ("Server", "#e7e3d8", "#6d6252"),
         ("Proposed", "#fff9c2", "#d4a017"),
@@ -1429,6 +1837,7 @@ def graph_legend_html() -> str:
 def graph_html(
     payload: dict[str, list[dict[str, Any]]],
     agent_active_ids: list[str] | None = None,
+    scope: str = "Full Project Graph",
 ) -> str:
     """Interactive graph with search, click details, and active-agent highlighting."""
 
@@ -1496,6 +1905,119 @@ def graph_html(
         "SkillProposal": 16,
     }
 
+    diagram_scopes = {"Workflow Pipeline", "Storage & Risk"}
+    is_structured_diagram = scope in diagram_scopes
+    level_map = {
+        "Workflow Pipeline": {
+            "Project": 0,
+            "BusinessFlow": 1,
+            "Workflow": 1,
+            "Route": 2,
+            "FlowStep": 2,
+            "Service": 3,
+            "Function": 3,
+            "File": 3,
+            "DataStore": 4,
+            "DatabaseModel": 4,
+            "DatabaseTable": 4,
+            "Integration": 4,
+            "Artifact": 4,
+            "Risk": 5,
+            "Flow": 6,
+        },
+        "Storage & Risk": {
+            "Project": 0,
+            "Repository": 1,
+            "File": 2,
+            "DataStore": 3,
+            "DatabaseModel": 3,
+            "DatabaseTable": 3,
+            "Integration": 3,
+            "Risk": 4,
+        },
+    }.get(scope, {})
+    shape_map = {
+        "Project": "hexagon",
+        "Repository": "box",
+        "File": "box",
+        "Route": "box",
+        "Service": "box",
+        "Function": "box",
+        "Workflow": "box",
+        "BusinessFlow": "box",
+        "FlowStep": "box",
+        "Flow": "box",
+        "Skill": "box",
+        "Connector": "box",
+        "Integration": "box",
+        "DataStore": "database",
+        "DatabaseModel": "database",
+        "DatabaseTable": "database",
+        "Entity": "box",
+        "Artifact": "box",
+        "Risk": "diamond",
+        "ExecutionTrace": "box",
+        "Outcome": "diamond",
+        "SkillProposal": "box",
+        "Server": "box",
+        "Company": "box",
+        "Mentor": "box",
+        "Programme": "box",
+        "WebSite": "box",
+        "WebPage": "box",
+        "WebEntity": "box",
+        "AppProfile": "box",
+        "Pipeline": "box",
+    }
+
+    def styled_edge(edge: dict[str, Any]) -> dict[str, Any]:
+        rel = edge.get("label", "")
+        next_edge = dict(edge)
+        if rel == "APPROVED_SANDBOX_OPTIMIZATION":
+            next_edge.update(
+                {
+                    "color": {"color": "#c01818", "highlight": "#8b0000", "hover": "#8b0000"},
+                    "width": 3,
+                    "dashes": True,
+                }
+            )
+        elif "RISK" in rel:
+            next_edge.update(
+                {
+                    "color": {"color": "#a73737", "highlight": "#7a1c1c", "hover": "#7a1c1c"},
+                    "width": 2.2,
+                }
+            )
+        elif "DATASTORE" in rel or "MODEL" in rel or "TABLE" in rel:
+            next_edge.update(
+                {
+                    "color": {"color": "#6845a4", "highlight": "#4e347a", "hover": "#4e347a"},
+                    "width": 1.8,
+                }
+            )
+        elif "INTEGRATION" in rel or "CONNECTOR" in rel:
+            next_edge.update(
+                {
+                    "color": {"color": "#b54a2c", "highlight": "#87351f", "hover": "#87351f"},
+                    "width": 1.8,
+                }
+            )
+        elif rel in {"HAS_BUSINESS_FLOW", "HAS_STEP", "USES_PRIMITIVE", "FILE_DEFINES_WORKFLOW"}:
+            next_edge.update(
+                {
+                    "color": {"color": "#a55b19", "highlight": "#78410f", "hover": "#78410f"},
+                    "width": 1.9,
+                }
+            )
+        elif rel.startswith("FILE_DEFINES") or rel.startswith("REPOSITORY_HAS"):
+            next_edge.update(
+                {
+                    "color": {"color": "#8b8175", "highlight": "#19211f", "hover": "#19211f"},
+                    "width": 1.35,
+                }
+            )
+        return next_edge
+
     badge_colors = {
         "Project": "#167447",
         "Repository": "#217b84",
@@ -1545,9 +2067,14 @@ def graph_html(
             "label": label[:24],
             "group": group,
             "title": f"<b>{group}</b>: {label}",
-            "shape": "dot",
+            "shape": shape_map.get(group, "dot") if is_structured_diagram else "dot",
             "size": size_map.get(group, 14) * (1.35 if is_active else 1),
         }
+        if is_structured_diagram:
+            node_data["level"] = level_map.get(group, 3)
+            node_data["margin"] = {"top": 8, "right": 14, "bottom": 8, "left": 14}
+            node_data["widthConstraint"] = {"minimum": 110, "maximum": 200}
+            node_data["heightConstraint"] = {"minimum": 36}
 
         if is_active:
             node_data["color"] = {
@@ -1559,6 +2086,20 @@ def graph_html(
                 "enabled": True,
                 "color": "rgba(15,123,99,0.4)",
                 "size": 16,
+                "x": 0,
+                "y": 0,
+            }
+        elif status == "sandbox_approved":
+            node_data["color"] = {
+                "background": "#ffd6d6",
+                "border": "#c01818",
+                "highlight": {"background": "#ffc2c2", "border": "#8b0000"},
+                "hover": {"background": "#ffc2c2", "border": "#8b0000"},
+            }
+            node_data["shadow"] = {
+                "enabled": True,
+                "color": "rgba(192,24,24,0.35)",
+                "size": 14,
                 "x": 0,
                 "y": 0,
             }
@@ -1580,6 +2121,10 @@ def graph_html(
         details: dict[str, Any] = {"Type": group, "Name": label}
         if status:
             details["Status"] = status
+        if node.get("sandbox_only"):
+            details["Implementation"] = "Approved sandbox proposal - not applied to source code yet"
+        if node.get("business_flow_id"):
+            details["Optimizes BusinessFlow"] = node["business_flow_id"]
         if is_active:
             details["Agent Status"] = "ACTIVE - being processed"
         if node.get("project_id"):
@@ -1654,6 +2199,66 @@ def graph_html(
 
         node_details[node["id"]] = details
 
+    edges = [styled_edge(edge) for edge in payload["edges"]]
+    physics_options: dict[str, Any] | bool
+    layout_options: dict[str, Any]
+    if is_structured_diagram:
+        physics_options = False
+        layout_options = {
+            "hierarchical": {
+                "enabled": True,
+                "direction": "LR",
+                "sortMethod": "directed",
+                "levelSeparation": 280 if scope == "Workflow Pipeline" else 260,
+                "nodeSpacing": 180,
+                "treeSpacing": 260,
+                "blockShifting": True,
+                "edgeMinimization": True,
+                "parentCentralization": False,
+            }
+        }
+        edge_smooth: dict[str, Any] | bool = {
+            "type": "cubicBezier",
+            "forceDirection": "horizontal",
+            "roundness": 0.35,
+        }
+        graph_caption = (
+            "Workflow lanes: project -> business flow -> implementation step -> dependency -> risk -> approved optimization"
+            if scope == "Workflow Pipeline"
+            else "Risk impact map: repository and files flow toward storage, integrations, and detected risks"
+        )
+    else:
+        physics_options = {
+            "solver": "forceAtlas2Based",
+            "forceAtlas2Based": {
+                "gravitationalConstant": -60,
+                "centralGravity": 0.008,
+                "springLength": 170,
+                "springConstant": 0.05,
+                "damping": 0.55,
+            },
+            "stabilization": {"iterations": 220, "updateInterval": 20},
+            "adaptiveTimestep": True,
+        }
+        layout_options = {"improvedLayout": True}
+        edge_smooth = {"type": "cubicBezier", "forceDirection": "none", "roundness": 0.45}
+        graph_caption = "Exploratory force layout for the full connected project graph"
+    focus_groups = (
+        ("BusinessFlow", "Workflow", "Project")
+        if scope == "Workflow Pipeline"
+        else ("Project", "Repository", "BusinessFlow")
+    )
+    initial_focus_id = next(
+        (
+            node["id"]
+            for preferred_group in focus_groups
+            for node in nodes
+            if node.get("group") == preferred_group
+        ),
+        nodes[0]["id"] if nodes else None,
+    )
+    initial_scale = 0.42 if scope == "Workflow Pipeline" else 0.52
+
     html = f"""
     <div style="display:flex; gap:12px; height:720px;">
       <div style="flex:1; position:relative;">
@@ -1677,6 +2282,14 @@ def graph_html(
           Agent running...
         </div>
 
+        <div style="position:absolute; bottom:12px; left:12px; z-index:10;
+                    background:rgba(255,250,240,.92); border:1px solid #d8d1c2;
+                    border-radius:8px; padding:6px 10px; color:#65706d;
+                    font-size:11px; font-weight:600; max-width:520px;
+                    box-shadow:0 3px 12px rgba(0,0,0,0.07);">
+          {graph_caption}
+        </div>
+
         <div id="network"
           style="height:100%; border:1px solid #d8d1c2; border-radius:12px;
                  background:#fffaf0; box-shadow:0 4px 20px rgba(0,0,0,0.06);">
@@ -1697,12 +2310,15 @@ def graph_html(
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <script>
       const nodesData  = new vis.DataSet({json.dumps(nodes)});
-      const edgesData  = new vis.DataSet({json.dumps(payload["edges"])});
+      const edgesData  = new vis.DataSet({json.dumps(edges)});
       const groups     = {json.dumps(groups)};
       const details    = {json.dumps(node_details)};
       const badgeColor = {json.dumps(badge_colors)};
       const activeIds  = {json.dumps(list(active_ids))};
       const container  = document.getElementById("network");
+      const structuredDiagram = {json.dumps(is_structured_diagram)};
+      const initialFocusId = {json.dumps(initial_focus_id)};
+      const initialScale = {json.dumps(initial_scale)};
 
       const options = {{
         groups,
@@ -1712,18 +2328,7 @@ def graph_html(
           keyboard: true,
           tooltipDelay: 80
         }},
-        physics: {{
-          solver: "forceAtlas2Based",
-          forceAtlas2Based: {{
-            gravitationalConstant: -60,
-            centralGravity: 0.008,
-            springLength: 170,
-            springConstant: 0.05,
-            damping: 0.55
-          }},
-          stabilization: {{ iterations: 220, updateInterval: 20 }},
-          adaptiveTimestep: true
-        }},
+        physics: {json.dumps(physics_options)},
         nodes: {{
           font: {{
             face: "Inter, sans-serif",
@@ -1740,21 +2345,38 @@ def graph_html(
           arrows: {{ to: {{ enabled: true, scaleFactor: 0.45 }} }},
           color: {{ color: "#b5a99a", highlight: "#0f7b63", hover: "#0f7b63" }},
           font: {{ size: 9, align: "middle", color: "#7a6f63", strokeWidth: 2, strokeColor: "#fffaf0" }},
-          smooth: {{ type: "cubicBezier", forceDirection: "none", roundness: 0.45 }},
+          smooth: {json.dumps(edge_smooth)},
           width: 1.2,
           selectionWidth: 2.5
         }},
-        layout: {{ improvedLayout: true }}
+        layout: {json.dumps(layout_options)}
       }};
 
       const network = new vis.Network(container, {{ nodes: nodesData, edges: edgesData }}, options);
-
-      network.once("stabilizationIterationsDone", function() {{
-        network.fit({{ animation: {{ duration: 900, easingFunction: "easeInOutQuad" }} }});
+      let initialViewApplied = false;
+      function applyInitialView() {{
+        if (initialViewApplied) return;
+        initialViewApplied = true;
+        if (structuredDiagram && initialFocusId) {{
+          network.focus(initialFocusId, {{
+            scale: initialScale,
+            locked: false,
+            animation: {{ duration: 650, easingFunction: "easeInOutQuad" }}
+          }});
+        }} else {{
+          network.fit({{ animation: {{ duration: 900, easingFunction: "easeInOutQuad" }} }});
+        }}
         if (activeIds.length > 0) {{
           document.getElementById("agentIndicator").style.display = "block";
           pulseActiveNodes();
         }}
+      }}
+
+      network.once("stabilizationIterationsDone", function() {{
+        applyInitialView();
+      }});
+      network.once("afterDrawing", function() {{
+        window.setTimeout(applyInitialView, 80);
       }});
 
       let pulseUp = true;
@@ -1823,6 +2445,13 @@ def graph_html(
           return;
         }}
         renderDetails(params.nodes[0]);
+      }});
+
+      network.on("dragEnd", function(params) {{
+        if (params.nodes.length === 0) return;
+        const nodeId = params.nodes[0];
+        const pos = network.getPositions([nodeId])[nodeId];
+        nodesData.update([{{ id: nodeId, x: pos.x, y: pos.y }}]);
       }});
 
       network.on("hoverNode", function() {{ container.style.cursor = "pointer"; }});
@@ -1903,9 +2532,12 @@ with st.sidebar:
             "Graph Display",
             "Real-Time Agents",
             "Flows",
+            "Sandbox",
             "Agentic Architecture",
+            "System Map",
             "Retry Inspector",
             "History",
+            "Flow Results",
             "Chat",
         ],
         label_visibility="collapsed",
@@ -1958,6 +2590,7 @@ database_required_pages = {
     "Graph Display",
     "Flows",
     "Agentic Architecture",
+    "System Map",
     "History",
     "Chat",
 }
@@ -1988,6 +2621,69 @@ if page != "Project Review" and not project_ready:
 
 
 overview = {} if neo4j_error else load_overview()
+
+# ── Persistent proposal notification banner ───────────────────────────────────
+# Shown on every page (except Chat) so the admin never misses a pending proposal.
+if not neo4j_error and page not in ("Chat", "Retry Inspector"):
+    try:
+        _notif_proposals = run_read(
+            "MATCH (f:Flow {status:'proposed'}) "
+            "RETURN f.id AS id, f.name AS name, f.avg_outcome_score AS score "
+            "ORDER BY f.id DESC LIMIT 5"
+        )
+        if _notif_proposals:
+            _n = len(_notif_proposals)
+            with st.container():
+                st.markdown(
+                    f"<div style='background:rgba(216,168,63,.12);border:1px solid rgba(216,168,63,.5);"
+                    f"border-radius:8px;padding:10px 14px;margin-bottom:12px'>"
+                    f"<span style='font-weight:700;color:#d8a83f'>⏸ {_n} proposal(s) awaiting your review</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                for _np in _notif_proposals:
+                    _nc1, _nc2, _nc3, _nc4 = st.columns([3, 1, 1, 1])
+                    _nc1.markdown(f"**{_np.get('name') or _np['id']}**  \n`{_np['id']}`")
+                    _nc2.metric("Score", _np.get("score") or "—")
+                    with _nc3:
+                        if st.button("✓ Approve", key=f"notif_approve_{_np['id']}", type="primary", use_container_width=True):
+                            activate_proposal(_np["id"])
+                            # Trigger sandbox re-run and store result for Flow Results page
+                            try:
+                                _flow_yaml_rows = run_read(
+                                    f"MATCH (f:Flow {{id: '{_np['id']}'}}) RETURN f.yaml_config AS yaml_config"
+                                )
+                                if _flow_yaml_rows and _flow_yaml_rows[0].get("yaml_config"):
+                                    import json as _json_notif
+                                    _config = _json_notif.loads(_flow_yaml_rows[0]["yaml_config"])
+                                    _yaml = _config.get("yaml", "")
+                                    if _yaml:
+                                        _sandbox_result = run_sandbox_from_ui(_yaml, "local")
+                                        st.session_state["flow_result"] = {
+                                            "proposal_id": _np["id"],
+                                            "proposal_name": _np.get("name") or _np["id"],
+                                            "sandbox_result": _sandbox_result,
+                                            "flow_yaml": _yaml,
+                                        }
+                            except Exception:
+                                pass
+                            publish_event(source="human_approval", event_type="approved",
+                                title="Proposal approved", detail=_np["id"],
+                                payload={"proposal_id": _np["id"]})
+                            clear_data_cache()
+                            st.toast(f"✅ Proposal {_np['id']} approved and sandbox re-run started.", icon="✅")
+                            st.rerun()
+                    with _nc4:
+                        if st.button("✗ Reject", key=f"notif_reject_{_np['id']}", use_container_width=True):
+                            reject_proposal(_np["id"], "Rejected via notification banner")
+                            publish_event(source="human_approval", event_type="rejected",
+                                title="Proposal rejected", detail=_np["id"],
+                                payload={"proposal_id": _np["id"]})
+                            clear_data_cache()
+                            st.toast(f"🚫 Proposal {_np['id']} rejected.", icon="🚫")
+                            st.rerun()
+    except Exception:
+        pass
 
 if page == "Project Review":
     st.subheader("Project Review")
@@ -2078,10 +2774,14 @@ if page == "Project Review":
             raise
 
     if project_ready and project:
-        tab_summary, tab_workflows, tab_inspector, tab_storage, tab_legacy = st.tabs(
-            ["Software Summary", "Workflows", "Primitive Inspector", "Storage", "Legacy Data"]
+        project_review_section = st.radio(
+            "Project review section",
+            ["Software Summary", "Workflows", "Primitive Inspector", "Storage"],
+            horizontal=True,
+            key="project_review_section",
+            label_visibility="collapsed",
         )
-        with tab_summary:
+        if project_review_section == "Software Summary":
             business_flows = load_business_flow_rows(project["project_id"])
             storage = load_storage_summary(project["project_id"])
             c1, c2 = st.columns([1.25, 1])
@@ -2101,7 +2801,7 @@ if page == "Project Review":
                 display_table(load_project_relationship_counts(project["project_id"]), height=220)
                 st.markdown("### Storage Signals")
                 display_table(storage, height=180)
-        with tab_workflows:
+        elif project_review_section == "Workflows":
             business_flows = load_business_flow_rows(project["project_id"])
             file_evidence = load_project_workflow_rows(project["project_id"])
             if business_flows.empty:
@@ -2134,7 +2834,7 @@ if page == "Project Review":
                     rows = file_evidence.copy()
                     rows["pipeline"] = rows.apply(workflow_sentence, axis=1)
                     display_table(rows[["file", "workflow_type", "pipeline"]], height=380)
-        with tab_inspector:
+        elif project_review_section == "Primitive Inspector":
             nodes = load_code_nodes(project["project_id"])
             if nodes.empty:
                 st.info("No primitives available.")
@@ -2162,7 +2862,7 @@ if page == "Project Review":
                     st.success(primitive.get("stakeholder_description") or "Stakeholder description is not available yet.")
                 st.markdown(f"**Source path:** `{primitive['source_path']}`")
                 st.markdown(f"**Graph ID:** `{primitive['id']}`")
-        with tab_storage:
+        elif project_review_section == "Storage":
             storage = load_storage_summary(project["project_id"])
             st.markdown("### Detected Data Storage")
             if storage.empty:
@@ -2193,29 +2893,6 @@ if page == "Project Review":
                 "Agent proposes reviewable change",
                 "Human approves or rejects",
             ])
-        with tab_legacy:
-            st.caption("Existing seeded/demo graph data remains visible here for migration context only.")
-            cols = st.columns(6)
-            cols[0].metric("Companies", overview.get("companies", 0))
-            cols[1].metric("Mentors", overview.get("mentors", 0))
-            cols[2].metric("Flows", overview.get("flows", 0))
-            cols[3].metric("Servers", overview.get("servers", 0))
-            cols[4].metric("Avg Score", overview.get("avg_match_score", 0))
-            cols[5].metric("Pending", overview.get("proposed", 0))
-            display_table(load_label_counts(), height=300)
-            legacy_scope = st.radio(
-                "Legacy graph scope",
-                [
-                    "Dual graph",
-                    "Graph A: History",
-                    "Legacy Graph B: Flow Runtime",
-                    "Bridge: Execution traces",
-                ],
-                horizontal=True,
-                key="project_review_legacy_graph_scope",
-            )
-            legacy_payload = load_legacy_graph_payload(120, legacy_scope)
-            components.html(graph_html(legacy_payload), height=560)
 
 elif page == "Database Review":
     st.subheader("Current Database Review")
@@ -2339,11 +3016,69 @@ elif page == "Graph Display":
     st.markdown(graph_legend_html(), unsafe_allow_html=True)
     st.markdown(
         "<div class='graph-tip'>Click any node to inspect details. "
-        "The Workflow Pipeline scope shows inferred BusinessFlow and FlowStep chains from static analysis.</div>",
+        "The Workflow Pipeline scope shows inferred BusinessFlow and FlowStep chains from static analysis. "
+        "Approved sandbox optimizations are shown in red and mean approved proposal only, not source-code implementation.</div>",
         unsafe_allow_html=True,
     )
     active_node_ids = st.session_state.get("agent_active_nodes", [])
-    components.html(graph_html(payload, agent_active_ids=active_node_ids), height=730)
+    components.html(graph_html(payload, agent_active_ids=active_node_ids, scope=graph_scope), height=730)
+
+    # ── Active optimized flows panel ──────────────────────────────────────────
+    # Shows every agent-approved flow that was overlaid on the graph above.
+    # The dashed red edge in the graph = APPROVED_SANDBOX_OPTIMIZATION relationship.
+    try:
+        _opt_flows = run_read(
+            f"""
+            MATCH (f:Flow)
+            WHERE f.project_id = {json.dumps(project['project_id'])}
+              AND f.status IN ['active','approved']
+              AND f.business_flow_id IS NOT NULL
+            OPTIONAL MATCH (f)-[:USES]->(sk:Skill)
+            OPTIONAL MATCH (f)-[:READS_FROM]->(cn:Connector)
+            OPTIONAL MATCH (f)-[:RUNS_ON]->(sv:Server)
+            RETURN f.id AS id,
+                   coalesce(f.name,f.id) AS name,
+                   f.status AS status,
+                   f.avg_outcome_score AS score,
+                   f.justification AS justification,
+                   f.business_flow_id AS replaces,
+                   collect(DISTINCT sk.name) AS skills,
+                   cn.name AS connector,
+                   sv.name AS server
+            ORDER BY f.id DESC LIMIT 10
+            """
+        )
+        if _opt_flows:
+            st.markdown("---")
+            st.markdown(
+                "<span style='background:rgba(192,24,24,.15);border:1px solid rgba(192,24,24,.5);"
+                "border-radius:6px;padding:4px 10px;font-size:13px;font-weight:700;color:#e07878'>"
+                f"⬡ {len(_opt_flows)} active optimization flow(s) — shown as dashed red edges above"
+                "</span>",
+                unsafe_allow_html=True,
+            )
+            for _of in _opt_flows:
+                with st.expander(
+                    f"**{_of.get('name') or _of['id']}**  "
+                    f"— score {_of.get('score') or '—'}  "
+                    f"— {_of.get('status','').upper()}",
+                    expanded=(len(_opt_flows) == 1),
+                ):
+                    _oc1, _oc2, _oc3 = st.columns(3)
+                    _oc1.markdown(f"**Replaces flow:** `{_of.get('replaces') or '—'}`")
+                    _oc2.markdown(f"**Connector:** `{_of.get('connector') or 'none'}`")
+                    _oc3.markdown(f"**Server:** `{_of.get('server') or 'none'}`")
+                    if _of.get("skills"):
+                        _skills = [s for s in _of["skills"] if s]
+                        if _skills:
+                            st.markdown(
+                                "**Skills used:** " +
+                                "  ".join(f"`{s}`" for s in _skills)
+                            )
+                    if _of.get("justification"):
+                        st.info(_of["justification"])
+    except Exception:
+        pass
 
 elif page == "Real-Time Agents":
     st.subheader("Real-Time Agent Structure & Communication")
@@ -2793,6 +3528,21 @@ elif page == "Flows":
             render_flow_chips(_chain_items(payload.get("ordered_chain"), payload.get("steps")))
             if result.get("new_proposal_ids"):
                 st.success("A human-review proposal was created. No real project code was changed.")
+                latest_flows = load_flows()
+                if not latest_flows.empty:
+                    created = latest_flows[latest_flows["id"].isin(result.get("new_proposal_ids", []))]
+                    for _, proposal_row in created.iterrows():
+                        parsed_payload = parse_proposal_payload(proposal_row.get("yaml_config"))
+                        before_summary = parsed_payload.get("before_summary") or {}
+                        proposed_summary = parsed_payload.get("proposed_summary") or {}
+                        if before_summary or proposed_summary:
+                            render_human_proposal_card(
+                                title=str(proposal_row.get("name") or proposal_row.get("id")),
+                                before_summary=before_summary,
+                                proposed_summary=proposed_summary,
+                                justification=proposal_row.get("justification"),
+                                parsed_payload=parsed_payload,
+                            )
             else:
                 st.warning(result.get("failure_summary") or summarize_agent_failure(result.get("stdout", ""), result.get("exit_code")))
 
@@ -2839,6 +3589,7 @@ elif page == "Flows":
                         before_summary=before_summary,
                         proposed_summary=proposed_summary,
                         justification=row.get("justification"),
+                        parsed_payload=parsed_payload,
                     )
                 else:
                     st.markdown(f"#### {row.get('name') or row.get('id')}")
@@ -3647,63 +4398,138 @@ elif page == "History":
     tab_traces, tab_matches = st.tabs(["Execution Traces", "Matches"])
 
     with tab_traces:
-        st.caption(
-            "Every sandbox simulation logged by the agent. "
-            "Skills Applied shows which skill pipeline ran. "
-            "Baseline is the within-sample random-shuffle score the proposed flow was compared against."
-        )
         traces = load_traces()
         if traces.empty:
             st.info("No execution traces yet. Run an agent optimization to populate this table.")
         else:
-            # Derive improvement column
-            if "score" in traces.columns and "baseline_score" in traces.columns:
-                traces["improvement"] = (
-                    traces["score"].astype(float) - traces["baseline_score"].astype(float)
-                ).round(2)
+            import pandas as _pd
+            import math as _math
 
-            # Display table with key columns first
-            display_cols = [c for c in
-                ["timestamp", "flow_name", "status", "score", "baseline_score", "improvement", "skills_applied", "trace_id", "flow_id"]
-                if c in traces.columns]
-            display_table(traces[display_cols], height=420)
+            # ── derive computed columns ──────────────────────────────────────
+            def _safe_float(v):
+                try: return float(v)
+                except: return None
 
-            # Score vs baseline chart
-            chart_df = traces[["timestamp", "score", "baseline_score"]].dropna().copy()
-            if not chart_df.empty and len(chart_df) > 1:
-                st.markdown("**Score vs baseline over time**")
+            traces["score_f"]    = traces["score"].apply(_safe_float)
+            traces["baseline_f"] = traces["baseline_score"].apply(_safe_float) if "baseline_score" in traces.columns else None
+            traces["improvement"] = traces.apply(
+                lambda r: round(r["score_f"] - r["baseline_f"], 2)
+                if r["score_f"] is not None and r.get("baseline_f") is not None else None, axis=1
+            )
+            traces["improved"]   = traces["improvement"].apply(lambda v: v is not None and v > 0)
+
+            # ── summary metrics ──────────────────────────────────────────────
+            m1, m2, m3, m4, m5 = st.columns(5)
+            total  = len(traces)
+            ok     = (traces["status"].fillna("") == "completed").sum()
+            failed = total - ok
+            avg_sc = traces["score_f"].dropna().mean()
+            avg_im = traces["improvement"].dropna().mean()
+            m1.metric("Total runs",     total)
+            m2.metric("Completed",      ok,     delta=int(ok))
+            m3.metric("Failed",         failed, delta=int(-failed) if failed else None, delta_color="inverse")
+            m4.metric("Avg score",      f"{avg_sc:.2f}" if not _math.isnan(avg_sc or float('nan')) else "—")
+            m5.metric("Avg improvement",f"+{avg_im:.2f}" if avg_im and not _math.isnan(avg_im) else "—", delta_color="normal")
+
+            st.divider()
+
+            # ── score vs baseline area chart ─────────────────────────────────
+            chart_df = traces[["timestamp", "score_f", "baseline_f"]].dropna(subset=["score_f"]).copy()
+            if len(chart_df) >= 2:
                 chart_df = chart_df.sort_values("timestamp").reset_index(drop=True)
-                chart_df["timestamp"] = chart_df["timestamp"].str[:16]
-                st.line_chart(chart_df.set_index("timestamp")[["score", "baseline_score"]])
+                fallback_index = pd.Series(chart_df.index.astype(str), index=chart_df.index)
+                chart_df.index = chart_df["timestamp"].astype("string").str[:16].fillna(fallback_index)
+                chart_df = chart_df.rename(columns={"score_f": "Proposed flow", "baseline_f": "Random baseline"})
+                st.markdown("**Score vs within-sample random baseline over time**")
+                st.area_chart(
+                    chart_df[["Proposed flow", "Random baseline"]],
+                    color=["#44c29a", "#70a9ff"],
+                    height=220,
+                )
 
-            # Skill combination ranking
-            if "skills_applied" in traces.columns:
-                st.markdown("**Top skill combinations by average score**")
+            c_left, c_right = st.columns([1, 1])
+
+            # ── per-run improvement bar ──────────────────────────────────────
+            with c_left:
+                st.markdown("**Improvement per run**  \n_(proposed − baseline)_")
+                imp_df = traces[["timestamp", "improvement"]].dropna(subset=["improvement"]).copy()
+                if not imp_df.empty:
+                    imp_df = imp_df.sort_values("timestamp").tail(20).reset_index(drop=True)
+                    fallback_runs = pd.Series(imp_df.index.astype(str), index=imp_df.index)
+                    imp_df["run"] = imp_df["timestamp"].astype("string").str[5:16].fillna(fallback_runs)
+                    imp_df = imp_df.set_index("run")[["improvement"]]
+                    # Color-code using bar_chart
+                    st.bar_chart(imp_df, color=["#44c29a"], height=200)
+                else:
+                    st.caption("No improvement data yet.")
+
+            # ── skill combination ranking ────────────────────────────────────
+            with c_right:
+                st.markdown("**Skill combination ranking**  \n_(avg score × runs)_")
                 skill_rows = []
                 for _, row in traces.iterrows():
                     skills = row.get("skills_applied")
-                    score  = row.get("score")
+                    score  = row.get("score_f")
                     if skills and score is not None:
                         combo = " → ".join(skills) if isinstance(skills, list) else str(skills)
-                        try:
-                            skill_rows.append({"skills": combo, "score": float(score)})
-                        except (TypeError, ValueError):
-                            pass
+                        skill_rows.append({"pipeline": combo, "score": score})
                 if skill_rows:
-                    import pandas as _pd
                     combo_df = _pd.DataFrame(skill_rows)
                     ranking  = (
-                        combo_df.groupby("skills")["score"]
-                        .agg(["mean", "count"])
-                        .rename(columns={"mean": "avg_score", "count": "runs"})
-                        .round(2)
-                        .sort_values("avg_score", ascending=False)
+                        combo_df.groupby("pipeline")["score"]
+                        .agg(avg=("mean"), runs=("count"))
+                        .round({"avg": 2})
+                        .sort_values("avg", ascending=False)
                         .reset_index()
                     )
-                    display_table(ranking, height=260)
+                    # Render as styled rows with score bar
+                    for _, rk in ranking.iterrows():
+                        bar_pct = min(100, int(rk["avg"] / 10 * 100))
+                        bar_col = "#44c29a" if rk["avg"] >= 7 else "#d8a83f" if rk["avg"] >= 5 else "#dc6666"
+                        st.markdown(
+                            f"<div style='margin:4px 0'>"
+                            f"<div style='font-size:11px;color:#b8b09c;margin-bottom:2px'>{rk['pipeline']}</div>"
+                            f"<div style='display:flex;align-items:center;gap:8px'>"
+                            f"<div style='flex:1;height:8px;background:#2a2a22;border-radius:4px'>"
+                            f"<div style='width:{bar_pct}%;height:100%;background:{bar_col};border-radius:4px'></div>"
+                            f"</div>"
+                            f"<span style='font-size:12px;font-weight:700;color:{bar_col};min-width:32px'>{rk['avg']}</span>"
+                            f"<span style='font-size:10px;color:#b8b09c'>{int(rk['runs'])}×</span>"
+                            f"</div></div>",
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.caption("No skill data yet.")
+
+            st.divider()
+
+            # ── detailed table ───────────────────────────────────────────────
+            st.markdown("**All traces**")
+            show_cols = [c for c in ["timestamp", "flow_name", "status", "score", "baseline_score", "improvement", "skills_applied", "trace_id"] if c in traces.columns]
+            display_table(traces[show_cols], height=320)
 
     with tab_matches:
-        display_table(load_matches(), height=520)
+        matches = load_matches()
+        if matches.empty:
+            st.info("No match history yet.")
+        else:
+            import pandas as _pd2
+            import math as _math2
+
+            # Summary metrics
+            mm1, mm2, mm3 = st.columns(3)
+            scores = _pd2.to_numeric(matches.get("score", _pd2.Series()), errors="coerce").dropna()
+            mm1.metric("Total matches",   len(matches))
+            mm2.metric("Avg score",       f"{scores.mean():.2f}" if len(scores) else "—")
+            mm3.metric("High performers", int((scores >= 7).sum()) if len(scores) else 0)
+
+            if len(scores) > 2:
+                st.markdown("**Score distribution**")
+                score_bins = _pd2.cut(scores, bins=[0,4,6,8,10], labels=["<4","4-6","6-8","8-10"])
+                dist = score_bins.value_counts().sort_index()
+                st.bar_chart(dist.rename("matches"), color=["#44c29a"], height=180)
+
+            display_table(matches, height=340)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3919,3 +4745,689 @@ Be concise. Use markdown for structure. If you don't know something, say so."""
         if st.button("Clear chat", key="clear_chat_btn"):
             st.session_state["chat_history"] = []
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Flow Results — sandbox execution results for approved proposals
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Flow Results":
+    st.subheader("Flow Results")
+    st.caption(
+        "Sandbox execution results for approved optimization proposals. "
+        "Each approved flow is re-run through the skill execution engine so you can "
+        "see per-company match quality, improvement over random baseline, and which "
+        "skills produced the best outcomes."
+    )
+
+    import pandas as _pd_fr
+    import json as _json_fr
+
+    # ── load recently activated flows ─────────────────────────────────────────
+    activated = run_read(
+        "MATCH (f:Flow {status:'active'}) "
+        "RETURN f.id AS id, f.name AS name, f.yaml_config AS yaml_config, "
+        "       f.avg_outcome_score AS score, f.justification AS justification, "
+        "       f.project_id AS project_id "
+        "ORDER BY f.id DESC LIMIT 20"
+    )
+
+    if not activated:
+        st.info(
+            "No approved flows yet. Approve a proposal from the Flows page or the notification "
+            "banner — the sandbox runs automatically on approval."
+        )
+    else:
+        flow_names = [f.get("name") or f["id"] for f in activated]
+        flow_map   = {f.get("name") or f["id"]: f for f in activated}
+
+        # Show last session result first if available
+        _default_idx = 0
+        if "flow_result" in st.session_state:
+            _last_name = st.session_state["flow_result"].get("proposal_name")
+            if _last_name in flow_names:
+                _default_idx = flow_names.index(_last_name)
+
+        selected_name = st.selectbox("Select approved flow", flow_names, index=_default_idx)
+        sel_flow = flow_map[selected_name]
+
+        # Extract YAML from stored yaml_config
+        _yaml_str = ""
+        try:
+            _cfg = _json_fr.loads(sel_flow.get("yaml_config") or "{}")
+            _yaml_str = _cfg.get("yaml", "")
+        except Exception:
+            pass
+
+        # ── metrics header ─────────────────────────────────────────────────
+        mf1, mf2, mf3 = st.columns(3)
+        mf1.metric("Flow ID",    sel_flow["id"])
+        mf2.metric("Score",      sel_flow.get("score") or "—")
+        mf3.metric("Status",     "✅ Active")
+        if sel_flow.get("justification"):
+            st.info(sel_flow["justification"])
+
+        st.divider()
+
+        # ── last session result (from notification approval) ──────────────
+        _sess_result = st.session_state.get("flow_result", {})
+        if _sess_result.get("proposal_id") == sel_flow["id"]:
+            st.markdown("**Latest sandbox run result** _(from approval action)_")
+            _sr = _sess_result.get("sandbox_result", {})
+            if _sr.get("status") == "success":
+                _m = _sr.get("metrics", {})
+                sc1, sc2, sc3, sc4 = st.columns(4)
+                sc1.metric("Match score",     _m.get("match_score", "—"))
+                sc2.metric("vs baseline",     _m.get("sandbox_baseline_score", "—"))
+                sc3.metric("Sample size",     _m.get("sample_size", "—"))
+                sc4.metric("Latency ms",      _m.get("latency_ms", "—"))
+
+                _traces = _sr.get("traces", [])
+                if _traces:
+                    st.markdown("**Per-company match breakdown**")
+                    _tr_df = _pd_fr.DataFrame([{
+                        "Company":    t.get("company_id"),
+                        "Mentor":     t.get("mentor_id"),
+                        "Score":      t.get("simulated_outcome_score"),
+                        "Skills":     " → ".join(t.get("skills_applied", [])) if isinstance(t.get("skills_applied"), list) else str(t.get("skills_applied", "")),
+                        "Status":     t.get("status"),
+                    } for t in _traces])
+                    # Color score column
+                    if "Score" in _tr_df.columns:
+                        st.dataframe(
+                            _tr_df,
+                            column_config={
+                                "Score": st.column_config.ProgressColumn(
+                                    "Score", min_value=0, max_value=10, format="%.2f"
+                                )
+                            },
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                    else:
+                        display_table(_tr_df)
+            else:
+                st.error(f"Sandbox failed: {_sr.get('error_log', 'unknown error')}")
+            st.divider()
+
+        # ── re-run sandbox on demand ───────────────────────────────────────
+        st.markdown("**Run simulation again**")
+        col_run, col_mode = st.columns([2, 1])
+        with col_mode:
+            _mode = st.selectbox("Mode", ["mock", "local"], key="fr_sandbox_mode")
+        with col_run:
+            if st.button("▶ Run Sandbox", type="primary", key="fr_run_sandbox", use_container_width=True):
+                if not _yaml_str:
+                    st.warning("No flow YAML stored for this proposal. The sandbox cannot run without it.")
+                else:
+                    with st.spinner("Running sandbox simulation…"):
+                        _result = run_sandbox_from_ui(_yaml_str, _mode)
+                    st.session_state["flow_result"] = {
+                        "proposal_id":   sel_flow["id"],
+                        "proposal_name": selected_name,
+                        "sandbox_result": _result,
+                        "flow_yaml": _yaml_str,
+                    }
+                    st.rerun()
+
+        # ── flow YAML viewer ───────────────────────────────────────────────
+        if _yaml_str:
+            with st.expander("View flow YAML"):
+                st.code(_yaml_str, language="yaml")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: System Map
+# Live architecture analysis: database state, external services, flow topology,
+# agent tool wiring. No generic diagrams — only what is real and connected now.
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "System Map":
+    st.subheader("System Map")
+    st.caption(
+        "Live analysis of every connected component: database schema & counts, "
+        "external service status, active flow topology, and agent-to-tool wiring. "
+        "All data is read directly from Neo4j and the runtime environment."
+    )
+
+    import pandas as _pd_sm
+
+    def _sm_section(title: str, icon: str = "") -> None:
+        st.markdown(f"### {icon} {title}" if icon else f"### {title}")
+
+    def _sm_badge(label: str, value: str, ok: bool | None = None) -> str:
+        color = ("#44c29a" if ok else "#dc6666") if ok is not None else "#b8b09c"
+        bg    = ("rgba(68,194,154,.12)" if ok else "rgba(220,102,102,.12)") if ok is not None else "rgba(255,255,255,.06)"
+        return (
+            f"<span style='display:inline-block;background:{bg};border:1px solid {color};"
+            f"border-radius:6px;padding:4px 10px;margin:3px;font-size:12px'>"
+            f"<b style='color:{color}'>{label}</b> "
+            f"<span style='color:#ded6c4'>{value}</span></span>"
+        )
+
+    # ── 1. Database layer ─────────────────────────────────────────────────────
+    _sm_section("Database", "🗄️")
+    st.caption("Neo4j AuraDB — the single persistence layer for both Graph A (historical) and Graph B (blueprint).")
+
+    try:
+        _node_counts = run_read(
+            "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt "
+            "ORDER BY cnt DESC LIMIT 30"
+        )
+        _rel_counts = run_read(
+            "MATCH ()-[r]->() RETURN type(r) AS rel, count(r) AS cnt "
+            "ORDER BY cnt DESC LIMIT 20"
+        )
+        _total_nodes = sum(r["cnt"] for r in _node_counts)
+        _total_rels  = sum(r["cnt"] for r in _rel_counts)
+
+        _dc1, _dc2, _dc3 = st.columns(3)
+        _dc1.metric("Total nodes",         _total_nodes)
+        _dc2.metric("Total relationships", _total_rels)
+        _dc3.metric("Node types",          len(_node_counts))
+
+        _tab_a, _tab_b, _tab_c = st.tabs(["Graph A — Historical", "Graph B — Blueprint", "Schema counts"])
+
+        _GRAPH_A = {"Company","Mentor","Programme","Outcome","ExecutionTrace","LearningEvent","SkillProposal"}
+        _GRAPH_B = {"Flow","Skill","Connector","Server","Pipeline"}
+        _CODE    = {"Project","Repository","File","Route","Service","Function","DatabaseModel","DataStore","Entity","BusinessFlow","FlowStep","Integration","Artifact","Risk","Workflow"}
+
+        with _tab_a:
+            st.caption("Historical match data and agent learning events.")
+            _a_rows = [r for r in _node_counts if r["label"] in _GRAPH_A]
+            if _a_rows:
+                _a_df = _pd_sm.DataFrame(_a_rows).rename(columns={"label":"Node type","cnt":"Count"})
+                _a_df["% of total"] = (_a_df["Count"] / max(_total_nodes,1) * 100).round(1)
+                st.dataframe(_a_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No Graph A nodes yet. Seed data with ecolink-graph/ingest.py.")
+
+        with _tab_b:
+            st.caption("Live system blueprint: active flows, skills, connectors, and servers.")
+            _b_rows = [r for r in _node_counts if r["label"] in _GRAPH_B]
+            if _b_rows:
+                _b_df = _pd_sm.DataFrame(_b_rows).rename(columns={"label":"Node type","cnt":"Count"})
+                _b_df["% of total"] = (_b_df["Count"] / max(_total_nodes,1) * 100).round(1)
+                st.dataframe(_b_df, hide_index=True, use_container_width=True)
+            else:
+                st.info("No Graph B nodes yet.")
+
+        with _tab_c:
+            _sc_df = _pd_sm.DataFrame(_node_counts).rename(columns={"label":"Node type","cnt":"Nodes"})
+            _sr_df = _pd_sm.DataFrame(_rel_counts).rename(columns={"rel":"Relationship","cnt":"Count"})
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.markdown("**Node types**")
+                st.dataframe(_sc_df, hide_index=True, use_container_width=True, height=320)
+            with _c2:
+                st.markdown("**Relationship types**")
+                st.dataframe(_sr_df, hide_index=True, use_container_width=True, height=320)
+
+    except Exception as _e:
+        st.error(f"Database query failed: {_e}")
+
+    st.divider()
+
+    # ── 2. External services ──────────────────────────────────────────────────
+    _sm_section("External Services", "🔌")
+    st.caption("Services wired into the platform. Status is derived from environment variables — not a live ping.")
+
+    _svc_rows = []
+
+    # Neo4j
+    _neo_uri = os.environ.get("NEO4J_URI","")
+    _svc_rows.append({"Service":"Neo4j AuraDB","Config":_neo_uri[:60] or "not set","Role":"Dual-graph persistence","Status":"✅ connected" if not neo4j_error else "❌ error"})
+
+    # Gemini
+    _gkey = os.environ.get("GOOGLE_API_KEY","")
+    _svc_rows.append({"Service":"Google Gemini API","Config":f"key {'set' if _gkey else 'NOT SET'} ({os.environ.get('GOOGLE_API_KEY','')[:8]}…)" if _gkey else "not configured","Role":"LLM for all 6 agent nodes","Status":"✅ key present" if _gkey else "❌ not configured"})
+
+    # Sandbox
+    _mock = os.environ.get("SANDBOX_MOCK","true").lower() == "true"
+    _mode = os.environ.get("SANDBOX_MODE","local")
+    if _mock:
+        _svc_rows.append({"Service":"Sandbox (Mock)","Config":"SANDBOX_MOCK=true","Role":"Deterministic skill scoring — no subprocess","Status":"⚠️ mock mode"})
+    elif _mode == "cloudrun":
+        _gcp = os.environ.get("GOOGLE_CLOUD_PROJECT","")
+        _job = os.environ.get("SANDBOX_JOB_NAME","")
+        _svc_rows.append({"Service":"GCP Cloud Run","Config":f"project={_gcp}  job={_job}","Role":"Remote sandbox execution","Status":"✅ configured" if _gcp and _job else "❌ not configured"})
+    else:
+        _svc_rows.append({"Service":"Sandbox (Local subprocess)","Config":"SANDBOX_MODE=local","Role":"sandbox_task.py subprocess","Status":"✅ local mode"})
+
+    # Realtime event server
+    try:
+        _rs = realtime_status()
+        _svc_rows.append({"Service":"FastAPI Event Server :8765","Config":"src/realtime/server.py","Role":"WebSocket broadcast to Live Agent Comms","Status":"✅ connected" if _rs["connected"] else "⚠️ offline"})
+    except Exception:
+        _svc_rows.append({"Service":"FastAPI Event Server :8765","Config":"src/realtime/server.py","Role":"WebSocket broadcast","Status":"⚠️ unknown"})
+
+    # GCP Logging (only if Cloud Run)
+    if _mode == "cloudrun":
+        _svc_rows.append({"Service":"GCP Cloud Logging","Config":f"project={os.environ.get('GOOGLE_CLOUD_PROJECT','')}","Role":"Polls sandbox_task.py stdout traces","Status":"✅ configured" if os.environ.get("GOOGLE_CLOUD_PROJECT") else "❌ not configured"})
+
+    _svc_df = _pd_sm.DataFrame(_svc_rows)
+    st.dataframe(_svc_df, hide_index=True, use_container_width=True,
+        column_config={"Status": st.column_config.TextColumn("Status", width="small")})
+
+    st.divider()
+
+    # ── 3. Active flow topology ───────────────────────────────────────────────
+    _sm_section("Active Flow Topology", "⚡")
+    st.caption(
+        "Every active flow in Graph B with its skill pipeline, connector, and server. "
+        "This is what the sandbox actually executes when a proposal is run."
+    )
+    try:
+        _active_flows = run_read(
+            """
+            MATCH (f:Flow {status:'active'})
+            OPTIONAL MATCH (f)-[:USES]->(sk:Skill)
+            OPTIONAL MATCH (f)-[:READS_FROM]->(cn:Connector)
+            OPTIONAL MATCH (f)-[:RUNS_ON]->(sv:Server)
+            RETURN f.id AS flow_id,
+                   coalesce(f.name,f.id) AS flow_name,
+                   f.avg_outcome_score AS score,
+                   f.justification AS justification,
+                   collect(DISTINCT sk.id) AS skill_ids,
+                   collect(DISTINCT sk.name) AS skill_names,
+                   cn.id AS connector_id,
+                   cn.type AS connector_type,
+                   sv.id AS server_id,
+                   sv.current_load AS server_load,
+                   last(sv.error_rate_history) AS server_error_rate
+            ORDER BY f.id DESC LIMIT 20
+            """
+        )
+        if not _active_flows:
+            st.info("No active flows in Graph B. Approve an optimization to activate one.")
+        else:
+            for _af in _active_flows:
+                _skill_str = " → ".join(s for s in (_af.get("skill_names") or []) if s) or "none"
+                _srv_load  = _af.get("server_load")
+                _srv_err   = _af.get("server_error_rate")
+                _srv_ok    = (_srv_load or 0) < 80 and (_srv_err or 0) < 0.03
+
+                with st.expander(
+                    f"**{_af['flow_name']}**  ·  skills: {_skill_str}  ·  score: {_af.get('score') or '—'}",
+                    expanded=False,
+                ):
+                    _fc1, _fc2 = st.columns(2)
+                    with _fc1:
+                        st.markdown(f"**Flow ID:** `{_af['flow_id']}`")
+                        st.markdown(f"**Skill pipeline:** {_skill_str or 'none'}")
+                        st.markdown(f"**Connector:** `{_af.get('connector_id') or 'none'}` ({_af.get('connector_type') or '—'})")
+                    with _fc2:
+                        st.markdown(
+                            f"**Server:** `{_af.get('server_id') or 'none'}`  "
+                            + ("✅" if _srv_ok else "⚠️")
+                        )
+                        if _srv_load is not None:
+                            st.progress(min(int(_srv_load),100), text=f"Load {_srv_load}%")
+                        if _af.get("justification"):
+                            st.caption(_af["justification"])
+    except Exception as _fe:
+        st.warning(f"Could not load flows: {_fe}")
+
+    st.divider()
+
+    # ── 4. Integration connections (from codebase analysis) ───────────────────
+    _sm_section("External Integrations (from codebase)", "🔗")
+    st.caption(
+        "Integrations detected by static analysis of the connected project's source code. "
+        "These are the real third-party services your application uses."
+    )
+    try:
+        _integ = run_read(
+            f"""
+            MATCH (i:Integration)
+            WHERE i.project_id = {json.dumps(project['project_id'])}
+            RETURN i.id AS id,
+                   coalesce(i.name,i.id) AS name,
+                   i.integration_type AS type,
+                   i.source_path AS source_path,
+                   i.confidence AS confidence
+            ORDER BY confidence DESC, name LIMIT 40
+            """
+        )
+        if _integ:
+            _int_df = _pd_sm.DataFrame(_integ).rename(columns={
+                "name":"Integration","type":"Type","source_path":"Detected in file","confidence":"Confidence"
+            })
+            _int_df = _int_df[["Integration","Type","Detected in file","Confidence"]].copy()
+            st.dataframe(
+                _int_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Confidence": st.column_config.ProgressColumn("Confidence", min_value=0, max_value=1, format="%.2f")
+                },
+            )
+        else:
+            st.info("No Integration nodes found. Re-run codebase analysis on a project with third-party API calls.")
+    except Exception as _ie:
+        st.caption(f"Integration query: {_ie}")
+
+    st.divider()
+
+    # ── 5. Agent → tool wiring ────────────────────────────────────────────────
+    _sm_section("Agent → Tool Wiring", "🤖")
+    st.caption(
+        "Which agent node calls which LangChain tools, and which external service each tool touches. "
+        "Static mapping derived from the agent source code."
+    )
+    _wiring = [
+        {"Agent":"Planner",        "Tool / Function":"query_graph",            "External service":"Neo4j AuraDB",         "Direction":"READ"},
+        {"Agent":"Planner",        "Tool / Function":"query_graph_semantic",    "External service":"Neo4j vector index",   "Direction":"READ"},
+        {"Agent":"Planner",        "Tool / Function":"retrieve_context()",      "External service":"Neo4j AuraDB",         "Direction":"READ"},
+        {"Agent":"Planner",        "Tool / Function":"ChatGoogleGenerativeAI",  "External service":"Gemini API",           "Direction":"READ"},
+        {"Agent":"Generator",      "Tool / Function":"query_graph",             "External service":"Neo4j AuraDB",         "Direction":"READ"},
+        {"Agent":"Generator",      "Tool / Function":"get_infrastructure_status","External service":"Neo4j AuraDB",        "Direction":"READ"},
+        {"Agent":"Generator",      "Tool / Function":"ChatGoogleGenerativeAI",  "External service":"Gemini API",           "Direction":"READ"},
+        {"Agent":"Generator",      "Tool / Function":"create_skill_proposal()", "External service":"Neo4j AuraDB",         "Direction":"WRITE"},
+        {"Agent":"Critic",         "Tool / Function":"query_graph",             "External service":"Neo4j AuraDB",         "Direction":"READ"},
+        {"Agent":"Critic",         "Tool / Function":"get_infrastructure_status","External service":"Neo4j AuraDB",        "Direction":"READ"},
+        {"Agent":"Critic",         "Tool / Function":"ChatGoogleGenerativeAI",  "External service":"Gemini API",           "Direction":"READ"},
+        {"Agent":"Simulator",      "Tool / Function":"simulate_flow",           "External service":"sandbox_task.py / GCP","Direction":"EXEC"},
+        {"Agent":"Simulator",      "Tool / Function":"log_execution_trace()",   "External service":"Neo4j AuraDB",         "Direction":"WRITE"},
+        {"Agent":"Evaluator",      "Tool / Function":"propose_change",          "External service":"Neo4j AuraDB",         "Direction":"WRITE"},
+        {"Agent":"Evaluator",      "Tool / Function":"ChatGoogleGenerativeAI",  "External service":"Gemini API",           "Direction":"READ"},
+        {"Agent":"Human Approval", "Tool / Function":"activate_proposal()",     "External service":"Neo4j AuraDB",         "Direction":"WRITE"},
+        {"Agent":"Human Approval", "Tool / Function":"log_learning_event()",    "External service":"Neo4j AuraDB",         "Direction":"WRITE"},
+        {"Agent":"Human Approval", "Tool / Function":"interrupt()",             "External service":"LangGraph checkpointer","Direction":"STATE"},
+    ]
+    _wd = _pd_sm.DataFrame(_wiring)
+    _dir_map = {"READ":"🔵","WRITE":"🟠","EXEC":"🟢","STATE":"🟣"}
+    _wd["Direction"] = _wd["Direction"].apply(lambda d: f"{_dir_map.get(d,'')} {d}")
+    st.dataframe(_wd, hide_index=True, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page: Sandbox
+# Full sandbox environment: configuration, run, compare, trace history.
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "Sandbox":
+    import json as _json_sb
+    import pandas as _pd_sb
+
+    st.subheader("Sandbox")
+    st.caption(
+        "The secure sandbox executes proposed flows against a snapshot of real "
+        "companies and mentors. Skills run in sequence — each step scores "
+        "candidate pairs — producing a per-company trace and an average match score."
+    )
+
+    # ── Configuration strip ───────────────────────────────────────────────────
+    _mock_on = os.environ.get("SANDBOX_MOCK", "true").lower() == "true"
+    _sb_mode = os.environ.get("SANDBOX_MODE", "local")
+    _gcp_proj = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    _sb_job   = os.environ.get("SANDBOX_JOB_NAME", "")
+
+    _cfg_col1, _cfg_col2, _cfg_col3, _cfg_col4 = st.columns(4)
+    _cfg_col1.metric("Mode", "Mock" if _mock_on else _sb_mode.title())
+    _cfg_col2.metric("sandbox_task.py", "subprocess" if not _mock_on and _sb_mode == "local" else ("Cloud Run" if _sb_mode == "cloudrun" else "skipped"))
+    _cfg_col3.metric("GCP Project", _gcp_proj[:20] or "not set")
+    _cfg_col4.metric("Cloud Run Job", _sb_job or "not set")
+
+    if _mock_on:
+        st.info(
+            "**Mock mode is ON** (`SANDBOX_MOCK=true`). Scores are derived deterministically "
+            "from skill names — no subprocess is launched. Set `SANDBOX_MOCK=false` in `.env` "
+            "to run the real skill execution engine.",
+            icon="⚠️",
+        )
+
+    st.divider()
+
+    # ── Two tabs: Run | History ───────────────────────────────────────────────
+    _tab_run, _tab_hist, _tab_snap = st.tabs(["▶ Run", "📋 History", "📦 Snapshot"])
+
+    # ── TAB: Run ─────────────────────────────────────────────────────────────
+    with _tab_run:
+        st.caption(
+            "Paste any flow YAML or load a preset. The skill pipeline is executed "
+            "against a live snapshot of companies and mentors from Neo4j."
+        )
+
+        # ── Preset loader ─────────────────────────────────────────────────
+        _preset_opts = ["Custom YAML", "Default (semantic + filter)", "Random baseline only", "Full pipeline"]
+        _PRESETS = {
+            "Default (semantic + filter)": """flow_id: flow_test_semantic
+description: Semantic similarity + industry filter
+runs_on: srv_002
+steps:
+  - id: s1
+    skill: filter_by_industry_exact
+  - id: s2
+    skill: semantic_similarity
+""",
+            "Random baseline only": """flow_id: flow_test_random_baseline
+description: Random baseline — no skill intelligence
+runs_on: srv_002
+steps:
+  - id: s1
+    skill: random_shuffle
+""",
+            "Full pipeline": """flow_id: flow_test_full_pipeline
+description: Complete skill stack
+runs_on: srv_002
+steps:
+  - id: s1
+    skill: filter_by_industry_exact
+  - id: s2
+    skill: semantic_similarity
+  - id: s3
+    skill: pain_point_match
+  - id: s4
+    skill: score_by_expertise_depth
+""",
+        }
+
+        # Load from approved proposals
+        try:
+            _prop_rows = run_read(
+                "MATCH (f:Flow {status:'active'}) "
+                "RETURN coalesce(f.name,f.id) AS name, f.yaml_config AS cfg "
+                "ORDER BY f.id DESC LIMIT 10"
+            )
+            for _pr in _prop_rows:
+                try:
+                    _cy = _json_sb.loads(_pr["cfg"] or "{}")
+                    _fy = _cy.get("yaml", "")
+                    if _fy:
+                        _PRESETS[f"Active: {_pr['name']}"] = _fy
+                        _preset_opts.append(f"Active: {_pr['name']}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        _sel_preset = st.selectbox("Load preset", _preset_opts, key="sb_preset")
+        _init_yaml = _PRESETS.get(_sel_preset, default_sandbox_flow())
+
+        _col_yaml, _col_opts = st.columns([3, 1])
+        with _col_yaml:
+            _flow_yaml = st.text_area(
+                "Flow YAML",
+                value=st.session_state.get("sb_last_yaml", _init_yaml),
+                height=280,
+                key="sb_flow_yaml",
+            )
+        with _col_opts:
+            st.markdown("**Execution mode**")
+            _run_mode = st.radio("", ["mock", "local"], key="sb_run_mode",
+                help="mock = deterministic skill scoring, local = real sandbox_task.py subprocess")
+            _show_raw = st.checkbox("Show raw JSON", key="sb_show_raw")
+
+        if st.button("▶ Run Sandbox", type="primary", key="sb_run_btn", use_container_width=True):
+            st.session_state["sb_last_yaml"] = _flow_yaml
+            with st.spinner("Running sandbox…"):
+                _sb_result = run_sandbox_from_ui(_flow_yaml, _run_mode)
+            st.session_state["sb_last_result"] = _sb_result
+            st.rerun()
+
+        # ── Result display ────────────────────────────────────────────────
+        _last = st.session_state.get("sb_last_result")
+        if _last:
+            st.markdown("---")
+            st.markdown("### Result")
+            _status = _last.get("status", "unknown")
+            _metrics = _last.get("metrics", {}) or {}
+            _traces  = _last.get("traces", []) or []
+
+            # Headline metrics
+            def _sandbox_float(value: Any) -> float | None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            _rm1, _rm2, _rm3, _rm4, _rm5 = st.columns(5)
+            _match  = _metrics.get("match_score")
+            _base   = _metrics.get("sandbox_baseline_score")
+            _match_f = _sandbox_float(_match)
+            _base_f = _sandbox_float(_base)
+            _improv = round(_match_f - _base_f, 2) if _match_f is not None and _base_f is not None else None
+            _rm1.metric("Status",    _status.upper(), delta="pass" if _status == "success" else None, delta_color="normal")
+            _rm2.metric("Match score",    _match if _match is not None else "—")
+            _rm3.metric("Baseline (random)", _base if _base is not None else "—")
+            _rm4.metric("Improvement", f"+{_improv}" if _improv is not None and _improv >= 0 else str(_improv) if _improv is not None else "—",
+                delta_color="normal" if _improv and _improv > 0 else "inverse")
+            _rm5.metric("Sample size", _metrics.get("sample_size", len(_traces)))
+
+            if _last.get("error_log"):
+                st.error(_last["error_log"])
+
+            # Score bar
+            if _match_f is not None and _base_f is not None:
+                _sb_chart = _pd_sb.DataFrame({
+                    "Flow score":    [_match_f],
+                    "Random baseline": [_base_f],
+                }).T.rename(columns={0: "Score"})
+                st.bar_chart(_sb_chart, color=["#44c29a"], height=160)
+
+            # Per-company trace breakdown
+            if _traces:
+                st.markdown("**Per-company match breakdown**")
+                _tr_df = _pd_sb.DataFrame([{
+                    "Company":   t.get("company_id", "?"),
+                    "Mentor":    t.get("mentor_id",  "?"),
+                    "Score":     t.get("simulated_outcome_score"),
+                    "Skills":    " → ".join(t.get("skills_applied", [])) if isinstance(t.get("skills_applied"), list) else str(t.get("skills_applied", "")),
+                    "Status":    t.get("status", ""),
+                } for t in _traces])
+                st.dataframe(
+                    _tr_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0, max_value=10, format="%.2f"
+                        )
+                    },
+                )
+
+            # Skill contribution per company (if multiple skills)
+            _all_skills = set()
+            for _t in _traces:
+                for _s in (_t.get("skills_applied") or []):
+                    _all_skills.add(_s)
+            if len(_all_skills) > 1:
+                st.caption(
+                    f"**Skills applied:** {' → '.join(sorted(_all_skills))}. "
+                    "Each skill transforms the candidate scores in sequence."
+                )
+
+            if _show_raw:
+                st.json(_last)
+
+    # ── TAB: History ─────────────────────────────────────────────────────────
+    with _tab_hist:
+        st.caption(
+            "Every sandbox execution logged to Neo4j as an ExecutionTrace node. "
+            "Score = proposed flow average. Baseline = random-shuffle score on the same snapshot."
+        )
+        _traces_df = load_traces()
+        if _traces_df.empty:
+            st.info("No sandbox history yet. Run the agent or use the Run tab to create traces.")
+        else:
+            import math as _mh
+
+            def _safe_f(v):
+                try: return float(v)
+                except: return None
+
+            _traces_df["score_f"]    = _traces_df["score"].apply(_safe_f)
+            _traces_df["baseline_f"] = _traces_df.get("baseline_score", _pd_sb.Series()).apply(_safe_f)
+            _traces_df["delta"]      = _traces_df.apply(
+                lambda r: round(r["score_f"] - r["baseline_f"], 2)
+                if r.get("score_f") is not None and r.get("baseline_f") is not None else None,
+                axis=1,
+            )
+
+            # Summary row
+            _th1, _th2, _th3, _th4 = st.columns(4)
+            _scores = _traces_df["score_f"].dropna()
+            _deltas = _traces_df["delta"].dropna()
+            _th1.metric("Total runs",      len(_traces_df))
+            _th2.metric("Avg score",        f"{_scores.mean():.2f}" if len(_scores) else "—")
+            _th3.metric("Best score",       f"{_scores.max():.2f}" if len(_scores) else "—")
+            _th4.metric("Avg improvement",  f"+{_deltas.mean():.2f}" if len(_deltas) else "—")
+
+            # Sparkline
+            if len(_scores) >= 3:
+                _sc = _traces_df[["timestamp","score_f","baseline_f"]].dropna(subset=["score_f"]).sort_values("timestamp").tail(30)
+                _sc = _sc.rename(columns={"score_f":"Proposed","baseline_f":"Baseline"})
+                _fallback_runs = pd.Series(
+                    _sc.reset_index(drop=True).index.astype(str),
+                    index=_sc.index,
+                )
+                _sc["run"] = _sc["timestamp"].astype("string").str[5:16].fillna(_fallback_runs)
+                st.line_chart(_sc.set_index("run")[["Proposed","Baseline"]], height=160, color=["#44c29a","#70a9ff"])
+
+            # Table with skills column highlighted
+            _show_cols = [c for c in ["timestamp","flow_name","status","score","baseline_score","delta","skills_applied","trace_id"] if c in _traces_df.columns]
+            st.dataframe(
+                _traces_df[_show_cols],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "score": st.column_config.ProgressColumn("score", min_value=0, max_value=10, format="%.2f"),
+                    "baseline_score": st.column_config.NumberColumn("baseline", format="%.2f"),
+                    "delta": st.column_config.NumberColumn("Δ", format="%.2f"),
+                },
+                height=360,
+            )
+
+    # ── TAB: Snapshot ─────────────────────────────────────────────────────────
+    with _tab_snap:
+        st.caption(
+            "The data snapshot the sandbox uses: companies and mentors queried from "
+            "Neo4j Graph A. Secret fields (passwords, tokens, keys) are stripped before "
+            "the snapshot reaches the sandbox subprocess."
+        )
+        try:
+            _snap_companies = run_read(
+                "MATCH (c:Company) "
+                "RETURN c.id AS id, c.name AS name, c.industry AS industry, "
+                "       c.description AS description, c.pain_points AS pain_points "
+                "LIMIT 20"
+            )
+            _snap_mentors = run_read(
+                "MATCH (m:Mentor) "
+                "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise, "
+                "       m.description AS description "
+                "LIMIT 15"
+            )
+            _sc1, _sc2 = st.columns(2)
+            with _sc1:
+                st.markdown(f"**Companies** ({len(_snap_companies)} in snapshot)")
+                if _snap_companies:
+                    st.dataframe(_pd_sb.DataFrame(_snap_companies), hide_index=True, use_container_width=True, height=280)
+                else:
+                    st.info("No Company nodes. Run `ecolink-graph/ingest.py` to seed data.")
+            with _sc2:
+                st.markdown(f"**Mentors** ({len(_snap_mentors)} in snapshot)")
+                if _snap_mentors:
+                    st.dataframe(_pd_sb.DataFrame(_snap_mentors), hide_index=True, use_container_width=True, height=280)
+                else:
+                    st.info("No Mentor nodes. Run `ecolink-graph/ingest.py` to seed data.")
+        except Exception as _sne:
+            st.error(f"Could not load snapshot data: {_sne}")
