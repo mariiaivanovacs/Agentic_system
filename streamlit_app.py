@@ -2414,46 +2414,27 @@ def graph_html(
     edges = [styled_edge(edge) for edge in payload["edges"]]
     physics_options: dict[str, Any] | bool
     layout_options: dict[str, Any]
+    physics_options = {
+        "solver": "forceAtlas2Based",
+        "forceAtlas2Based": {
+            "gravitationalConstant": -60,
+            "centralGravity": 0.008,
+            "springLength": 170,
+            "springConstant": 0.05,
+            "damping": 0.55,
+        },
+        "stabilization": {"iterations": 220, "updateInterval": 20},
+        "adaptiveTimestep": True,
+    }
+    layout_options = {"improvedLayout": True}
+    edge_smooth: dict[str, Any] | bool = {"type": "cubicBezier", "forceDirection": "none", "roundness": 0.45}
     if is_structured_diagram:
-        physics_options = False
-        layout_options = {
-            "hierarchical": {
-                "enabled": True,
-                "direction": "LR",
-                "sortMethod": "directed",
-                "levelSeparation": 280 if scope == "Workflow Pipeline" else 260,
-                "nodeSpacing": 180,
-                "treeSpacing": 260,
-                "blockShifting": True,
-                "edgeMinimization": True,
-                "parentCentralization": False,
-            }
-        }
-        edge_smooth: dict[str, Any] | bool = {
-            "type": "cubicBezier",
-            "forceDirection": "horizontal",
-            "roundness": 0.35,
-        }
         graph_caption = (
             "Workflow lanes: project -> business flow -> implementation step -> dependency -> risk -> approved optimization"
             if scope == "Workflow Pipeline"
             else "Risk impact map: repository and files flow toward storage, integrations, and detected risks"
         )
     else:
-        physics_options = {
-            "solver": "forceAtlas2Based",
-            "forceAtlas2Based": {
-                "gravitationalConstant": -60,
-                "centralGravity": 0.008,
-                "springLength": 170,
-                "springConstant": 0.05,
-                "damping": 0.55,
-            },
-            "stabilization": {"iterations": 220, "updateInterval": 20},
-            "adaptiveTimestep": True,
-        }
-        layout_options = {"improvedLayout": True}
-        edge_smooth = {"type": "cubicBezier", "forceDirection": "none", "roundness": 0.45}
         graph_caption = "Exploratory force layout for the full connected project graph"
     focus_groups = (
         ("BusinessFlow", "Workflow", "Project")
