@@ -35,6 +35,7 @@ from src.agents.tools import (
     get_infrastructure_status,
     log_execution_trace,
     propose_change,
+    propose_skill_update,
     query_graph,
     query_graph_semantic,
     reject_proposal,
@@ -718,6 +719,27 @@ Explain your reasoning in the `reason` field."""
         updates["messages"].append(
             AIMessage(content=f"Proposal saved to Neo4j with ID: {proposal_id}")
         )
+        
+        # Propose skill updates based on simulation performance
+        skills_used: List[str] = state.get("skills_referenced", [])
+        for skill_id in skills_used:
+            try:
+                # Calculate improved metrics from simulation
+                exec_time_ms = latest.get("metrics", {}).get("execution_time_ms", 0.0)
+                if exec_time_ms > 0:
+                    propose_skill_update.invoke({
+                        "skill_id": skill_id,
+                        "performance_score": min(10.0, 5.0 + (sim_score / 2.0)),  # Scale to 0-10
+                        "avg_execution_ms": exec_time_ms,
+                        "reason": f"Performance improvement from successful simulation (score={sim_score:.2f})",
+                    })
+                    logger.info(
+                        "Proposed skill update for %s: execution_ms=%.2f, score=%.2f",
+                        skill_id, exec_time_ms, sim_score
+                    )
+            except Exception as exc:
+                logger.warning("Could not propose skill update for %s: %s", skill_id, exc)
+        
         _emit_node_event(
             state,
             source="evaluator",

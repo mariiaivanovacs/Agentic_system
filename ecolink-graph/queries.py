@@ -447,6 +447,154 @@ def create_skill_proposal(
     return {"skill_proposal_id": skill_id}
 
 
+def approve_skill_proposal(skill_id: str) -> dict:
+    """Mark a SkillProposal as approved — Critic will then accept it."""
+    run_query(
+        "MATCH (s:SkillProposal {id: $id}) SET s.status = 'approved'",
+        {"id": skill_id},
+    )
+    return {"status": f"SkillProposal {skill_id} approved"}
+
+
+def reject_skill_proposal(skill_id: str, reason: str = "") -> dict:
+    """Mark a SkillProposal as rejected and record the reason."""
+    run_query(
+        """
+        MATCH (s:SkillProposal {id: $id})
+        SET s.status = 'rejected', s.rejection_reason = $reason
+        """,
+        {"id": skill_id, "reason": reason},
+    )
+    return {"status": f"SkillProposal {skill_id} rejected"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKILL MODIFICATION — SkillModificationProposal nodes
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_skill_modification_proposal(
+    skill_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    performance_score: float | None = None,
+    avg_execution_ms: float | None = None,
+    language: str | None = None,
+    reason: str = "Performance tuning",
+    proposed_by: str = "agent",
+) -> dict:
+    """Create a SkillModificationProposal node to propose updates to an existing Skill.
+    
+    Only fields that are provided (not None) will be proposed for modification.
+    Status starts as 'proposed' until human approval.
+    """
+    # Build dynamic SET clause only for provided fields
+    set_clauses = [
+        "s.reason = $reason",
+        "s.proposed_by = $proposed_by",
+        "s.status = coalesce(s.status, 'proposed')",
+        "s.created_at = coalesce(s.created_at, datetime())",
+    ]
+    params = {
+        "skill_id": skill_id,
+        "reason": reason,
+        "proposed_by": proposed_by,
+    }
+    
+    if name is not None:
+        set_clauses.append("s.proposed_name = $name")
+        params["name"] = name
+    if description is not None:
+        set_clauses.append("s.proposed_description = $description")
+        params["description"] = description
+    if performance_score is not None:
+        set_clauses.append("s.proposed_performance_score = $performance_score")
+        params["performance_score"] = performance_score
+    if avg_execution_ms is not None:
+        set_clauses.append("s.proposed_avg_execution_ms = $avg_execution_ms")
+        params["avg_execution_ms"] = avg_execution_ms
+    if language is not None:
+        set_clauses.append("s.proposed_language = $language")
+        params["language"] = language
+    
+    cypher = f"""
+        MERGE (s:SkillModificationProposal {{id: $skill_id}})
+        SET {', '.join(set_clauses)}
+    """
+    
+    run_query(cypher, params)
+    return {"modification_proposal_id": skill_id}
+
+
+def get_skill_modification_proposals(status: str | None = None) -> list[dict]:
+    """Return all SkillModificationProposal nodes, optionally filtered by status."""
+    if status:
+        return run_query(
+            """
+            MATCH (s:SkillModificationProposal {status: $status})
+            RETURN s.id AS id, s.reason AS reason, s.status AS status,
+                   s.proposed_by AS proposed_by, toString(s.created_at) AS created_at,
+                   s.proposed_name AS proposed_name,
+                   s.proposed_description AS proposed_description,
+                   s.proposed_performance_score AS proposed_performance_score,
+                   s.proposed_avg_execution_ms AS proposed_avg_execution_ms,
+                   s.proposed_language AS proposed_language
+            ORDER BY s.created_at DESC
+            """,
+            {"status": status},
+        )
+    return run_query(
+        """
+        MATCH (s:SkillModificationProposal)
+        RETURN s.id AS id, s.reason AS reason, s.status AS status,
+               s.proposed_by AS proposed_by, toString(s.created_at) AS created_at,
+               s.proposed_name AS proposed_name,
+               s.proposed_description AS proposed_description,
+               s.proposed_performance_score AS proposed_performance_score,
+               s.proposed_avg_execution_ms AS proposed_avg_execution_ms,
+               s.proposed_language AS proposed_language
+        ORDER BY s.created_at DESC
+        """
+    )
+
+
+def approve_skill_modification(skill_id: str) -> dict:
+    """Apply a SkillModificationProposal to the actual Skill node and mark as 'approved'.
+    
+    Copies all proposed_* fields to the actual Skill properties.
+    """
+    result = run_query(
+        """
+        MATCH (p:SkillModificationProposal {id: $skill_id})
+        MATCH (s:Skill {id: $skill_id})
+        SET s.name = coalesce(p.proposed_name, s.name),
+            s.description = coalesce(p.proposed_description, s.description),
+            s.performance_score = coalesce(p.proposed_performance_score, s.performance_score),
+            s.avg_execution_ms = coalesce(p.proposed_avg_execution_ms, s.avg_execution_ms),
+            s.language = coalesce(p.proposed_language, s.language),
+            s.last_modified_at = datetime(),
+            p.status = 'approved'
+        RETURN s.id AS id, s.name AS name, s.performance_score AS score
+        """,
+        {"skill_id": skill_id},
+    )
+    return {
+        "status": f"SkillModificationProposal {skill_id} approved and applied",
+        "skill": result[0] if result else None,
+    }
+
+
+def reject_skill_modification(skill_id: str, reason: str = "") -> dict:
+    """Reject a SkillModificationProposal and record the rejection reason."""
+    run_query(
+        """
+        MATCH (p:SkillModificationProposal {id: $skill_id})
+        SET p.status = 'rejected', p.rejection_reason = $reason
+        """,
+        {"skill_id": skill_id, "reason": reason},
+    )
+    return {"status": f"SkillModificationProposal {skill_id} rejected"}
+
+
 def get_skill_proposals(status: str | None = None) -> list[dict]:
     """Return all SkillProposal nodes, optionally filtered by status."""
     if status:

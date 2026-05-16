@@ -849,6 +849,128 @@ def reject_skill_proposal(skill_id: str, reason: str = "") -> None:
     logger.info("SkillProposal %s rejected: %s", skill_id, reason)
 
 
+# --------------------------------------------------------------------------- #
+# Skill Modification Tools                                                     #
+# --------------------------------------------------------------------------- #
+
+@tool
+def propose_skill_update(
+    skill_id: str,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    performance_score: Optional[float] = None,
+    avg_execution_ms: Optional[float] = None,
+    language: Optional[str] = None,
+    reason: str = "Performance tuning",
+) -> str:
+    """Propose modifications to an existing Skill node.
+    
+    Used by the agent to suggest updates to skill properties based on:
+    - Performance metrics from simulation results
+    - Updated descriptions based on learned patterns
+    - Language or execution time optimizations
+    
+    The proposal waits for human approval via the admin interface before
+    being applied to the actual Skill node.
+    
+    Args:
+        skill_id: ID of the existing Skill to modify.
+        name: New skill name (optional).
+        description: New skill description (optional).
+        performance_score: Updated performance score 0–10 (optional).
+        avg_execution_ms: Updated average execution time (optional).
+        language: Programming language or runtime (optional).
+        reason: Reason for the modification (e.g. "Better performance observed").
+    
+    Returns:
+        A string describing the created proposal ID.
+    
+    Raises:
+        ValueError: if all update fields are None.
+    """
+    # Validate that at least one field is provided
+    if all(v is None for v in [name, description, performance_score, avg_execution_ms, language]):
+        raise ValueError(
+            "At least one of name, description, performance_score, "
+            "avg_execution_ms, or language must be provided"
+        )
+    
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "ecolink-graph"))
+    import queries as graph_queries  # noqa: PLC0415
+    
+    result = graph_queries.create_skill_modification_proposal(
+        skill_id=skill_id,
+        name=name,
+        description=description,
+        performance_score=performance_score,
+        avg_execution_ms=avg_execution_ms,
+        language=language,
+        reason=reason,
+        proposed_by="agent",
+    )
+    
+    proposal_id = result.get("modification_proposal_id", skill_id)
+    logger.info(
+        "SkillModificationProposal created for %s: %s "
+        "(name=%s, score=%s, time_ms=%s, reason=%s)",
+        skill_id,
+        proposal_id,
+        name or "unchanged",
+        performance_score or "unchanged",
+        avg_execution_ms or "unchanged",
+        reason,
+    )
+    return f"Skill modification proposal created (id={proposal_id}, reason={reason})"
+
+
+@tool
+def get_skill_modification_proposals(status: Optional[str] = None) -> List[Dict]:
+    """Query all SkillModificationProposal nodes, optionally filtered by status.
+    
+    Used by the Critic or Evaluator to inspect proposed modifications
+    before approval.
+    
+    Args:
+        status: Filter by status ('proposed', 'approved', 'rejected'). 
+                If None, returns all proposals.
+    
+    Returns:
+        List of dicts with id, reason, status, proposed_by, created_at,
+        and proposed_* fields (proposed_name, proposed_description, etc.).
+    """
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "ecolink-graph"))
+    import queries as graph_queries  # noqa: PLC0415
+    
+    proposals = graph_queries.get_skill_modification_proposals(status=status)
+    logger.info("Retrieved %d skill modification proposals (status=%s)", len(proposals), status or "any")
+    return proposals
+
+
+def approve_skill_modification(skill_id: str) -> None:
+    """Apply a SkillModificationProposal to the actual Skill and mark as 'approved'.
+    
+    Called from Streamlit admin page or programmatically after validation.
+    """
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "ecolink-graph"))
+    import queries as graph_queries  # noqa: PLC0415
+    
+    result = graph_queries.approve_skill_modification(skill_id=skill_id)
+    logger.info("SkillModificationProposal %s approved and applied: %s", skill_id, result)
+
+
+def reject_skill_modification(skill_id: str, reason: str = "") -> None:
+    """Reject a SkillModificationProposal. Called from Streamlit admin page."""
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "ecolink-graph"))
+    import queries as graph_queries  # noqa: PLC0415
+    
+    result = graph_queries.reject_skill_modification(skill_id=skill_id, reason=reason)
+    logger.info("SkillModificationProposal %s rejected: %s", skill_id, result)
+
+
 @tool
 def query_graph_semantic(query_text: str, top_k: int = 5) -> List[Dict]:
     """Semantic vector search over the graph.
