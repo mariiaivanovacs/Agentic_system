@@ -346,6 +346,70 @@ def propose_change(change_type: str, details: Dict) -> str:
 # Internal helpers — graph write operations, not exposed as agent tools        #
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Tool 5 — create_skill  (Stream 2 — Leila)                                   #
+# --------------------------------------------------------------------------- #
+
+_MYHACK_ROOT_TOOLS = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..")
+)
+if _MYHACK_ROOT_TOOLS not in __import__("sys").path:
+    __import__("sys").path.insert(0, _MYHACK_ROOT_TOOLS)
+
+
+@tool
+def create_skill(
+    name: str,
+    code: str,
+    language: str = "python",
+    description: str = "",
+    input_schema: str = "{}",
+    output_schema: str = "{}",
+) -> str:
+    """Register a new Skill node in Graph B from validated Python/Java code.
+
+    The code is validated for safety (no eval, exec, os.system, etc.) before
+    being stored as a local artifact and written to Neo4j as a Skill node.
+
+    Args:
+        name:          Unique skill name (must not conflict with existing skills).
+        code:          Source code string (Python or Java).
+        language:      'python' or 'java'.
+        description:   Human-readable description of what the skill does.
+        input_schema:  JSON string describing expected input fields.
+        output_schema: JSON string describing the output fields.
+
+    Returns:
+        The skill_id of the newly created Skill node (e.g. 'skill_abc12345').
+
+    Raises:
+        SkillValidationError: if the code fails the safety AST check.
+        RuntimeError: if the Neo4j write fails.
+    """
+    try:
+        from src.skills.skill_factory import register_skill
+        from src.skills.skill_validator import SkillValidationError
+    except ImportError as exc:
+        raise RuntimeError(
+            f"src.skills is not importable. Ensure MYHACK_ROOT is on sys.path. Error: {exc}"
+        ) from exc
+
+    skill_id = register_skill(
+        name=name,
+        code=code,
+        language=language,
+        description=description,
+        input_schema=input_schema,
+        output_schema=output_schema,
+    )
+    logger.info("create_skill: registered '%s' as %s", name, skill_id)
+    return skill_id
+
+
+# --------------------------------------------------------------------------- #
+# Internal helpers — graph write operations, not exposed as agent tools        #
+# --------------------------------------------------------------------------- #
+
 def log_execution_trace(
     flow_id: str,
     result_score: float,

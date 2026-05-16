@@ -8,12 +8,18 @@ Node execution order (see graph.py for the wiring):
                   └──────────(fail, retry < 3)───────────┘
                                                          │(success)
                                                    human_approval
+
+P1 wiring (Stream 2 — Leila):
+  planner_node and critic_node now use retrieve_context() and build_*_prompt()
+  from src/graphrag/ for richer context and decoupled prompt engineering.
+  A sys.path fix allows importing from the MyHack root alongside Agentic_system/.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import sys
 from typing import Dict, List, Optional
 
 import yaml
@@ -33,10 +39,79 @@ from src.agents.tools import (
     simulate_flow,
 )
 
+# --------------------------------------------------------------------------- #
+# P1: GraphRAG imports (src/graphrag/ lives at MyHack root, not Agentic_system)#
+#                                                                              #
+# Import strategy: add MyHack/src/ (not MyHack/) to sys.path and import the   #
+# graphrag package directly (as 'graphrag', not 'src.graphrag').              #
+# This avoids the 'src' namespace collision between MyHack/src/ and           #
+# Agentic_system/src/ which are two different packages with the same name.    #
+# --------------------------------------------------------------------------- #
+
+_MYHACK_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+_GRAPHRAG_SRC = os.path.join(_MYHACK_ROOT, "src")
+if _GRAPHRAG_SRC not in sys.path:
+    sys.path.insert(0, _GRAPHRAG_SRC)
+
+try:
+    from graphrag.retriever import retrieve_context as _graphrag_retrieve
+    from graphrag.prompt_engine import build_planner_prompt, build_critic_prompt
+    _GRAPHRAG_AVAILABLE = True
+    logging.getLogger(__name__).info("GraphRAG integration active (P1)")
+except ImportError as _graphrag_err:
+    _GRAPHRAG_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "graphrag not importable — planner/critic will use inline prompts (%s)", _graphrag_err
+    )
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 IMPROVEMENT_THRESHOLD = 1.3  # simulation must beat baseline by this factor
+
+_INDUSTRY_KEYWORDS = {
+    "fintech": "Fintech",
+    "healthtech": "Healthtech",
+    "health": "Healthtech",
+    "edtech": "EdTech",
+    "ecommerce": "E-commerce",
+    "e-commerce": "E-commerce",
+}
+
+
+def _inline_critic_prompt(
+    flow_yaml: str,
+    syntax_error: Optional[str],
+    valid_skills: set,
+    valid_connectors: set,
+    infra_summary: dict,
+) -> str:
+    """Fallback critic prompt (no GraphRAG context)."""
+    return (
+        f"You are the Critic agent for EcoLink NeuroCore. Review the proposed flow YAML.\n\n"
+        f"== Proposed YAML ==\n{flow_yaml}\n\n"
+        f"== Syntax check result ==\n"
+        f"{'PASS' if syntax_error is None else f'FAIL: {syntax_error}'}\n\n"
+        f"== Valid skill IDs in Graph B ==\n{sorted(valid_skills)}\n\n"
+        f"== Valid connector IDs in Graph B ==\n{sorted(valid_connectors)}\n\n"
+        f"== Server infrastructure status ==\n{json.dumps(infra_summary, indent=2)}\n\n"
+        "Check the following and return is_valid + any issues found:\n"
+        "1. YAML is syntactically correct.\n"
+        "2. Every skill referenced in `steps[*].skill` exists in the valid skills list.\n"
+        "3. Every connector referenced (if any) exists in the valid connectors list.\n"
+        "4. The `runs_on` server has load < 80% and error_rate < 3%.\n"
+        "5. Steps are logically ordered and the flow makes sense for a matching system.\n\n"
+        "Set is_valid=True only if ALL checks pass."
+    )
+
+
+def _extract_industry_hint(goal: str) -> str:
+    """Best-effort industry extraction from goal string for GraphRAG retriever."""
+    lower = goal.lower()
+    for keyword, canonical in _INDUSTRY_KEYWORDS.items():
+        if keyword in lower:
+            return canonical
+    return "Fintech"  # default fallback for demo
 
 
 # --------------------------------------------------------------------------- #
@@ -102,6 +177,9 @@ def planner_node(state: AgentState) -> dict:
     """
     Queries Graph A for historical performance and Graph B for active flows,
     then asks the LLM to identify the root cause and form a hypothesis.
+
+    P1 (Stream 2): when src.graphrag is available, enriches the prompt with
+    success/failure patterns and skill context from the GraphRAG retriever.
     """
     goal = state["goal"]
 
@@ -121,16 +199,33 @@ def planner_node(state: AgentState) -> dict:
         )
     })
 
+    # P1 wiring: enrich with GraphRAG context when available
+    graphrag_section = ""
+    if _GRAPHRAG_AVAILABLE:
+        try:
+            industry = _extract_industry_hint(goal)
+            context = _graphrag_retrieve(industry=industry, goal=goal)
+            graphrag_section = (
+                f"\n== Historical success patterns (GraphRAG — Graph A) ==\n"
+                f"{json.dumps(context.success_patterns, indent=2)}\n"
+                f"\n== Historical failure patterns (GraphRAG — Graph A) ==\n"
+                f"{json.dumps(context.failure_patterns, indent=2)}\n"
+                f"\n== Available skills (GraphRAG — Graph B) ==\n"
+                f"{json.dumps(context.available_skills, indent=2)}\n"
+            )
+        except Exception as exc:
+            logger.warning("GraphRAG enrichment failed in planner_node: %s", exc)
+
     prompt = f"""You are the Planner agent for EcoLink NeuroCore, a mentor–startup matching system.
 
 Goal: {goal}
 
-== Historical flow performance (Graph A) ==
+== Historical flow performance via ExecutionTrace (Graph A) ==
 {json.dumps(flow_scores, indent=2)}
 
 == Active flows with their skills (Graph B) ==
 {json.dumps(active_flows, indent=2)}
-
+{graphrag_section}
 Tasks:
 1. Identify the active flow with the worst average match score.
 2. Identify which skills in that flow are causing poor performance.
@@ -235,6 +330,9 @@ def critic_node(state: AgentState) -> dict:
     """
     Validates the proposed YAML for syntax, valid skill/connector references,
     and infrastructure health before allowing it to proceed to simulation.
+
+    P1 (Stream 2): when src.graphrag is available, uses build_critic_prompt()
+    for richer historical context in the validation prompt.
     """
     flow_yaml = state.get("proposed_flow_yaml", "")
     retry_count = state.get("retry_count", 0)
@@ -263,31 +361,35 @@ def critic_node(state: AgentState) -> dict:
         for sid, s in infra.items()
     }
 
-    prompt = f"""You are the Critic agent for EcoLink NeuroCore. Review the proposed flow YAML.
-
-== Proposed YAML ==
-{flow_yaml}
-
-== Syntax check result ==
-{"PASS" if syntax_error is None else f"FAIL: {syntax_error}"}
-
-== Valid skill IDs in Graph B ==
-{sorted(valid_skills)}
-
-== Valid connector IDs in Graph B ==
-{sorted(valid_connectors)}
-
-== Server infrastructure status ==
-{json.dumps(infra_summary, indent=2)}
-
-Check the following and return is_valid + any issues found:
-1. YAML is syntactically correct.
-2. Every skill referenced in `steps[*].skill` exists in the valid skills list.
-3. Every connector referenced (if any) exists in the valid connectors list.
-4. The `runs_on` server has load < 80% and error_rate < 3%.
-5. Steps are logically ordered and the flow makes sense for a matching system.
-
-Set is_valid=True only if ALL checks pass."""
+    # P1 wiring: use GraphRAG-aware critic prompt when available
+    goal = state.get("goal", "")
+    if _GRAPHRAG_AVAILABLE:
+        try:
+            industry = _extract_industry_hint(goal)
+            context = _graphrag_retrieve(industry=industry, goal=goal)
+            prompt = build_critic_prompt(
+                proposed_yaml=flow_yaml,
+                context=context,
+                goal=goal,
+            )
+            # Append the local graph checks that aren't in the GraphRAG prompt
+            prompt += (
+                f"\n\n== Syntax check result ==\n"
+                f"{'PASS' if syntax_error is None else f'FAIL: {syntax_error}'}\n"
+                f"\n== Valid skill IDs in Graph B ==\n{sorted(valid_skills)}\n"
+                f"\n== Valid connector IDs in Graph B ==\n{sorted(valid_connectors)}\n"
+                f"\n== Server infrastructure status ==\n{json.dumps(infra_summary, indent=2)}\n"
+                "\nSet is_valid=True only if ALL checks pass."
+            )
+        except Exception as exc:
+            logger.warning("GraphRAG critic prompt failed (%s) — using inline prompt", exc)
+            prompt = _inline_critic_prompt(
+                flow_yaml, syntax_error, valid_skills, valid_connectors, infra_summary
+            )
+    else:
+        prompt = _inline_critic_prompt(
+            flow_yaml, syntax_error, valid_skills, valid_connectors, infra_summary
+        )
 
     output: CriticOutput = _structured_invoke(_llm(), prompt, CriticOutput)
 
