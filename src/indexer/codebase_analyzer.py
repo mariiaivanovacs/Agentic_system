@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -118,6 +119,50 @@ STORAGE_HINTS = {
 }
 RISK_HINT_RE = re.compile(r"\b(eval|exec|private[_-]?key|secret|password|token|dangerouslySetInnerHTML)\b", re.IGNORECASE)
 
+ACTION_VERBS = {
+    "add",
+    "approve",
+    "connect",
+    "create",
+    "delete",
+    "donate",
+    "get",
+    "list",
+    "login",
+    "register",
+    "submit",
+    "update",
+}
+WRITE_ACTION_VERBS = {"add", "approve", "connect", "create", "delete", "donate", "register", "submit", "update"}
+FLOW_STOPWORDS = {
+    "api",
+    "app",
+    "button",
+    "component",
+    "components",
+    "controller",
+    "controllers",
+    "form",
+    "handler",
+    "handlers",
+    "hook",
+    "hooks",
+    "index",
+    "lib",
+    "page",
+    "pages",
+    "route",
+    "routes",
+    "screen",
+    "service",
+    "services",
+    "src",
+    "ui",
+    "utils",
+    "view",
+    "views",
+}
+
 
 PRIMITIVE_DESCRIPTIONS = {
     "Project": (
@@ -156,6 +201,14 @@ PRIMITIVE_DESCRIPTIONS = {
         "A file-level flow inferred from route/controller/workflow naming.",
         "A user or business process made from smaller software pieces.",
     ),
+    "BusinessFlow": (
+        "A business-logic capability inferred from entrypoints, functions, services, and storage usage.",
+        "A user-facing thing the app can do, shown as an ordered chain of software parts.",
+    ),
+    "FlowStep": (
+        "An ordered step inside a business flow, linked to the primitive that provides evidence for the step.",
+        "One step in the app function, such as UI, route, function, storage, integration, or review.",
+    ),
     "Integration": (
         "An external library/platform detected from code references.",
         "An outside service the product depends on.",
@@ -174,6 +227,28 @@ PRIMITIVE_DESCRIPTIONS = {
 def _slug(text: str) -> str:
     slug = re.sub(r"[^a-z0-9_]+", "_", text.lower()).strip("_")
     return slug or "root"
+
+
+def _tokens(text: str) -> list[str]:
+    de_camel = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    raw = re.sub(r"[^A-Za-z0-9]+", " ", de_camel).lower().split()
+    return [token for token in raw if token and token not in FLOW_STOPWORDS]
+
+
+def _flow_signature(text: str) -> tuple[str, str, str] | None:
+    tokens = _tokens(text)
+    for index, token in enumerate(tokens):
+        if token not in ACTION_VERBS:
+            continue
+        nouns = [
+            item for item in tokens[index + 1 :]
+            if item not in ACTION_VERBS and item not in FLOW_STOPWORDS
+        ][:3]
+        if not nouns:
+            nouns = ["item"]
+        display = " ".join([token, *nouns]).title()
+        return _slug(display), display, token
+    return None
 
 
 def stable_project_id(path: str | Path) -> str:
@@ -353,6 +428,8 @@ class CodebaseAnalyzer(BaseIndexer):
                 if node.label == "Function":
                     skills.append(self._skill_from_function(node))
 
+        self._build_business_flows(ctx, nodes, relationships)
+
         return IndexedSystem(
             skills=self._dedupe_skills(skills),
             code_nodes=list(nodes.values()),
@@ -488,6 +565,214 @@ class CodebaseAnalyzer(BaseIndexer):
             performance_score=5.0,
             avg_execution_ms=100.0,
         )
+
+    def _build_business_flows(
+        self,
+        ctx: _AnalysisContext,
+        nodes: dict[str, CodeNodeSpec],
+        relationships: list[CodeRelationshipSpec],
+    ) -> None:
+        by_source: dict[str, list[CodeNodeSpec]] = defaultdict(list)
+        for node in nodes.values():
+            by_source[node.source_path].append(node)
+
+        candidate_sources: dict[str, set[str]] = defaultdict(set)
+        flow_names: dict[str, str] = {}
+        flow_verbs: dict[str, str] = {}
+        candidate_labels = {"File", "Route", "Function", "Service", "Workflow"}
+        for node in nodes.values():
+            if node.label not in candidate_labels:
+                continue
+            signature = _flow_signature(f"{node.name} {node.source_path}")
+            if not signature:
+                continue
+            key, display_name, verb = signature
+            candidate_sources[key].add(node.source_path)
+            flow_names[key] = display_name
+            flow_verbs[key] = verb
+
+        for flow_key in sorted(candidate_sources):
+            sources = sorted(candidate_sources[flow_key])
+            primitives = self._collect_flow_primitives(by_source, sources)
+            if not primitives:
+                continue
+
+            flow_name = flow_names[flow_key]
+            verb = flow_verbs.get(flow_key, "")
+            entrypoint = self._entrypoint_for_flow(primitives)
+            flow_node = ctx.node(
+                "BusinessFlow",
+                flow_key,
+                flow_name,
+                sources[0],
+                confidence=self._flow_confidence(primitives),
+                source_paths=sources,
+                entrypoint=entrypoint,
+                flow_type="business_logic",
+                action_verb=verb,
+                evidence_summary=self._flow_evidence_summary(primitives),
+            )
+            nodes[flow_node.id] = flow_node
+            relationships.append(CodeRelationshipSpec("HAS_BUSINESS_FLOW", ctx.project_id, flow_node.id))
+
+            ordered = self._ordered_flow_primitives(primitives)
+            for order, primitive in enumerate(ordered, start=1):
+                step_type = self._step_type(primitive)
+                step_name = f"{order:02d} {step_type}: {primitive.name}"
+                step_node = ctx.node(
+                    "FlowStep",
+                    f"{flow_key}:{order}:{primitive.id}",
+                    step_name,
+                    primitive.source_path,
+                    confidence=min(float(flow_node.confidence), float(primitive.confidence)),
+                    order=order,
+                    step_type=step_type,
+                    primitive_id=primitive.id,
+                    primitive_label=primitive.label,
+                    evidence=primitive.source_path,
+                    evidence_summary=f"{step_type} evidence from {primitive.source_path}",
+                )
+                nodes[step_node.id] = step_node
+                relationships.append(CodeRelationshipSpec("HAS_STEP", flow_node.id, step_node.id, {"order": order}))
+                relationships.append(CodeRelationshipSpec("USES_PRIMITIVE", step_node.id, primitive.id))
+
+            self._add_inferred_call_edges(relationships, ordered, verb)
+
+    @staticmethod
+    def _collect_flow_primitives(
+        by_source: dict[str, list[CodeNodeSpec]],
+        sources: list[str],
+    ) -> list[CodeNodeSpec]:
+        labels = {
+            "File",
+            "Route",
+            "Function",
+            "Service",
+            "DatabaseModel",
+            "DatabaseTable",
+            "DataStore",
+            "Integration",
+            "Risk",
+        }
+        collected: dict[str, CodeNodeSpec] = {}
+        for source in sources:
+            for node in by_source.get(source, []):
+                if node.label in labels:
+                    collected[node.id] = node
+        return list(collected.values())
+
+    @staticmethod
+    def _entrypoint_for_flow(primitives: list[CodeNodeSpec]) -> str:
+        for label in ("Route", "Function", "Service", "File"):
+            for primitive in primitives:
+                if primitive.label == label:
+                    return str(primitive.properties.get("route_path") or primitive.name)
+        return primitives[0].name if primitives else ""
+
+    @staticmethod
+    def _flow_confidence(primitives: list[CodeNodeSpec]) -> float:
+        labels = {primitive.label for primitive in primitives}
+        confidence = 0.58
+        if "Route" in labels:
+            confidence += 0.14
+        if "Function" in labels:
+            confidence += 0.12
+        if "DataStore" in labels or "Integration" in labels:
+            confidence += 0.08
+        if "File" in labels:
+            confidence += 0.04
+        return min(confidence, 0.92)
+
+    @staticmethod
+    def _flow_evidence_summary(primitives: list[CodeNodeSpec]) -> str:
+        counts: dict[str, int] = defaultdict(int)
+        for primitive in primitives:
+            counts[primitive.label] += 1
+        return ", ".join(f"{label}: {counts[label]}" for label in sorted(counts))
+
+    @staticmethod
+    def _step_type(node: CodeNodeSpec) -> str:
+        if node.label == "File":
+            ext = str(node.properties.get("extension", ""))
+            if ext in {".jsx", ".tsx"} or any(part in node.source_path.lower() for part in ("component", "page", "view")):
+                return "UI/File"
+            return "File"
+        return {
+            "Route": "API Route",
+            "Function": "Function",
+            "Service": "Service",
+            "DatabaseModel": "Data Model",
+            "DatabaseTable": "Data Table",
+            "DataStore": "Storage",
+            "Integration": "Integration",
+            "Risk": "Review",
+        }.get(node.label, node.label)
+
+    @classmethod
+    def _ordered_flow_primitives(cls, primitives: list[CodeNodeSpec]) -> list[CodeNodeSpec]:
+        rank = {
+            "File": 10,
+            "Route": 20,
+            "Function": 30,
+            "Service": 40,
+            "DatabaseModel": 50,
+            "DatabaseTable": 55,
+            "DataStore": 60,
+            "Integration": 70,
+            "Risk": 80,
+        }
+        return sorted(
+            primitives,
+            key=lambda node: (
+                rank.get(node.label, 90),
+                int(node.properties.get("line") or 0),
+                node.source_path,
+                node.name,
+            ),
+        )
+
+    @staticmethod
+    def _add_inferred_call_edges(
+        relationships: list[CodeRelationshipSpec],
+        ordered: list[CodeNodeSpec],
+        verb: str,
+    ) -> None:
+        routes = [node for node in ordered if node.label == "Route"]
+        functions = [node for node in ordered if node.label == "Function"]
+        stores = [node for node in ordered if node.label == "DataStore"]
+
+        for route in routes:
+            for function in functions:
+                relationships.append(
+                    CodeRelationshipSpec(
+                        "ROUTE_CALLS_FUNCTION",
+                        route.id,
+                        function.id,
+                        {"inferred": True},
+                    )
+                )
+
+        for left, right in zip(functions, functions[1:]):
+            relationships.append(
+                CodeRelationshipSpec(
+                    "FUNCTION_CALLS_FUNCTION",
+                    left.id,
+                    right.id,
+                    {"inferred": True},
+                )
+            )
+
+        rel_type = "FUNCTION_WRITES_DATASTORE" if verb in WRITE_ACTION_VERBS else "FUNCTION_READS_DATASTORE"
+        for function in functions:
+            for store in stores:
+                relationships.append(
+                    CodeRelationshipSpec(
+                        rel_type,
+                        function.id,
+                        store.id,
+                        {"inferred": True},
+                    )
+                )
 
     @staticmethod
     def _dedupe_skills(skills: list[SkillSpec]) -> list[SkillSpec]:

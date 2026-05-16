@@ -11,15 +11,17 @@ Topology:
                                          │ (fail, retry >= MAX)
                                         END
 
-Checkpointing uses MemorySaver (in-process). To switch to Redis:
+Checkpointing uses SqliteSaver (file-based) so checkpoints survive across
+processes — required for run_resume() to find the interrupted graph state.
+To switch to Redis:
     from langgraph.checkpoint.redis import RedisSaver
     memory = RedisSaver.from_conn_string(os.environ["REDIS_URL"])
 """
 from __future__ import annotations
 
-import os
+from pathlib import Path
 
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, StateGraph
 
 from src.agents.nodes import (
@@ -32,6 +34,8 @@ from src.agents.nodes import (
     MAX_RETRIES,
 )
 from src.agents.state import AgentState
+
+CHECKPOINT_DB = Path(".agent_checkpoints.db")
 
 # --------------------------------------------------------------------------- #
 # Conditional routing functions                                                #
@@ -97,5 +101,5 @@ def build_graph():
         {"human_approval": "human_approval", "generator": "generator", END: END},
     )
 
-    memory = MemorySaver()
-    return graph.compile(checkpointer=memory)
+    checkpointer = SqliteSaver.from_conn_string(str(CHECKPOINT_DB))
+    return graph.compile(checkpointer=checkpointer)

@@ -31,6 +31,8 @@ CODE_NODE_LABELS = {
     "DataStore",
     "Entity",
     "Workflow",
+    "BusinessFlow",
+    "FlowStep",
     "Integration",
     "Artifact",
     "Risk",

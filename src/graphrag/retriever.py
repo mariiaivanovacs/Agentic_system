@@ -125,6 +125,7 @@ def get_software_nodes(limit: int = 60) -> list[dict[str, Any]]:
         WHERE any(label IN labels(n) WHERE label IN [
             'Project', 'Repository', 'File', 'Route', 'Service', 'Function',
             'DatabaseModel', 'DatabaseTable', 'DataStore', 'Entity', 'Workflow',
+            'BusinessFlow', 'FlowStep',
             'Integration', 'Artifact', 'Risk'
         ])
         RETURN labels(n)[0] AS type,

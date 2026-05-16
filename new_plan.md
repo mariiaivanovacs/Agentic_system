@@ -1,195 +1,184 @@
-Now I have everything I need. Here is the full audit and phased plan.
+# Agentic Layer Fix Plan
 
-Audit Verdict: Demo-Ready Only
-The pipeline architecture is genuinely good. Real Neo4j reads/writes work end-to-end, the 6-node LangGraph loop is complete, and the human approval interrupt is real. But several things your analysis called "missing" are exactly the gaps that prevent this from being sellable as a general agentic layer. Here is what the code actually shows.
+The core problem is that the codebase analyzer and the agent decision loop are two disconnected brains. These tasks wire them together, in dependency order.
 
-What the Code Actually Confirms
-Implemented and real
-Component	Evidence
-Neo4j reads in agents	tools.py:89 — _run_read_cypher with 3-retry tenacity
-Neo4j writes	tools.py:99 — _run_write_cypher, used by propose/activate/reject
-Planner queries real graph	nodes.py:196-227 — two Cypher queries before LLM call
-Critic validates vs real graph	nodes.py:442-482 — skill IDs from Neo4j, not hardcoded
-Local sandbox subprocess	tools.py:286-368 — sandbox_task.py via subprocess with DATA_STREAM protocol
-Web indexer — real crawl	web_indexer.py — full BFS crawler, writes WebSite/WebPage/WebEntity to Neo4j
-Source-code extraction	web_indexer.py:367-468 — React routes (App.tsx), Clarity contracts (.clar), campaign data
-Retry + fallback in snapshot	tools.py:177-229 — tries Neo4j, falls back to 2-item sample only on failure
-Realtime event bus	event_bus.py + server.py (FastAPI) confirmed in import tree
-Human approval interrupt	nodes.py:727 — interrupt({...})
-Broken or missing
-Component	Status	Evidence
-Cloud Run result	Broken	tools.py:411 — match_score: 0.0 hardcoded, logs never fetched
-Graph visualization in Streamlit	Missing	graph_ecolink.html exists but not embedded (no components.html call found in first 100 lines)
-CustomerApplicationProfile	Not implemented	No such model in state.py, schema.yaml, or any page
-Pipeline discovery graph	Not implemented	Indexer extracts entities but never connects them into Route→API→Tool chains
-Skill registry / SkillProposal	Not implemented	Generator proposes skills in YAML but no SkillProposal Neo4j node, no registry query
-Per-app graph namespace	Not implemented	No app_id property on nodes, all apps share one graph
-Data isolation policy	Not implemented	Snapshot is unscoped Neo4j query, no secrets exclusion contract
-GraphRAG (vector retrieval)	Not implemented	All retrieval is Cypher-only; no embeddings, no similarity search
-OpenAPI/Python/DB indexers	Stubs	Classes exist, discover() implemented for OpenAPI, but graph_writer.py write path untested; Python and DB indexers are thin wrappers
-Skill creation lifecycle	Not implemented	No SkillProposal node, no approval gate for new skills
-Phased Implementation Plan
-Phase 1 — Fix the Two Demo-Blocking Issues (1–2 days)
-1a. Embed graph visualization in Streamlit
+---
 
-streamlit_app.py — Graph View page needs:
+## Task 1 — Extend `AgentState` with project graph fields
+**File:** `src/agents/state.py`
 
+Add fields the new agent brain needs to carry:
+```python
+software_nodes: List[Dict]       # Project -> File -> Route -> Function -> DataStore
+project_id: Optional[str]        # scopes all queries to one indexed project
+recommended_actions: List[Dict]  # Generator output (replaces proposed_flow_yaml as primary)
+critic_evidence_ids: List[str]   # graph node IDs the Critic accepted as grounding
+```
+`proposed_flow_yaml` stays for backward compatibility but becomes a secondary field.
 
-# In the "Graph View" page section
-html_path = ROOT / "graph_ecolink.html"
-if html_path.exists():
-    components.html(html_path.read_text(), height=600, scrolling=True)
-Acceptance: Graph View page renders the pyvis graph without opening a separate file.
+---
 
-1b. Fix Cloud Run result parsing
+## Task 2 — Planner retrieves project codebase graph first
+**File:** `src/agents/nodes.py:188-257`
 
-src/agents/tools.py:407-415 — _cloud_run_sandbox returns match_score: 0.0 always because Cloud Run logs are not fetched. Two options — pick one:
+Right now `retrieve_context()` runs, then the semantic query hardcodes `"mentor matching"` at line 199. Fix:
 
-Poll Cloud Logging for the DATA_STREAM_START/END output after the operation completes
-Or, as a safer short-term fix, add a clear error_log that says "Cloud Run mode does not yet return metrics — use local mode" and route callers back to _local_sandbox
-Acceptance: SANDBOX_MODE=cloudrun either returns real metrics or returns an explicit actionable error, never a silent match_score: 0.0.
+1. Before calling `retrieve_context()`, query `Project`, `File`, `Route`, `Function`, `DataStore` nodes scoped to `state["app_id"]`.
+2. Replace the semantic query string from `"{industry} {goal} mentor matching"` → `"{goal} {app_name}"` so it searches project-relevant skills, not EcoLink matching skills.
+3. Pass `software_nodes` into the prompt and into the returned state dict.
+4. Update `build_agent_planner_prompt()` to include a `== Codebase Evidence ==` section above the failure/success patterns section.
 
-Phase 2 — CustomerApplicationProfile (2–3 days)
-2a. Add profile to state
+---
 
-src/agents/state.py — add:
+## Task 3 — Generator outputs `RecommendedAction` schema, not only YAML
+**File:** `src/agents/nodes.py:281+`
 
+Introduce a Pydantic output model:
+```python
+class RecommendedAction(BaseModel):
+    action_type: str  # create_skill | modify_workflow | add_validation | add_observability | flag_risk | request_admin_approval
+    target_node_id: str        # the graph node this action applies to
+    evidence_node_ids: List[str]  # project graph nodes that justify this action
+    description: str
+    flow_yaml: Optional[str]   # only populated if action_type == modify_workflow
 
-app_id: str                    # "" means system-default (the seeded EcoLink graph)
-app_name: str
-source_type: str               # "codebase" | "website" | "api" | "database"
-source_paths: List[str]
-base_urls: List[str]
-last_indexed_at: str
-2b. Write profile to Neo4j on ingest
+class GeneratorOutput(BaseModel):
+    recommended_actions: List[RecommendedAction]
+    hypothesis_tested: str
+```
 
-src/indexer/web_indexer.py:496-497 — after _write_website_node, also MERGE an AppProfile node:
+Update `generator_node()` to use `_structured_invoke(_llm(), prompt, GeneratorOutput)` and write `recommended_actions` into state. Keep emitting `proposed_flow_yaml` for backward compat (take it from the first `modify_workflow` action, if any).
 
+---
 
-MERGE (ap:AppProfile {app_id: $app_id})
-SET ap.app_name = $app_name, ap.source_type = 'website',
-    ap.base_url = $start_url, ap.last_indexed_at = datetime()
-MERGE (ap)-[:HAS_WEBSITE]->(w)
-2c. Add "Connected App" Streamlit page
+## Task 4 — Critic rejects recommendations without project graph evidence
+**File:** `src/agents/nodes.py:430-557`
 
-streamlit_app.py — new sidebar item. Shows: app_id, name, source type, last indexed timestamp, entity counts (WebPage, WebEntity by type), quick re-index button.
+Add a deterministic pre-LLM check after the existing `local_issues` block:
 
-Acceptance: after running web indexer, the Connected App page shows the profile pulled from Neo4j.
+```python
+# For each recommended_action, assert evidence_node_ids are real graph nodes
+for action in state.get("recommended_actions", []):
+    for nid in action.get("evidence_node_ids", []):
+        result = query_graph.invoke({"cypher_query": f"MATCH (n) WHERE elementId(n) = '{nid}' RETURN n LIMIT 1"})
+        if not result:
+            local_issues.append(f"Action '{action['action_type']}' cites non-existent node: {nid}")
+```
 
-Phase 3 — Pipeline Discovery Graph (3–4 days)
-The current indexer extracts nodes but never connects them into a traversable pipeline chain. The missing step is a graph-building pass after crawl.
+Also add a check: if `recommended_actions` is empty and `proposed_flow_yaml` is non-empty, require at least one `evidence_node_ids` in the critic LLM prompt — if none are given, `is_valid = False`.
 
-3a. Add pipeline linker to web_indexer
+---
 
-src/indexer/web_indexer.py — after writing all entities, run a Cypher pass:
+## Task 5 — Scope Simulator snapshot to `app_id`
+**File:** `src/agents/nodes.py:573-576`
 
+Replace the hardcoded `"snapshot_2025_q4"` with a project-scoped snapshot ID:
 
-// Connect Route → ContractMethod if method name appears in route path or component
-MATCH (r:WebEntity {entity_type: 'Route'}), (m:WebEntity {entity_type: 'ContractMethod'})
-WHERE r.name CONTAINS toLower(m.name)
-MERGE (r)-[:CALLS]->(m)
-Similarly link WebSite → Route → Feature.
-
-3b. Add pipeline materializer node
-
-New file src/indexer/pipeline_builder.py — after full crawl + entity linking, detect chains and write Pipeline nodes:
-
-
-CREATE (p:Pipeline {
-  id: $pipeline_id,
-  name: $name,
-  entrypoint: $route,
-  app_id: $app_id,
-  steps: $steps_json,
-  discovered_at: datetime()
+```python
+app_id = state.get("app_id") or ""
+snapshot_id = f"snapshot_{app_id}" if app_id else "snapshot_2025_q4"
+result: Dict = simulate_flow.invoke({
+    "flow_yaml": flow_yaml,
+    "dataset_snapshot_id": snapshot_id,
 })
-3c. Pipeline Explorer page in Streamlit
+```
 
-Shows: pipeline name, entrypoint route, steps list, tools/skills referenced, risk flag (if contract method involved). Acceptance: ingest fundraising app → Pipeline Explorer shows at least 2 pipelines.
+Then in `src/agents/tools.py` inside `_build_snapshot()`, filter the Cypher queries by `app_id` when it is set. Also add a secrets blocklist there: never copy fields named `password`, `secret`, `token`, `key`, `credential` into the snapshot dict.
 
-Phase 4 — Skill Registry + Skill Proposals (2–3 days)
-4a. Add SkillProposal node type
+---
 
-ecolink-graph/queries.py — add create_skill_proposal(skill_id, name, purpose, input_schema, output_schema, proposed_by) that writes:
+## Task 6 — Make Evaluator deterministic, LLM advisory only
+**File:** `src/agents/nodes.py:678-746`
 
+Right now the LLM both reasons and decides. Instead:
 
-CREATE (:SkillProposal {
-  id: $skill_id, name: $name, purpose: $purpose,
-  status: 'proposed', proposed_by: $proposed_by,
-  input_schema: $input_schema, output_schema: $output_schema,
-  created_at: datetime()
-})
-4b. Critic rejects unknown skills
+1. Let the LLM produce `reason` and `updated_hypothesis` only — strip `decision` from `EvaluatorOutput`.
+2. After the LLM call, compute `decision` deterministically:
+```python
+sim_score = latest.get("metrics", {}).get("match_score", 0.0)
+sim_status = latest.get("status", "fail")
+decision = (
+    "success"
+    if sim_status == "success" and sim_score > baseline_score * IMPROVEMENT_THRESHOLD
+    else "failure"
+)
+```
+3. Log both the LLM's reason and the deterministic result so they are visible in Live Agent Comms.
 
-src/agents/nodes.py:462-465 — unknown_skills detection is already there. Strengthen: also check SkillProposal nodes (status='approved') as a secondary valid-skills source:
+---
 
+## Task 7 — Structured retry feedback from Critic and Evaluator
+**Files:** `src/agents/nodes.py:486-493` and `src/agents/nodes.py:730-744`
 
-MATCH (s:SkillProposal {status: 'approved'}) RETURN s.id AS id
-4c. Skill Registry page in Streamlit
+Replace the freetext `critic_feedback` and `updated_hypothesis` strings passed back to Generator with a typed dict in state:
 
-Shows: active skills (from Skill nodes), proposed skills (from SkillProposal nodes), approve/reject buttons. Acceptance: admin can approve a skill proposal in the UI and it becomes usable by the Generator in the next run.
+```python
+retry_context: Optional[Dict]  # add to AgentState
+# shape: {invalid_skills, failed_metric, required_change, forbidden_pattern, evidence_node_ids}
+```
 
-Phase 5 — Data Isolation (2–3 days)
-This is the most important gap for a sellable product.
+Critic sets:
+```python
+"retry_context": {"invalid_skills": unknown_skills, "required_change": "Use only graph-grounded evidence_node_ids"}
+```
 
-5a. Add app_id to all indexed nodes
+Evaluator sets:
+```python
+"retry_context": {"failed_metric": {"match_score": sim_score, "threshold": baseline_score * IMPROVEMENT_THRESHOLD}}
+```
 
-src/indexer/web_indexer.py — every _write_entity, _write_page_node call adds app_id: $domain as a property. This scopes all data to the source application.
+Generator reads `state.get("retry_context", {})` and includes it as a structured block in its prompt.
 
-5b. Scope sandbox snapshot to app_id
+---
 
-src/agents/tools.py:177-229 — _build_snapshot currently queries all Company and Mentor nodes with no filter. Add app_id parameter and filter Cypher by it when set:
+## Task 8 — Unify human approval to one path
+**Files:** `src/agents/nodes.py:720-730` and `main.py:241-293`
 
+The LangGraph `interrupt()` at `nodes.py:727` is the canonical path. The CLI resume in `main.py` bypasses it and calls `activate_proposal()` directly.
 
-MATCH (c:Company) WHERE c.app_id = $app_id OR $app_id = ''
-5c. Exclude secrets from snapshot
+Fix: in `run_resume()` in `main.py`, resume the LangGraph thread through the checkpointer instead of calling the tool directly:
 
-Add explicit property blocklist in _build_snapshot: never copy fields named password, secret, token, key, credential into the snapshot dict.
+```python
+graph.invoke(
+    {"human_approved": approved, "rejection_reason": reason},
+    config={"configurable": {"thread_id": thread_id}},
+)
+```
 
-5d. Data Isolation page in Streamlit
+Remove the direct `activate_proposal()` / `reject_proposal()` calls from `run_resume()` — let `human_approval_node()` handle those. Add `human_approved` and `rejection_reason` to `AgentState`.
 
-Shows: per-app node counts, isolation policy (app_id scoped: yes/no), last snapshot size, whether any snapshot contained cross-app data. Acceptance: two different apps indexed show separate node sets in Neo4j and separate snapshots in simulation.
+---
 
-Phase 6 — GraphRAG Module (3–5 days)
-This is the highest-value missing piece given the name of the project.
+## Task 9 — Deduplicate event emission
+**Files:** `src/agents/nodes.py` and `main.py` (streaming section)
 
-6a. Add embedding generation on ingest
+The main.py streaming loop emits `publish_event()` for each `node_update` AND each node already calls `_emit_node_event()` internally — those are duplicates. Fix: remove the generic per-node publish from main.py's streaming loop, rely solely on the per-node `_emit_node_event()` calls inside nodes.py. Only let main.py emit the `run_start` and `run_end` envelope events.
 
-src/indexer/web_indexer.py or a new src/indexer/embedder.py — after writing entities, generate text embeddings (Gemini text-embedding-004 or OpenAI) for description fields. Store as embedding property (Neo4j 5+ vector index).
+---
 
-6b. Add vector index to Neo4j
+## Task 10 — Surface decision evidence in Live Agent Comms UI
 
+Each event payload already carries data. Add a collapsible "Evidence" section to each agent message card in the UI that shows:
+- `graphrag.failure_patterns` count and list (from Planner event)
+- `evidence_node_ids` (from Critic event)
+- `failed_metric` (from Evaluator retry event)
+- `decision` + deterministic score comparison (from Evaluator success event)
 
-CREATE VECTOR INDEX skill_embedding IF NOT EXISTS
-FOR (s:Skill) ON (s.embedding)
-OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}
-6c. Add query_graph_semantic tool
+---
 
-src/agents/tools.py — new @tool that takes a natural language query, embeds it, and does db.index.vector.queryNodes(...) to return semantically similar skills/flows.
+## Execution Order
 
-6d. Use in Planner
+| Priority | Task | Why first |
+|---|---|---|
+| 1 | Task 1 — AgentState fields | All other tasks depend on it |
+| 2 | Task 6 — Deterministic Evaluator | Stops silent LLM math errors immediately |
+| 3 | Task 2 — Planner codebase-first | Core brain swap, enables Tasks 3+4 |
+| 4 | Task 3 — Generator action schema | Required for Critic evidence check |
+| 5 | Task 4 — Critic evidence check | Closes the grounding gap |
+| 6 | Task 7 — Structured retry | Makes retries non-shallow |
+| 7 | Task 5 — Scoped snapshot | Data correctness |
+| 8 | Task 8 — Unified approval | Consistency, no functional regression |
+| 9 | Task 9 — Deduplicate events | Polish |
+| 10 | Task 10 — UI evidence panel | Observable, last because it reads from fixed events |
 
-src/agents/nodes.py:185-300 — Planner currently uses only Cypher. After getting failure_patterns, also call query_graph_semantic to find skills that match the pain point text semantically, not just by ID.
-
-Acceptance: querying "payment processing friction" returns Skill nodes related to payment even if the word "payment" is not in their ID.
-
-Phase 7 — Tests and Acceptance (2–3 days)
-Missing tests to write:
-
-Test	File	What to assert
-Real web ingest	test_integration.py	crawl localhost:5173, assert ≥3 Route nodes in Neo4j
-Profile creation	test_integration.py	after ingest, AppProfile node exists with correct app_id
-Pipeline discovery	test_integration.py	Pipeline node exists with ≥1 step after linker runs
-Critic rejects unknown skill	test_agents.py (new)	YAML with skill: fake_skill_xyz → critic_passed: False
-Snapshot isolation	test_sandbox.py	snapshot for app_id=A contains no nodes from app_id=B
-Skill proposal lifecycle	test_integration.py	create SkillProposal → approve → appears in valid_skills query
-Cloud Run error surfaced	test_sandbox.py	SANDBOX_MODE=cloudrun without env vars returns status: fail with message, not silent 0.0
-Priority Order for Next Session
-If you have limited time before a demo:
-
-Phase 1 — embed the graph viz + fix Cloud Run silent failure (visual impact, 1 day)
-Phase 2 — CustomerApplicationProfile (shows the "sellable layer" concept, 1-2 days)
-Phase 4 — Skill Registry page (highest impression for AI-native judges, 1 day)
-Phase 3 — Pipeline Explorer (technically impressive, 2-3 days)
-Phase 5 — Data Isolation (required for enterprise credibility, 2 days)
-Phase 6 — GraphRAG (highest effort, highest payoff long-term)
+Tasks 1, 2, 3, 4, 6 form the minimum viable "codebase-first brain."
