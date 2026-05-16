@@ -1,10 +1,17 @@
 import json
 import csv
 import os
+import sys
+from pathlib import Path
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
 
 load_dotenv()
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.config.schema_validator import SchemaValidator
+
+_validator = SchemaValidator()
 
 URI      = os.getenv("NEO4J_URI")
 USERNAME = os.getenv("NEO4J_USERNAME")
@@ -37,6 +44,7 @@ def clear_all(tx):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_company(tx, c):
+    _validator.validate_node("Company", c)
     tx.run("""
         MERGE (co:Company {id: $id})
         SET co.name         = $name,
@@ -48,6 +56,7 @@ def create_company(tx, c):
     """, **c)
 
 def create_mentor(tx, m):
+    _validator.validate_node("Mentor", m)
     tx.run("""
         MERGE (me:Mentor {id: $id})
         SET me.name               = $name,
@@ -55,7 +64,10 @@ def create_mentor(tx, m):
             me.industry_focus     = $industry_focus,
             me.availability       = $availability,
             me.past_success_score = $past_success_score,
-            me.years_experience   = $years_experience
+            me.years_experience   = $years_experience,
+            me.expertise          = $expertise_tags,
+            me.success_score      = $past_success_score,
+            me.available          = ($availability = 'available')
     """, **m)
 
 def create_interaction(tx, row):
@@ -85,6 +97,7 @@ def link_company_to_programme(tx, company_id, programme_name):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_connector(tx, c):
+    _validator.validate_node("Connector", c)
     tx.run("""
         MERGE (cn:Connector {id: $id})
         SET cn.name        = $name,
@@ -96,6 +109,7 @@ def create_connector(tx, c):
     """, **c)
 
 def create_skill(tx, s):
+    _validator.validate_node("Skill", s)
     tx.run("""
         MERGE (sk:Skill {id: $id})
         SET sk.name              = $name,
@@ -106,6 +120,7 @@ def create_skill(tx, s):
     """, **s)
 
 def create_server(tx, s):
+    _validator.validate_node("Server", s)
     tx.run("""
         MERGE (sv:Server {id: $id})
         SET sv.name               = $name,
@@ -117,6 +132,7 @@ def create_server(tx, s):
     """, **s)
 
 def create_flow(tx, f):
+    _validator.validate_node("Flow", f)
     tx.run("""
         MERGE (fl:Flow {id: $id})
         SET fl.name              = $name,

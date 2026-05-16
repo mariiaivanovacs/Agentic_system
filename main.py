@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -37,6 +38,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("main")
+RUNS_DIR = Path(".agent_runs")
 
 
 def _separator(title: str = "") -> None:
@@ -81,6 +83,28 @@ def _print_state_summary(state: dict) -> None:
         print(f"  {state['final_output']}")
 
 
+def _save_run_record(thread_id: str, state: dict) -> None:
+    proposal_id = state.get("proposal_id")
+    if not proposal_id:
+        return
+
+    RUNS_DIR.mkdir(exist_ok=True)
+    payload = {
+        "thread_id": thread_id,
+        "proposal_id": proposal_id,
+        "goal": state.get("goal", ""),
+        "human_approval_required": state.get("human_approval_required", False),
+    }
+    (RUNS_DIR / f"{thread_id}.json").write_text(json.dumps(payload, indent=2))
+
+
+def _load_run_record(thread_id: str) -> dict | None:
+    path = RUNS_DIR / f"{thread_id}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
 def run_new(goal: str, thread_id: str) -> None:
     from src.agents.graph import build_graph
     from src.agents.tools import verify_neo4j_connection
@@ -122,6 +146,7 @@ def run_new(goal: str, thread_id: str) -> None:
                     print(f"  → {m.content}")
 
     final_state = graph.get_state(config).values
+    _save_run_record(thread_id, final_state)
     _print_state_summary(final_state)
 
     # If the graph paused for human approval, tell the user how to resume
@@ -136,24 +161,43 @@ def run_new(goal: str, thread_id: str) -> None:
 
 
 def run_resume(thread_id: str, approved: bool, reason: str) -> None:
-    from langgraph.types import Command
-    from src.agents.graph import build_graph
-    from src.agents.tools import verify_neo4j_connection
+    from src.agents.tools import activate_proposal, reject_proposal, verify_neo4j_connection
 
     print(f"\nResuming thread: {thread_id}")
     print(f"Decision: {'APPROVE' if approved else 'REJECT'}")
     if not approved:
         print(f"Reason: {reason}")
 
-    graph = build_graph()
-    config = {"configurable": {"thread_id": thread_id}}
-
     verify_neo4j_connection()
 
-    resume_payload = {"approved": approved, "reason": reason}
-    result = graph.invoke(Command(resume=resume_payload), config=config)
+    run_record = _load_run_record(thread_id)
+    if not run_record:
+        raise RuntimeError(
+            f"No local run record found for thread {thread_id}. "
+            "Run the agent again and use the thread id printed by that run, "
+            "or approve/reject directly from the Streamlit Proposals page."
+        )
 
-    _print_state_summary(result)
+    proposal_id = run_record["proposal_id"]
+    if approved:
+        activate_proposal(proposal_id)
+        final = f"Proposal {proposal_id} approved and activated in Graph B."
+    else:
+        reject_proposal(proposal_id, reason)
+        final = f"Proposal {proposal_id} rejected. Reason: {reason}"
+
+    run_record["human_approval_required"] = False
+    run_record["decision"] = "approved" if approved else "rejected"
+    (RUNS_DIR / f"{thread_id}.json").write_text(json.dumps(run_record, indent=2))
+
+    _print_state_summary(
+        {
+            "goal": run_record.get("goal", ""),
+            "proposal_id": proposal_id,
+            "human_approval_required": False,
+            "final_output": final,
+        }
+    )
 
 
 def main() -> None:

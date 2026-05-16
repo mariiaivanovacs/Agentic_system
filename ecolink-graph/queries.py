@@ -56,6 +56,31 @@ def get_failed_matches(threshold=5.0):
     """, {"threshold": threshold})
 
 
+def get_success_patterns(industry: str, min_score: float = 7.0):
+    """Successful mentor matches for an industry — used by GraphRAG retriever."""
+    return run_query("""
+        MATCH (c:Company)-[r:MATCHED_WITH]->(m:Mentor)
+        WHERE c.industry = $industry AND r.outcome_score >= $min_score
+        RETURN c.name AS company, c.pain_points AS pain_points,
+               c.stage AS stage,
+               m.name AS mentor, m.expertise_tags AS skills,
+               r.outcome_score AS score, r.feedback AS feedback
+        ORDER BY r.outcome_score DESC LIMIT 10
+    """, {"industry": industry, "min_score": min_score})
+
+
+def get_failure_patterns(industry: str, max_score: float = 4.0):
+    """Failed mentor matches for an industry — used by GraphRAG retriever."""
+    return run_query("""
+        MATCH (c:Company)-[r:MATCHED_WITH]->(m:Mentor)
+        WHERE c.industry = $industry AND r.outcome_score <= $max_score
+        RETURN c.name AS company, c.pain_points AS pain_points,
+               m.name AS mentor, m.expertise_tags AS skills,
+               r.outcome_score AS score, r.feedback AS feedback
+        ORDER BY r.outcome_score ASC LIMIT 10
+    """, {"industry": industry, "max_score": max_score})
+
+
 def get_best_mentors_by_industry(industry):
     """Top mentors for a given industry based on past scores."""
     return run_query("""
@@ -329,6 +354,14 @@ if __name__ == "__main__":
 
     print("\n=== Best Mentors for Fintech ===")
     for row in get_best_mentors_by_industry("Fintech"):
+        print(row)
+
+    print("\n=== Success Patterns — Fintech (score >= 7) ===")
+    for row in get_success_patterns("Fintech")[:3]:
+        print(row)
+
+    print("\n=== Failure Patterns — Healthtech (score <= 4) ===")
+    for row in get_failure_patterns("Healthtech")[:3]:
         print(row)
 
     print("\n=== All Flows (Graph B) ===")
