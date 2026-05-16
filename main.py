@@ -31,6 +31,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.realtime.event_bus import publish_event
+
 load_dotenv()
 
 logging.basicConfig(
@@ -68,6 +70,16 @@ def _print_state_summary(state: dict) -> None:
             print(f"  {k:<12}: {v}")
         if latest.get("error_log"):
             print(f"  Error   : {latest['error_log']}")
+
+    if state.get("infra_error"):
+        err = state["infra_error"]
+        _separator("Infrastructure Error")
+        print(f"  Type    : {err.get('error_type')}")
+        print(f"  Service : {err.get('service')}")
+        print(f"  Action  : {err.get('human_action')}")
+        if err.get("activation_url"):
+            print(f"  Fix URL : {err.get('activation_url')}")
+        print(f"  Tip     : Switch to local sandbox with SANDBOX_MODE=local in .env")
 
     if state.get("proposed_flow_yaml"):
         _separator("Proposed Flow YAML")
@@ -111,6 +123,15 @@ def run_new(goal: str, thread_id: str) -> None:
 
     print(f"\nStarting new run | thread: {thread_id}")
     print(f"Goal: {goal}\n")
+    publish_event(
+        thread_id=thread_id,
+        source="ui",
+        target="planner",
+        event_type="started",
+        title="Agent run started",
+        detail=goal,
+        payload={"goal": goal},
+    )
 
     verify_neo4j_connection()
 
@@ -118,16 +139,27 @@ def run_new(goal: str, thread_id: str) -> None:
     config = {"configurable": {"thread_id": thread_id}}
 
     initial_state = {
+        "thread_id": thread_id,
         "messages": [],
         "goal": goal,
+        "goal_industry": "",
+        # App profile — empty by default (CLI runs target the EcoLink default graph)
+        "app_id": None,
+        "app_name": None,
+        "source_type": None,
+        "source_path": None,
+        "base_url": None,
         "current_hypothesis": "",
         "identified_problem_flow": "",
+        "failure_patterns": [],
+        "success_patterns": [],
         "proposed_flow_yaml": "",
         "critic_passed": False,
         "critic_feedback": "",
         "retry_count": 0,
         "simulation_results": [],
         "baseline_score": 0.0,
+        "infra_error": None,
         "simulation_succeeded": False,
         "proposal_id": "",
         "human_approval_required": False,
@@ -135,15 +167,53 @@ def run_new(goal: str, thread_id: str) -> None:
     }
 
     # Stream node-by-node so the user sees progress
-    for step in graph.stream(initial_state, config=config, stream_mode="updates"):
-        for node_name, updates in step.items():
-            print(f"[{node_name.upper()}] ✓")
-            if not isinstance(updates, dict):
-                continue
-            msgs = updates.get("messages", [])
-            for m in msgs:
-                if hasattr(m, "content"):
-                    print(f"  → {m.content}")
+    try:
+        for step in graph.stream(initial_state, config=config, stream_mode="updates"):
+            for node_name, updates in step.items():
+                print(f"[{node_name.upper()}] ✓")
+                event_type = "result"
+                title = f"{node_name.replace('_', ' ').title()} completed"
+                detail = ""
+                if not isinstance(updates, dict):
+                    publish_event(
+                        thread_id=thread_id,
+                        source=node_name,
+                        event_type=event_type,
+                        title=title,
+                        detail=detail,
+                    )
+                    continue
+                msgs = updates.get("messages", [])
+                for m in msgs:
+                    if hasattr(m, "content"):
+                        print(f"  → {m.content}")
+                        detail = f"{detail}\n{m.content}".strip()
+                if updates.get("human_approval_required"):
+                    event_type = "approval_required"
+                    title = "Human approval required"
+                elif node_name == "critic":
+                    event_type = "decision"
+                elif node_name == "simulator":
+                    event_type = "tool_call"
+                publish_event(
+                    thread_id=thread_id,
+                    source=node_name,
+                    target=_next_agent_for(node_name, updates),
+                    event_type=event_type,
+                    title=title,
+                    detail=detail,
+                    payload=_event_payload(updates),
+                )
+    except Exception as exc:
+        publish_event(
+            thread_id=thread_id,
+            source="agent",
+            event_type="error",
+            title="Agent run failed",
+            detail=str(exc),
+            payload={"goal": goal},
+        )
+        raise
 
     final_state = graph.get_state(config).values
     _save_run_record(thread_id, final_state)
@@ -152,6 +222,14 @@ def run_new(goal: str, thread_id: str) -> None:
     # If the graph paused for human approval, tell the user how to resume
     pending = graph.get_state(config).next
     if pending:
+        publish_event(
+            thread_id=thread_id,
+            source="human_approval",
+            event_type="approval_required",
+            title="Graph paused for admin approval",
+            detail=f"Approve or reject proposal {final_state.get('proposal_id', '')}",
+            payload={"proposal_id": final_state.get("proposal_id", "")},
+        )
         print(
             f"\n⏸  Graph paused — awaiting human approval.\n"
             f"   To approve : python main.py --thread-id {thread_id} --approve\n"
@@ -169,6 +247,13 @@ def run_resume(thread_id: str, approved: bool, reason: str) -> None:
         print(f"Reason: {reason}")
 
     verify_neo4j_connection()
+    publish_event(
+        thread_id=thread_id,
+        source="human_approval",
+        event_type="approved" if approved else "rejected",
+        title="Admin approved proposal" if approved else "Admin rejected proposal",
+        detail=reason if not approved else "Proposal activation requested from CLI.",
+    )
 
     run_record = _load_run_record(thread_id)
     if not run_record:
@@ -198,6 +283,48 @@ def run_resume(thread_id: str, approved: bool, reason: str) -> None:
             "final_output": final,
         }
     )
+    publish_event(
+        thread_id=thread_id,
+        source="human_approval",
+        event_type="result",
+        title="Approval decision completed",
+        detail=final,
+        payload={"proposal_id": proposal_id, "approved": approved},
+    )
+
+
+def _next_agent_for(node_name: str, updates: dict) -> str:
+    if node_name == "planner":
+        return "generator"
+    if node_name == "generator":
+        return "critic"
+    if node_name == "critic":
+        return "simulator" if updates.get("critic_passed") else "generator"
+    if node_name == "simulator":
+        return "evaluator"
+    if node_name == "evaluator":
+        return "human_approval" if updates.get("human_approval_required") else "generator"
+    return ""
+
+
+def _event_payload(updates: dict) -> dict:
+    payload: dict = {}
+    for key in (
+        "goal_industry",
+        "identified_problem_flow",
+        "baseline_score",
+        "critic_passed",
+        "retry_count",
+        "simulation_succeeded",
+        "proposal_id",
+        "human_approval_required",
+        "infra_error",
+    ):
+        if key in updates:
+            payload[key] = updates[key]
+    if updates.get("simulation_results"):
+        payload["simulation_results"] = updates["simulation_results"]
+    return payload
 
 
 def main() -> None:

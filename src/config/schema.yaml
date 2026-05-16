@@ -35,6 +35,10 @@ nodes:
     required: [score, date]
     optional: []
 
+  LearningEvent:
+    required: [id, date, flow_id, industry, hypothesis, baseline_score, simulation_score]
+    optional: [expected_improvement]
+
   WebSite:
     required: [domain, start_url, indexed_at]
     optional: []
@@ -42,6 +46,10 @@ nodes:
   WebPage:
     required: [url, title, indexed_at]
     optional: [description, h1, word_count, status_code]
+
+  WebEntity:
+    required: [id, name, entity_type, source]
+    optional: [description, category, value, url, metadata]
 
   SchemaNode:
     required: [label, required_fields]
@@ -54,6 +62,74 @@ nodes:
   IndexRun:
     required: [id, source, source_type, indexed_at]
     optional: [connector_count, skill_count, flow_count]
+
+  Project:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [repo_path, permission_status, analysis_status, created_at, updated_at, last_scan_id, display_name, technical_description, stakeholder_description]
+
+  Repository:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [repo_path, created_at, display_name, technical_description, stakeholder_description]
+
+  Package:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, package_type, display_name, technical_description, stakeholder_description]
+
+  File:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, extension, display_name, technical_description, stakeholder_description]
+
+  Module:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, language, display_name, technical_description, stakeholder_description]
+
+  Route:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, route_path, method, display_name, technical_description, stakeholder_description]
+
+  Controller:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, line, display_name, technical_description, stakeholder_description]
+
+  Service:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, line, service_type, display_name, technical_description, stakeholder_description]
+
+  Function:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, line, async_function, docstring, language, display_name, technical_description, stakeholder_description]
+
+  DatabaseModel:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, line, display_name, technical_description, stakeholder_description]
+
+  DatabaseTable:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, columns, display_name, technical_description, stakeholder_description]
+
+  DataStore:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, storage_type, display_name, technical_description, stakeholder_description]
+
+  Entity:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, entity_type, display_name, technical_description, stakeholder_description]
+
+  Workflow:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, display_name, technical_description, stakeholder_description]
+
+  Integration:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, integration_type, display_name, technical_description, stakeholder_description]
+
+  Artifact:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, artifact_type, display_name, technical_description, stakeholder_description]
+
+  Risk:
+    required: [id, name, project_id, scan_id, source_path, confidence]
+    optional: [created_at, risk_type, display_name, technical_description, stakeholder_description]
 
 relationships:
   MATCHED_WITH:
@@ -106,6 +182,31 @@ relationships:
     to: WebPage
     properties: [anchor_text]
 
+  MENTIONS_ENTITY:
+    from: WebPage
+    to: WebEntity
+    properties: [confidence, source]
+
+  SITE_HAS_ENTITY:
+    from: WebSite
+    to: WebEntity
+    properties: [source]
+
+  OWNS_CAMPAIGN:
+    from: WebEntity
+    to: WebEntity
+    properties: []
+
+  DONATED_TO:
+    from: WebEntity
+    to: WebEntity
+    properties: [amount]
+
+  EXPOSES_ROUTE:
+    from: WebSite
+    to: WebEntity
+    properties: []
+
   INDEXED_BY:
     from: Connector
     to: IndexRun
@@ -114,4 +215,79 @@ relationships:
   DISCOVERED_BY:
     from: Skill
     to: IndexRun
+    properties: []
+
+  PROJECT_HAS_REPOSITORY:
+    from: Project
+    to: Repository
+    properties: []
+
+  REPOSITORY_HAS_FILE:
+    from: Repository
+    to: File
+    properties: []
+
+  REPOSITORY_HAS_ARTIFACT:
+    from: Repository
+    to: Artifact
+    properties: []
+
+  FILE_DEFINES_FUNCTION:
+    from: File
+    to: Function
+    properties: []
+
+  FILE_DEFINES_ROUTE:
+    from: File
+    to: Route
+    properties: []
+
+  FILE_DEFINES_SERVICE:
+    from: File
+    to: Service
+    properties: []
+
+  FILE_DEFINES_MODEL:
+    from: File
+    to: DatabaseModel
+    properties: []
+
+  FILE_DEFINES_ENTITY:
+    from: File
+    to: Entity
+    properties: []
+
+  FILE_DEFINES_WORKFLOW:
+    from: File
+    to: Workflow
+    properties: []
+
+  FILE_USES_INTEGRATION:
+    from: File
+    to: Integration
+    properties: []
+
+  FILE_USES_DATASTORE:
+    from: File
+    to: DataStore
+    properties: []
+
+  WORKFLOW_USES_ROUTE:
+    from: File
+    to: Workflow
+    properties: []
+
+  WORKFLOW_TOUCHES_ENTITY:
+    from: Workflow
+    to: Entity
+    properties: []
+
+  SKILL_DERIVED_FROM_FUNCTION:
+    from: Skill
+    to: Function
+    properties: []
+
+  RISK_FOUND_IN:
+    from: File
+    to: Risk
     properties: []

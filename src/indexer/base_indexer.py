@@ -37,10 +37,32 @@ class FlowSpec:
 
 
 @dataclass
+class CodeNodeSpec:
+    id: str
+    label: str
+    name: str
+    project_id: str
+    scan_id: str
+    source_path: str
+    confidence: float = 1.0
+    properties: dict = field(default_factory=dict)
+
+
+@dataclass
+class CodeRelationshipSpec:
+    rel_type: str
+    from_id: str
+    to_id: str
+    properties: dict = field(default_factory=dict)
+
+
+@dataclass
 class IndexedSystem:
     connectors: list[ConnectorSpec] = field(default_factory=list)
     skills: list[SkillSpec] = field(default_factory=list)
     flows: list[FlowSpec] = field(default_factory=list)
+    code_nodes: list[CodeNodeSpec] = field(default_factory=list)
+    code_relationships: list[CodeRelationshipSpec] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
 

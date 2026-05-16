@@ -6,13 +6,40 @@ and writes an IndexRun meta-node recording source + timestamp + counts.
 """
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
 from neo4j import GraphDatabase
 
 from src.config.schema_validator import SchemaValidator
-from src.indexer.base_indexer import IndexedSystem
+from src.indexer.base_indexer import CodeNodeSpec, IndexedSystem
+
+
+CODE_NODE_LABELS = {
+    "Project",
+    "Repository",
+    "Package",
+    "File",
+    "Module",
+    "Route",
+    "Controller",
+    "Service",
+    "Function",
+    "DatabaseModel",
+    "DatabaseTable",
+    "DataStore",
+    "Entity",
+    "Workflow",
+    "Integration",
+    "Artifact",
+    "Risk",
+}
+
+
+def _slug(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", text.lower()).strip("_")
+    return slug or "root"
 
 
 def _driver():
@@ -97,5 +124,105 @@ class GraphWriter:
                         fl.avg_outcome_score = $avg_outcome_score
                 """, props)
 
+            self._write_code_graph(session, system, run_id)
+
         driver.close()
         return run_id
+
+    def _write_code_graph(self, session, system: IndexedSystem, run_id: str) -> None:
+        project_id = system.metadata.get("project_id")
+        if project_id:
+            session.run(
+                """
+                MATCH (n)
+                WHERE n.project_id = $project_id
+                  AND any(label IN labels(n) WHERE label IN $labels)
+                  AND NOT 'Project' IN labels(n)
+                DETACH DELETE n
+                """,
+                {"project_id": project_id, "labels": sorted(CODE_NODE_LABELS - {"Project"})},
+            )
+
+        for node in system.code_nodes:
+            self._validate_code_node(node)
+            props = {
+                "id": node.id,
+                "name": node.name,
+                "project_id": node.project_id,
+                "scan_id": node.scan_id,
+                "source_path": node.source_path,
+                "confidence": node.confidence,
+                **node.properties,
+            }
+            session.run(
+                f"""
+                MERGE (n:`{node.label}` {{id: $id}})
+                SET n += $props
+                """,
+                {"id": node.id, "props": props},
+            )
+            if node.label != "Project":
+                session.run(
+                    """
+                    MATCH (n {id: $node_id})
+                    MATCH (r:IndexRun {id: $run_id})
+                    MERGE (n)-[:DISCOVERED_BY]->(r)
+                    """,
+                    {"node_id": node.id, "run_id": run_id},
+                )
+
+        for rel in system.code_relationships:
+            session.run(
+                f"""
+                MATCH (a {{id: $from_id}})
+                MATCH (b {{id: $to_id}})
+                MERGE (a)-[r:`{rel.rel_type}`]->(b)
+                SET r += $props
+                """,
+                {
+                    "from_id": rel.from_id,
+                    "to_id": rel.to_id,
+                    "props": rel.properties,
+                },
+            )
+
+        for node in system.code_nodes:
+            if node.label != "Function":
+                continue
+            skill_id = f"skill_{_slug(node.id)}"
+            session.run(
+                """
+                MATCH (s:Skill {id: $skill_id})
+                MATCH (fn:Function {id: $function_id})
+                MERGE (s)-[:SKILL_DERIVED_FROM_FUNCTION]->(fn)
+                """,
+                {"skill_id": skill_id, "function_id": node.id},
+            )
+
+        project_id = system.metadata.get("project_id")
+        scan_id = system.metadata.get("scan_id")
+        if project_id and scan_id:
+            session.run(
+                """
+                MATCH (p:Project {id: $project_id})
+                SET p.last_scan_id = $scan_id,
+                    p.analysis_status = 'analysis_complete',
+                    p.permission_status = coalesce(p.permission_status, 'approved'),
+                    p.updated_at = datetime()
+                """,
+                {"project_id": project_id, "scan_id": scan_id},
+            )
+
+    def _validate_code_node(self, node: CodeNodeSpec) -> None:
+        if node.label not in CODE_NODE_LABELS:
+            raise ValueError(f"Unsupported code node label: {node.label}")
+        props = {
+            "id": node.id,
+            "name": node.name,
+            "project_id": node.project_id,
+            "scan_id": node.scan_id,
+            "source_path": node.source_path,
+            "confidence": node.confidence,
+            **node.properties,
+        }
+        self._validator.validate_node(node.label, props)

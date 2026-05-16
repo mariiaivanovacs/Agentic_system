@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +34,46 @@ from tenacity import (
 )
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# Data isolation — secret sanitisation                                         #
+# --------------------------------------------------------------------------- #
+
+# Keys whose values must never appear in a sandbox snapshot.
+_SECRET_KEYS: frozenset[str] = frozenset({
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "auth_key", "authkey", "auth_token", "authtoken", "credential",
+    "credentials", "private_key", "privatekey", "access_key",
+    "accesskey", "bearer", "encryption_key", "signing_key",
+})
+
+# Substrings that flag a key as sensitive even if not in the set above.
+_SECRET_SUBSTRINGS: tuple[str, ...] = (
+    "secret", "password", "passwd", "token", "credential", "private",
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    k = key.lower().replace("-", "_")
+    return k in _SECRET_KEYS or any(sub in k for sub in _SECRET_SUBSTRINGS)
+
+
+def _sanitize_snapshot(data: object) -> object:
+    """Recursively strip secret-looking keys from a snapshot dict/list.
+
+    Called on every snapshot before it is passed to the sandbox so that
+    passwords, tokens, and API keys can never leak into the execution environment.
+    """
+    if isinstance(data, dict):
+        return {
+            k: _sanitize_snapshot(v)
+            for k, v in data.items()
+            if not _is_secret_key(k)
+        }
+    if isinstance(data, list):
+        return [_sanitize_snapshot(item) for item in data]
+    return data
+
 
 # --------------------------------------------------------------------------- #
 # Neo4j helpers                                                                #
@@ -117,6 +158,7 @@ def _run_write_cypher(cypher: str, **params) -> List[Dict]:
 # --------------------------------------------------------------------------- #
 
 _WRITE_KEYWORDS = ("CREATE", "MERGE", "SET", "DELETE", "REMOVE", "DETACH", "CALL")
+_WRITE_KEYWORD_RE = re.compile(r"\b(" + "|".join(_WRITE_KEYWORDS) + r")\b", re.IGNORECASE)
 
 
 @tool
@@ -139,13 +181,12 @@ def query_graph(cypher_query: str) -> List[Dict]:
         MATCH (f:Flow {status: 'active'})-[:USES_SKILL]->(s:Skill)
         RETURN f.id AS flow_id, collect(s.id) AS skills
     """
-    upper = cypher_query.strip().upper()
-    for kw in _WRITE_KEYWORDS:
-        if kw in upper:
-            raise ValueError(
-                f"Write operation '{kw}' is not permitted via query_graph. "
-                "Use propose_change for approved writes."
-            )
+    match = _WRITE_KEYWORD_RE.search(cypher_query)
+    if match:
+        raise ValueError(
+            f"Write operation '{match.group(1).upper()}' is not permitted via query_graph. "
+            "Use propose_change for approved writes."
+        )
     try:
         return _run_read_cypher(cypher_query)
     except neo4j_exc.ServiceUnavailable as exc:
@@ -174,12 +215,21 @@ def _capability_token(flow_id: str) -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def _build_snapshot(industry: Optional[str] = None) -> dict:
+def _build_snapshot(
+    industry: Optional[str] = None,
+    app_id: Optional[str] = None,
+) -> dict:
     """Query Neo4j Graph A for companies and mentors to build a sandbox snapshot.
 
-    Falls back to sample data if Neo4j is unavailable, so the sandbox can always run.
+    Isolation guarantees:
+    - If *app_id* is provided, only Company nodes whose app_id matches are
+      included. Falls back to the full graph if that query returns no results
+      (the seeded EcoLink data pre-dates per-app scoping).
+    - The returned dict is always passed through _sanitize_snapshot() so that
+      secret-looking fields are stripped before the snapshot reaches the sandbox.
+    - Falls back to two-row sample data if Neo4j is unavailable.
     """
-    _SAMPLE = {
+    _SAMPLE: dict = {
         "companies": [
             {"id": "C-01", "name": "Nexus AI", "industry": "Fintech"},
             {"id": "C-02", "name": "Etech Finance", "industry": "Fintech"},
@@ -190,7 +240,26 @@ def _build_snapshot(industry: Optional[str] = None) -> dict:
         ],
     }
     try:
-        if industry:
+        # Build company query — try app_id-scoped first, fall back to unscoped
+        if app_id:
+            company_rows = _run_read_cypher(
+                "MATCH (c:Company) WHERE c.app_id = $app_id "
+                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
+                "LIMIT 15",
+                {"app_id": app_id},
+            )
+            if not company_rows:
+                logger.info(
+                    "No Company nodes found for app_id=%s; using full graph.", app_id
+                )
+                company_rows = _run_read_cypher(
+                    "MATCH (c:Company) WHERE c.industry = $industry "
+                    "RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15"
+                    if industry
+                    else "MATCH (c:Company) RETURN c.id AS id, c.name AS name, c.industry AS industry LIMIT 15",
+                    {"industry": industry} if industry else {},
+                )
+        elif industry:
             company_rows = _run_read_cypher(
                 "MATCH (c:Company) WHERE c.industry = $industry "
                 "RETURN c.id AS id, c.name AS name, c.industry AS industry "
@@ -221,12 +290,16 @@ def _build_snapshot(industry: Optional[str] = None) -> dict:
 
         if not companies or not mentors:
             logger.warning("Empty snapshot from Neo4j — falling back to sample data.")
-            return _SAMPLE
+            return _sanitize_snapshot(_SAMPLE)  # type: ignore[return-value]
 
-        return {"companies": companies, "mentors": mentors}
+        snapshot = {"companies": companies, "mentors": mentors}
+        if app_id:
+            snapshot["_meta"] = {"app_id": app_id, "scoped": True}
+        return _sanitize_snapshot(snapshot)  # type: ignore[return-value]
+
     except Exception as exc:
         logger.warning("Could not build snapshot from Neo4j (%s); using sample data.", exc)
-        return _SAMPLE
+        return _sanitize_snapshot(_SAMPLE)  # type: ignore[return-value]
 
 
 def _parse_sandbox_output(stdout: str) -> Optional[List[dict]]:
@@ -368,33 +441,159 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
     }
 
 
-def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
-    """Trigger sandbox_task.py via a Google Cloud Run Job.
+def _poll_cloud_logging_for_traces(
+    project: str, region: str, job: str, execution_id: str
+) -> Optional[List[dict]]:
+    """Poll Cloud Logging until DATA_STREAM_START/END markers appear in sandbox stdout.
 
-    Passes SNAPSHOT_DATA + PROPOSED_FLOW env vars as expected by sandbox_task.py.
+    Returns the parsed trace list on success, or None if the markers are not
+    found within the timeout window.
+    """
+    try:
+        from google.cloud import logging as gcp_logging  # noqa: PLC0415
+    except ImportError:
+        logger.error(
+            "google-cloud-logging is not installed. Run: pip install google-cloud-logging"
+        )
+        return None
+
+    log_client = gcp_logging.Client(project=project)
+    log_filter = (
+        f'resource.type="cloud_run_job" '
+        f'resource.labels.job_name="{job}" '
+        f'resource.labels.location="{region}" '
+        f'logName="projects/{project}/logs/run.googleapis.com%2Fstdout" '
+        f'labels."run.googleapis.com/execution-name"="{execution_id}"'
+    )
+
+    _MAX_WAIT_S = 60
+    _POLL_S = 5
+    deadline = time.time() + _MAX_WAIT_S
+
+    logger.info(
+        "Polling Cloud Logging for execution %s (up to %ds).",
+        execution_id,
+        _MAX_WAIT_S,
+    )
+
+    while time.time() < deadline:
+        entries = list(
+            log_client.list_entries(filter_=log_filter, order_by="timestamp asc")
+        )
+        parts: list[str] = []
+        for entry in entries:
+            payload = entry.payload
+            if isinstance(payload, str):
+                parts.append(payload)
+            elif isinstance(payload, dict):
+                parts.append(json.dumps(payload))
+            else:
+                try:
+                    parts.append(str(payload))
+                except Exception:
+                    pass
+        combined = "\n".join(parts)
+
+        if "DATA_STREAM_START" in combined and "DATA_STREAM_END" in combined:
+            traces = _parse_sandbox_output(combined)
+            if traces is not None:
+                logger.info(
+                    "Parsed %d traces from Cloud Logging for %s.", len(traces), execution_id
+                )
+                return traces
+
+        time.sleep(_POLL_S)
+
+    logger.warning(
+        "No DATA_STREAM_START/END found in Cloud Logging for %s after %ds.",
+        execution_id,
+        _MAX_WAIT_S,
+    )
+    return None
+
+
+def _classify_cloud_error(exc: Exception) -> dict:
+    """Parse a GCP exception into a structured infra-error dict."""
+    msg = str(exc)
+    # SERVICE_DISABLED — API not enabled on this project
+    if "SERVICE_DISABLED" in msg or "has not been used in project" in msg:
+        import re
+        url_match = re.search(r"https://console\.developers\.google\.com[^\s\"'>\]]+", msg)
+        activation_url = url_match.group(0).rstrip(").,") if url_match else ""
+        svc_match = re.search(r'value: "([^"]+\.googleapis\.com)"', msg)
+        service = svc_match.group(1) if svc_match else "run.googleapis.com"
+        return {
+            "error_type": "CLOUD_API_DISABLED",
+            "service": service,
+            "activation_url": activation_url,
+            "human_action": f"Enable the '{service}' API in GCP console, then retry.",
+            "raw": msg[:600],
+        }
+    # PERMISSION_DENIED
+    if "403" in msg or "PERMISSION_DENIED" in msg:
+        return {
+            "error_type": "CLOUD_PERMISSION_DENIED",
+            "service": "run.googleapis.com",
+            "activation_url": "",
+            "human_action": "Check GCP IAM permissions for the service account.",
+            "raw": msg[:600],
+        }
+    # Generic cloud error
+    return {
+        "error_type": "CLOUD_ERROR",
+        "service": "",
+        "activation_url": "",
+        "human_action": "Check GCP project configuration and credentials.",
+        "raw": msg[:600],
+    }
+
+
+def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
+    """Trigger sandbox_task.py via a Google Cloud Run Job, then poll Cloud Logging
+    for the DATA_STREAM_START/END output written by sandbox_task.py to extract
+    real metrics.
+
     The Cloud Run job must already exist (see sandbox-system/Dockerfile and
     SandboxExecutor.py for setup instructions).
+
+    Required env vars: GOOGLE_CLOUD_PROJECT, SANDBOX_JOB_NAME.
+    Optional: SANDBOX_GCP_REGION (default: us-central1).
     """
-    from google.cloud import run_v2
+    from google.cloud import run_v2  # noqa: PLC0415
 
     try:
         flow_def = yaml.safe_load(flow_yaml) or {}
-        flow_name = flow_def.get("flow_id", "proposed_flow") if isinstance(flow_def, dict) else "proposed_flow"
+        flow_name = (
+            flow_def.get("flow_id", "proposed_flow")
+            if isinstance(flow_def, dict)
+            else "proposed_flow"
+        )
     except yaml.YAMLError:
         flow_name = "proposed_flow"
 
-    client = run_v2.JobsClient()
-    project = os.environ["GOOGLE_CLOUD_PROJECT"]
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project:
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": "GOOGLE_CLOUD_PROJECT env var is not set.",
+        }
+    job = os.environ.get("SANDBOX_JOB_NAME")
+    if not job:
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": "SANDBOX_JOB_NAME env var is not set.",
+        }
     region = os.environ.get("SANDBOX_GCP_REGION", "us-central1")
-    job = os.environ["SANDBOX_JOB_NAME"]
 
+    client = run_v2.JobsClient()
     request = run_v2.RunJobRequest(
         name=f"projects/{project}/locations/{region}/jobs/{job}",
         overrides=run_v2.RunJobRequest.Overrides(
             container_overrides=[
                 run_v2.RunJobRequest.Overrides.ContainerOverride(
                     env=[
-                        # Match sandbox_task.py env var names exactly
                         run_v2.EnvVar(name="SNAPSHOT_DATA", value=json.dumps(snapshot)),
                         run_v2.EnvVar(name="PROPOSED_FLOW", value=flow_name),
                         run_v2.EnvVar(name="CAPABILITY_TOKEN", value=token),
@@ -403,22 +602,48 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
             ]
         ),
     )
+
+    t0 = time.time()
     try:
         operation = client.run_job(request=request)
-        result = operation.result(timeout=300)
-        # Cloud Run logs are not directly accessible here; return execution metadata.
-        # For production, poll Cloud Logging for DATA_STREAM_START/END output.
-        return {
-            "status": "success",
-            "metrics": {"gcp_execution_name": result.name, "match_score": 0.0, "latency_ms": 0},
-            "error_log": None,
-        }
-    except TimeoutError:
+        execution = operation.result(timeout=300)
+    except Exception as exc:
+        classified = _classify_cloud_error(exc)
+        logger.error(
+            "Cloud Run sandbox failed [%s]: %s",
+            classified["error_type"],
+            classified["raw"],
+        )
         return {
             "status": "fail",
             "metrics": {},
-            "error_log": "Timeout: sandbox execution exceeded 300 seconds.",
+            "error_log": classified["human_action"],
+            "infra_error": classified,
         }
+
+    latency_ms = round((time.time() - t0) * 1000)
+    # execution.name format: projects/{p}/locations/{r}/jobs/{j}/executions/{id}
+    execution_id = execution.name.split("/")[-1]
+    logger.info("Cloud Run execution %s completed in %dms.", execution_id, latency_ms)
+
+    traces = _poll_cloud_logging_for_traces(project, region, job, execution_id)
+    if traces is None:
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": (
+                f"Cloud Run execution '{execution_id}' finished but no DATA_STREAM_START/END "
+                "markers were found in Cloud Logging within 60s. "
+                "Verify sandbox_task.py ran and that google-cloud-logging is installed."
+            ),
+        }
+
+    return {
+        "status": "success",
+        "metrics": _traces_to_metrics(traces, latency_ms),
+        "error_log": None,
+        "traces": traces,
+    }
 
 
 @tool
@@ -462,9 +687,18 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
         return _mock_sandbox(flow_yaml)
 
     sandbox_mode = os.environ.get("SANDBOX_MODE", "local").lower()
-    snapshot = _build_snapshot()
+    # Pass app_id so _build_snapshot can scope the snapshot to the right app.
+    # dataset_snapshot_id is the caller-supplied hint; treat it as an industry
+    # tag or app_id depending on format (domain-like strings → app_id).
+    _snap_app_id = (
+        dataset_snapshot_id
+        if dataset_snapshot_id and "." in dataset_snapshot_id
+        else None
+    )
+    snapshot = _build_snapshot(app_id=_snap_app_id)
     logger.info(
-        "Sandbox snapshot: %d companies, %d mentors — mode: %s",
+        "Sandbox snapshot (isolation: app_id=%s): %d companies, %d mentors — mode: %s",
+        _snap_app_id or "none",
         len(snapshot.get("companies", [])),
         len(snapshot.get("mentors", [])),
         sandbox_mode,
@@ -594,3 +828,40 @@ def reject_proposal(proposal_id: str, reason: str) -> None:
         reason=reason,
     )
     logger.info("Proposal %s rejected: %s", proposal_id, reason)
+
+
+def approve_skill_proposal(skill_id: str) -> None:
+    """Mark a SkillProposal as approved. Called from Streamlit admin page."""
+    _run_write_cypher(
+        "MATCH (s:SkillProposal {id: $id}) SET s.status = 'approved'",
+        id=skill_id,
+    )
+    logger.info("SkillProposal %s approved.", skill_id)
+
+
+def reject_skill_proposal(skill_id: str, reason: str = "") -> None:
+    """Mark a SkillProposal as rejected. Called from Streamlit admin page."""
+    _run_write_cypher(
+        "MATCH (s:SkillProposal {id: $id}) SET s.status = 'rejected', s.rejection_reason = $reason",
+        id=skill_id,
+        reason=reason,
+    )
+    logger.info("SkillProposal %s rejected: %s", skill_id, reason)
+
+
+@tool
+def query_graph_semantic(query_text: str, top_k: int = 5) -> List[Dict]:
+    """Semantic vector search over the graph.
+
+    Returns nodes whose description is semantically similar to query_text.
+    Falls back to keyword CONTAINS search if no vector index exists.
+
+    Args:
+        query_text: Natural-language description of what to find.
+        top_k: Number of top results to return.
+
+    Returns:
+        List of dicts with id, name, description, label, score.
+    """
+    from src.graphrag.retriever import retrieve_semantic_context  # noqa: PLC0415
+    return retrieve_semantic_context(query_text, top_k=top_k)
