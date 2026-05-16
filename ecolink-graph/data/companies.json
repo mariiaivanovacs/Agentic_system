@@ -1,0 +1,272 @@
+[
+  {
+    "id": "c001",
+    "name": "Henry, Thomas and Byrd",
+    "industry": "Healthtech",
+    "stage": "Seed",
+    "pain_points": "Need marketing and growth strategy",
+    "revenue": 1824739,
+    "founded_year": 2023
+  },
+  {
+    "id": "c002",
+    "name": "Miller PLC",
+    "industry": "Healthtech",
+    "stage": "Series A",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3050182,
+    "founded_year": 2018
+  },
+  {
+    "id": "c003",
+    "name": "Padilla-Moody",
+    "industry": "Agritech",
+    "stage": "Seed",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3226906,
+    "founded_year": 2021
+  },
+  {
+    "id": "c004",
+    "name": "Wood, Phillips and Bradshaw",
+    "industry": "Healthtech",
+    "stage": "Pre-seed",
+    "pain_points": "Struggling to scale operations",
+    "revenue": 2110805,
+    "founded_year": 2021
+  },
+  {
+    "id": "c005",
+    "name": "Mitchell-Myers",
+    "industry": "Edtech",
+    "stage": "Seed",
+    "pain_points": "Looking for product-market fit",
+    "revenue": 1798015,
+    "founded_year": 2019
+  },
+  {
+    "id": "c006",
+    "name": "Richardson, Patterson and Rodriguez",
+    "industry": "Healthtech",
+    "stage": "Pre-seed",
+    "pain_points": "Need marketing and growth strategy",
+    "revenue": 3127120,
+    "founded_year": 2019
+  },
+  {
+    "id": "c007",
+    "name": "George Ltd",
+    "industry": "Edtech",
+    "stage": "Seed",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3703714,
+    "founded_year": 2021
+  },
+  {
+    "id": "c008",
+    "name": "Richardson-Spears",
+    "industry": "Fintech",
+    "stage": "Pre-seed",
+    "pain_points": "Require legal and compliance guidance",
+    "revenue": 1878129,
+    "founded_year": 2021
+  },
+  {
+    "id": "c009",
+    "name": "Matthews-Clark",
+    "industry": "Fintech",
+    "stage": "Series B",
+    "pain_points": "Need marketing and growth strategy",
+    "revenue": 4464507,
+    "founded_year": 2019
+  },
+  {
+    "id": "c010",
+    "name": "Johnson-Morales",
+    "industry": "Edtech",
+    "stage": "Series B",
+    "pain_points": "Require legal and compliance guidance",
+    "revenue": 1709101,
+    "founded_year": 2024
+  },
+  {
+    "id": "c011",
+    "name": "Ball-Moss",
+    "industry": "Healthtech",
+    "stage": "Pre-seed",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 2519243,
+    "founded_year": 2022
+  },
+  {
+    "id": "c012",
+    "name": "Moore Group",
+    "industry": "Logistics",
+    "stage": "Series A",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 714702,
+    "founded_year": 2022
+  },
+  {
+    "id": "c013",
+    "name": "Carson-Moore",
+    "industry": "Edtech",
+    "stage": "Seed",
+    "pain_points": "Looking for product-market fit",
+    "revenue": 490486,
+    "founded_year": 2023
+  },
+  {
+    "id": "c014",
+    "name": "Thompson, Davenport and Woods",
+    "industry": "Fintech",
+    "stage": "Seed",
+    "pain_points": "Need technical architecture advice",
+    "revenue": 29012,
+    "founded_year": 2020
+  },
+  {
+    "id": "c015",
+    "name": "Johnson-Fisher",
+    "industry": "Logistics",
+    "stage": "Series A",
+    "pain_points": "Require legal and compliance guidance",
+    "revenue": 3646119,
+    "founded_year": 2024
+  },
+  {
+    "id": "c016",
+    "name": "Moore, Price and Daniels",
+    "industry": "Healthtech",
+    "stage": "Series A",
+    "pain_points": "Looking for product-market fit",
+    "revenue": 4447362,
+    "founded_year": 2018
+  },
+  {
+    "id": "c017",
+    "name": "Hanson, Gonzalez and Braun",
+    "industry": "Fintech",
+    "stage": "Pre-seed",
+    "pain_points": "Require legal and compliance guidance",
+    "revenue": 2603039,
+    "founded_year": 2022
+  },
+  {
+    "id": "c018",
+    "name": "Stewart PLC",
+    "industry": "E-commerce",
+    "stage": "Series A",
+    "pain_points": "Looking for product-market fit",
+    "revenue": 543536,
+    "founded_year": 2022
+  },
+  {
+    "id": "c019",
+    "name": "Smith, Moreno and Preston",
+    "industry": "Edtech",
+    "stage": "Pre-seed",
+    "pain_points": "Need technical architecture advice",
+    "revenue": 4191261,
+    "founded_year": 2024
+  },
+  {
+    "id": "c020",
+    "name": "Gonzales Ltd",
+    "industry": "Fintech",
+    "stage": "Seed",
+    "pain_points": "Looking for product-market fit",
+    "revenue": 2217505,
+    "founded_year": 2022
+  },
+  {
+    "id": "c021",
+    "name": "Ford, Roberts and Giles",
+    "industry": "Fintech",
+    "stage": "Series A",
+    "pain_points": "Need marketing and growth strategy",
+    "revenue": 2314408,
+    "founded_year": 2019
+  },
+  {
+    "id": "c022",
+    "name": "Mason Inc",
+    "industry": "Agritech",
+    "stage": "Series B",
+    "pain_points": "Require legal and compliance guidance",
+    "revenue": 3093665,
+    "founded_year": 2024
+  },
+  {
+    "id": "c023",
+    "name": "Nguyen-Watson",
+    "industry": "E-commerce",
+    "stage": "Pre-seed",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 930199,
+    "founded_year": 2020
+  },
+  {
+    "id": "c024",
+    "name": "Bentley Ltd",
+    "industry": "Healthtech",
+    "stage": "Pre-seed",
+    "pain_points": "Need technical architecture advice",
+    "revenue": 3151345,
+    "founded_year": 2022
+  },
+  {
+    "id": "c025",
+    "name": "Walters-Davis",
+    "industry": "Healthtech",
+    "stage": "Pre-seed",
+    "pain_points": "Need technical architecture advice",
+    "revenue": 4234210,
+    "founded_year": 2019
+  },
+  {
+    "id": "c026",
+    "name": "Hayes Group",
+    "industry": "E-commerce",
+    "stage": "Series B",
+    "pain_points": "Struggling to scale operations",
+    "revenue": 1325509,
+    "founded_year": 2024
+  },
+  {
+    "id": "c027",
+    "name": "Castro-Wolf",
+    "industry": "Fintech",
+    "stage": "Pre-seed",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3351935,
+    "founded_year": 2021
+  },
+  {
+    "id": "c028",
+    "name": "Washington Group",
+    "industry": "Fintech",
+    "stage": "Series A",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3977036,
+    "founded_year": 2024
+  },
+  {
+    "id": "c029",
+    "name": "Jackson-Rodriguez",
+    "industry": "Healthtech",
+    "stage": "Series B",
+    "pain_points": "Need help with investor pitching",
+    "revenue": 3077856,
+    "founded_year": 2020
+  },
+  {
+    "id": "c030",
+    "name": "Peterson Group",
+    "industry": "Fintech",
+    "stage": "Series A",
+    "pain_points": "Need technical architecture advice",
+    "revenue": 224012,
+    "founded_year": 2024
+  }
+]

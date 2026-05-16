@@ -1,0 +1,22 @@
+[
+  {"startup_id": 1, "mentor_name": "Alice Smith",  "outcome_score": 2.0, "note": "Too technical, not Fintech focused"},
+  {"startup_id": 2, "mentor_name": "Charlie Lee",  "outcome_score": 9.5, "note": "Perfect fit, deep Healthtech AI knowledge"},
+  {"startup_id": 3, "mentor_name": "Bob Jones",    "outcome_score": 7.0, "note": "Good growth advice for e-commerce"},
+  {"startup_id": 4, "mentor_name": "Bob Jones",    "outcome_score": 1.5, "note": "Wrong industry, marketing not relevant for crypto"},
+  {"startup_id": 1, "mentor_name": "Diana Patel",  "outcome_score": 8.8, "note": "Excellent Fintech expertise, very relevant"},
+  {"startup_id": 4, "mentor_name": "George Obi",   "outcome_score": 9.1, "note": "Perfect crypto/DeFi match"},
+  {"startup_id": 2, "mentor_name": "Ethan Wu",     "outcome_score": 9.3, "note": "Deep Healthtech domain knowledge"},
+  {"startup_id": 3, "mentor_name": "Fiona Grant",  "rating": 8.2,        "note": "Strong e-commerce background"},
+  {"startup_id": 5, "mentor_name": "Hannah Cruz",  "outcome_score": 8.9, "note": "ML expertise matches AI startup needs"},
+  {"startup_id": 6, "mentor_name": "Ivan Sorel",   "outcome_score": 6.5, "note": "Decent B2B advice but not sector-specific"},
+  {"startup_id": 7, "mentor_name": "Julia Tan",    "outcome_score": 9.0, "note": "Great Fintech regulatory guidance"},
+  {"startup_id": 8, "mentor_name": "Alice Smith",  "outcome_score": 3.1, "note": "Technical mismatch, startup needed sales help"},
+  {"startup_id": 9, "mentor_name": "Charlie Lee",  "outcome_score": 8.7, "note": "Cloud migration expertise very useful"},
+  {"startup_id": 10,"mentor_name": "Bob Jones",    "outcome_score": 2.3, "note": "Random match, no relevant expertise"},
+  {"startup_id": 5, "mentor_name": "Bob Jones",    "outcome_score": 1.8, "note": "Marketing focus useless for deep tech"},
+  {"startup_id": 6, "mentor_name": "Diana Patel",  "outcome_score": 7.5, "note": "Payments experience partly relevant"},
+  {"startup_id": 1, "mentor_name": "Bob Jones",    "outcome_score": 2.1, "note": "Random_shuffle assigned wrong mentor again"},
+  {"startup_id": 3, "mentor_name": "George Obi",   "outcome_score": 1.2, "note": "Blockchain mentor for e-commerce - total mismatch"},
+  {"startup_id": 7, "mentor_name": "Charlie Lee",  "outcome_score": 5.5, "note": "Some overlap but not Fintech specific"},
+  {"startup_id": 8, "mentor_name": "Hannah Cruz",  "outcome_score": 9.2, "note": "NLP expertise exactly what the startup needed"}
+]

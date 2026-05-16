@@ -1,0 +1,266 @@
+[
+  {
+    "id": "m001",
+    "name": "Traci Rodriguez",
+    "expertise_tags": [
+      "Operations",
+      "Scaling",
+      "Legal",
+      "Product"
+    ],
+    "industry_focus": "Agritech",
+    "availability": "Part-time",
+    "past_success_score": 3.8,
+    "years_experience": 16
+  },
+  {
+    "id": "m002",
+    "name": "Andrew Ortega",
+    "expertise_tags": [
+      "Technology",
+      "Marketing",
+      "Operations"
+    ],
+    "industry_focus": "Logistics",
+    "availability": "Full-time",
+    "past_success_score": 4.1,
+    "years_experience": 15
+  },
+  {
+    "id": "m003",
+    "name": "Eric Flores",
+    "expertise_tags": [
+      "Scaling",
+      "Finance",
+      "Fundraising",
+      "Technology"
+    ],
+    "industry_focus": "E-commerce",
+    "availability": "Weekends",
+    "past_success_score": 4.7,
+    "years_experience": 7
+  },
+  {
+    "id": "m004",
+    "name": "Beth Foster",
+    "expertise_tags": [
+      "Scaling",
+      "Finance",
+      "Legal",
+      "Fundraising"
+    ],
+    "industry_focus": "Fintech",
+    "availability": "Full-time",
+    "past_success_score": 4.2,
+    "years_experience": 15
+  },
+  {
+    "id": "m005",
+    "name": "Krista Boone",
+    "expertise_tags": [
+      "Technology",
+      "Operations",
+      "Finance",
+      "Product"
+    ],
+    "industry_focus": "Agritech",
+    "availability": "Part-time",
+    "past_success_score": 4.5,
+    "years_experience": 20
+  },
+  {
+    "id": "m006",
+    "name": "Kelly Boyd",
+    "expertise_tags": [
+      "Operations",
+      "Product",
+      "Marketing"
+    ],
+    "industry_focus": "Healthtech",
+    "availability": "Weekends",
+    "past_success_score": 4.1,
+    "years_experience": 10
+  },
+  {
+    "id": "m007",
+    "name": "Ashley Barajas PhD",
+    "expertise_tags": [
+      "Operations",
+      "Fundraising"
+    ],
+    "industry_focus": "Healthtech",
+    "availability": "Part-time",
+    "past_success_score": 3.8,
+    "years_experience": 10
+  },
+  {
+    "id": "m008",
+    "name": "Katrina Maldonado",
+    "expertise_tags": [
+      "Fundraising",
+      "Marketing",
+      "Legal",
+      "Product"
+    ],
+    "industry_focus": "Healthtech",
+    "availability": "Part-time",
+    "past_success_score": 3.1,
+    "years_experience": 5
+  },
+  {
+    "id": "m009",
+    "name": "Rachael Chen",
+    "expertise_tags": [
+      "Legal",
+      "Marketing"
+    ],
+    "industry_focus": "Healthtech",
+    "availability": "Part-time",
+    "past_success_score": 3.7,
+    "years_experience": 17
+  },
+  {
+    "id": "m010",
+    "name": "Brian Coleman",
+    "expertise_tags": [
+      "Finance",
+      "Marketing"
+    ],
+    "industry_focus": "Logistics",
+    "availability": "Weekends",
+    "past_success_score": 3.4,
+    "years_experience": 9
+  },
+  {
+    "id": "m011",
+    "name": "Robert Soto",
+    "expertise_tags": [
+      "Scaling",
+      "Operations",
+      "Product"
+    ],
+    "industry_focus": "E-commerce",
+    "availability": "Weekends",
+    "past_success_score": 3.1,
+    "years_experience": 17
+  },
+  {
+    "id": "m012",
+    "name": "Daniel Guerrero",
+    "expertise_tags": [
+      "Marketing",
+      "Product",
+      "Technology",
+      "Finance"
+    ],
+    "industry_focus": "Fintech",
+    "availability": "Part-time",
+    "past_success_score": 4.6,
+    "years_experience": 13
+  },
+  {
+    "id": "m013",
+    "name": "Heather Peterson",
+    "expertise_tags": [
+      "Operations",
+      "Scaling",
+      "Product"
+    ],
+    "industry_focus": "Fintech",
+    "availability": "Part-time",
+    "past_success_score": 3.3,
+    "years_experience": 21
+  },
+  {
+    "id": "m014",
+    "name": "Maurice Rose",
+    "expertise_tags": [
+      "Operations",
+      "Technology",
+      "Scaling"
+    ],
+    "industry_focus": "E-commerce",
+    "availability": "Weekends",
+    "past_success_score": 3.3,
+    "years_experience": 24
+  },
+  {
+    "id": "m015",
+    "name": "Jake Bush",
+    "expertise_tags": [
+      "Scaling",
+      "Fundraising"
+    ],
+    "industry_focus": "Fintech",
+    "availability": "Weekends",
+    "past_success_score": 3.3,
+    "years_experience": 15
+  },
+  {
+    "id": "m016",
+    "name": "Dawn Jones",
+    "expertise_tags": [
+      "Finance",
+      "Operations",
+      "Fundraising",
+      "Scaling"
+    ],
+    "industry_focus": "Healthtech",
+    "availability": "Weekends",
+    "past_success_score": 3.2,
+    "years_experience": 10
+  },
+  {
+    "id": "m017",
+    "name": "Lauren Collins",
+    "expertise_tags": [
+      "Finance",
+      "Marketing",
+      "Product"
+    ],
+    "industry_focus": "Logistics",
+    "availability": "Part-time",
+    "past_success_score": 4.8,
+    "years_experience": 25
+  },
+  {
+    "id": "m018",
+    "name": "Courtney Bruce",
+    "expertise_tags": [
+      "Technology",
+      "Marketing"
+    ],
+    "industry_focus": "Agritech",
+    "availability": "Part-time",
+    "past_success_score": 5.0,
+    "years_experience": 14
+  },
+  {
+    "id": "m019",
+    "name": "Kimberly Carson MD",
+    "expertise_tags": [
+      "Marketing",
+      "Scaling",
+      "Fundraising",
+      "Product"
+    ],
+    "industry_focus": "E-commerce",
+    "availability": "Weekends",
+    "past_success_score": 3.3,
+    "years_experience": 25
+  },
+  {
+    "id": "m020",
+    "name": "Scott Porter",
+    "expertise_tags": [
+      "Legal",
+      "Product",
+      "Technology",
+      "Marketing"
+    ],
+    "industry_focus": "Agritech",
+    "availability": "Part-time",
+    "past_success_score": 4.1,
+    "years_experience": 19
+  }
+]

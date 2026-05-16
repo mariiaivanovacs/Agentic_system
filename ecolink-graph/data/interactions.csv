@@ -1,0 +1,101 @@
+interaction_id,company_id,mentor_id,programme_name,outcome_score,feedback,date
+i001,c010,m018,NEXUS Accelerator,3.4,Poor match — skills misaligned,2024-06-28
+i002,c015,m006,NEXUS Accelerator,8.1,Good match,2025-05-16
+i003,c017,m006,MyHack Bootcamp,2.1,Poor match — skills misaligned,2024-06-28
+i004,c011,m016,CIP Spark,1.2,Poor match — skills misaligned,2025-08-07
+i005,c030,m010,MyHack Bootcamp,6.4,Good match,2023-05-19
+i006,c025,m010,NEXUS Accelerator,7.2,Good match,2023-10-02
+i007,c010,m009,MyHack Bootcamp,9.5,Good match,2026-05-06
+i008,c001,m013,MyHack Bootcamp,6.2,Good match,2024-06-16
+i009,c020,m005,MyHack Bootcamp,2.4,Poor match — skills misaligned,2023-11-27
+i010,c024,m003,CIP 500,8.7,Good match,2023-06-22
+i011,c028,m002,CIP 500,2.2,Poor match — skills misaligned,2025-02-01
+i012,c005,m008,CIP Spark,8.3,Good match,2023-09-12
+i013,c002,m003,MyHack Bootcamp,9.0,Good match,2025-12-12
+i014,c016,m014,MyHack Bootcamp,2.4,Poor match — skills misaligned,2025-04-01
+i015,c009,m014,MyHack Bootcamp,3.6,Poor match — skills misaligned,2023-12-21
+i016,c004,m008,MyHack Bootcamp,3.2,Poor match — skills misaligned,2026-01-21
+i017,c009,m006,CIP Spark,5.7,Poor match — skills misaligned,2023-07-14
+i018,c008,m012,MyHack Bootcamp,3.7,Poor match — skills misaligned,2025-01-03
+i019,c017,m010,CIP 500,5.0,Poor match — skills misaligned,2024-11-21
+i020,c014,m012,MyHack Bootcamp,6.1,Good match,2025-10-13
+i021,c018,m001,MyHack Bootcamp,4.9,Poor match — skills misaligned,2023-06-05
+i022,c009,m008,CIP Spark,8.6,Good match,2025-08-08
+i023,c020,m015,MyHack Bootcamp,3.0,Poor match — skills misaligned,2024-03-22
+i024,c025,m016,CIP Spark,2.7,Poor match — skills misaligned,2024-05-13
+i025,c015,m008,MyHack Bootcamp,8.8,Good match,2025-11-06
+i026,c006,m002,NEXUS Accelerator,9.7,Good match,2025-02-10
+i027,c007,m003,CIP Spark,6.3,Good match,2025-07-08
+i028,c024,m009,NEXUS Accelerator,1.4,Poor match — skills misaligned,2023-07-20
+i029,c005,m014,CIP Spark,4.6,Poor match — skills misaligned,2025-05-03
+i030,c008,m008,CIP Spark,7.6,Good match,2024-06-19
+i031,c003,m006,CIP 500,7.0,Good match,2026-01-04
+i032,c022,m020,MyHack Bootcamp,9.2,Good match,2024-09-14
+i033,c011,m014,CIP 500,7.2,Good match,2023-05-26
+i034,c026,m018,CIP Spark,7.1,Good match,2025-09-14
+i035,c019,m014,CIP 500,6.7,Good match,2026-02-27
+i036,c019,m011,CIP Spark,2.7,Poor match — skills misaligned,2024-11-30
+i037,c013,m008,CIP Spark,7.3,Good match,2024-02-13
+i038,c027,m003,MyHack Bootcamp,9.1,Good match,2024-05-24
+i039,c023,m012,MyHack Bootcamp,1.3,Poor match — skills misaligned,2025-05-29
+i040,c029,m010,MyHack Bootcamp,8.6,Good match,2023-07-08
+i041,c026,m008,MyHack Bootcamp,8.5,Good match,2024-03-11
+i042,c012,m004,CIP 500,2.4,Poor match — skills misaligned,2024-03-29
+i043,c005,m001,CIP 500,7.8,Good match,2025-01-25
+i044,c020,m004,MyHack Bootcamp,5.0,Poor match — skills misaligned,2023-06-12
+i045,c018,m019,CIP Spark,8.8,Good match,2024-09-25
+i046,c010,m010,CIP Spark,6.8,Good match,2023-06-14
+i047,c020,m017,CIP Spark,1.4,Poor match — skills misaligned,2025-11-30
+i048,c003,m007,CIP 500,8.0,Good match,2025-04-26
+i049,c008,m007,CIP Spark,6.7,Good match,2024-12-03
+i050,c011,m009,CIP 500,7.8,Good match,2024-06-11
+i051,c008,m004,MyHack Bootcamp,7.7,Good match,2023-06-22
+i052,c027,m014,CIP Spark,5.9,Poor match — skills misaligned,2025-02-17
+i053,c026,m004,CIP Spark,9.5,Good match,2024-09-16
+i054,c023,m012,NEXUS Accelerator,5.9,Poor match — skills misaligned,2024-11-14
+i055,c018,m005,CIP Spark,7.4,Good match,2024-07-03
+i056,c007,m008,CIP 500,7.5,Good match,2025-07-12
+i057,c012,m010,MyHack Bootcamp,5.0,Poor match — skills misaligned,2025-06-04
+i058,c007,m019,CIP Spark,2.1,Poor match — skills misaligned,2023-07-26
+i059,c008,m018,NEXUS Accelerator,3.9,Poor match — skills misaligned,2023-07-23
+i060,c003,m014,MyHack Bootcamp,6.1,Good match,2023-06-29
+i061,c002,m013,CIP Spark,5.9,Poor match — skills misaligned,2024-08-02
+i062,c027,m015,CIP 500,3.4,Poor match — skills misaligned,2023-12-16
+i063,c002,m002,NEXUS Accelerator,8.1,Good match,2026-03-19
+i064,c007,m020,NEXUS Accelerator,5.0,Poor match — skills misaligned,2023-11-10
+i065,c006,m006,CIP 500,2.5,Poor match — skills misaligned,2026-03-23
+i066,c023,m016,CIP 500,3.0,Poor match — skills misaligned,2024-07-22
+i067,c001,m013,NEXUS Accelerator,7.7,Good match,2026-02-02
+i068,c012,m009,CIP 500,2.1,Poor match — skills misaligned,2025-10-05
+i069,c013,m006,NEXUS Accelerator,6.0,Good match,2026-03-30
+i070,c022,m014,NEXUS Accelerator,7.8,Good match,2024-12-19
+i071,c007,m009,CIP 500,9.8,Good match,2023-07-27
+i072,c004,m019,CIP 500,3.4,Poor match — skills misaligned,2025-06-14
+i073,c023,m004,CIP 500,6.7,Good match,2024-01-25
+i074,c028,m008,MyHack Bootcamp,4.9,Poor match — skills misaligned,2023-06-19
+i075,c010,m011,CIP Spark,8.0,Good match,2024-05-11
+i076,c022,m002,NEXUS Accelerator,2.9,Poor match — skills misaligned,2026-03-04
+i077,c012,m011,NEXUS Accelerator,9.0,Good match,2024-01-23
+i078,c021,m014,MyHack Bootcamp,5.9,Poor match — skills misaligned,2024-01-19
+i079,c021,m012,CIP Spark,8.6,Good match,2025-09-12
+i080,c005,m017,MyHack Bootcamp,1.7,Poor match — skills misaligned,2024-11-29
+i081,c024,m001,CIP 500,3.5,Poor match — skills misaligned,2025-08-26
+i082,c006,m001,CIP 500,7.3,Good match,2024-10-16
+i083,c029,m001,CIP 500,8.6,Good match,2025-12-22
+i084,c024,m012,CIP 500,4.4,Poor match — skills misaligned,2024-01-06
+i085,c016,m020,CIP Spark,6.3,Good match,2026-04-20
+i086,c001,m002,CIP 500,7.1,Good match,2024-09-13
+i087,c026,m002,NEXUS Accelerator,1.6,Poor match — skills misaligned,2025-09-28
+i088,c001,m008,CIP Spark,6.4,Good match,2023-07-07
+i089,c022,m015,NEXUS Accelerator,5.3,Poor match — skills misaligned,2024-07-09
+i090,c005,m013,NEXUS Accelerator,5.5,Poor match — skills misaligned,2025-10-17
+i091,c025,m010,NEXUS Accelerator,2.1,Poor match — skills misaligned,2025-11-08
+i092,c021,m006,NEXUS Accelerator,6.4,Good match,2024-03-02
+i093,c030,m017,CIP Spark,1.0,Poor match — skills misaligned,2025-03-02
+i094,c027,m006,CIP 500,5.0,Poor match — skills misaligned,2024-01-24
+i095,c007,m019,NEXUS Accelerator,7.2,Good match,2025-06-27
+i096,c013,m011,CIP 500,2.3,Poor match — skills misaligned,2025-08-04
+i097,c007,m009,MyHack Bootcamp,4.6,Poor match — skills misaligned,2024-01-18
+i098,c013,m009,CIP Spark,9.7,Good match,2025-11-24
+i099,c008,m002,CIP 500,7.2,Good match,2024-02-24
+i100,c016,m001,CIP 500,2.2,Poor match — skills misaligned,2025-04-21

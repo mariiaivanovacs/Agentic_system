@@ -1,0 +1,58 @@
+[
+  {
+    "id": "flow_basic_match",
+    "name": "Basic Match Flow",
+    "description": "Simple industry filter then random sort \u2014 old approach",
+    "status": "deprecated",
+    "avg_outcome_score": 4.2,
+    "skills_used": [
+      "skill_filter_industry",
+      "skill_random_sort"
+    ],
+    "connector_used": "conn_sql_v1",
+    "server_id": "srv_001"
+  },
+  {
+    "id": "flow_smart_match_v1",
+    "name": "Smart Match Flow v1",
+    "description": "Filters by industry and availability then scores",
+    "status": "active",
+    "avg_outcome_score": 7.1,
+    "skills_used": [
+      "skill_filter_industry",
+      "skill_availability_check",
+      "skill_score_calculator"
+    ],
+    "connector_used": "conn_sql_v2",
+    "server_id": "srv_002"
+  },
+  {
+    "id": "flow_semantic_match_v1",
+    "name": "Semantic Match Flow v1",
+    "description": "Uses AI embeddings for deep matching \u2014 best performing",
+    "status": "active",
+    "avg_outcome_score": 8.8,
+    "skills_used": [
+      "skill_semantic_similarity",
+      "skill_availability_check",
+      "skill_stage_filter",
+      "skill_score_calculator"
+    ],
+    "connector_used": "conn_api_v1",
+    "server_id": "srv_002"
+  },
+  {
+    "id": "flow_proposed_healthtech",
+    "name": "Proposed Healthtech Flow",
+    "description": "Agent proposed flow optimised for Healthtech startups",
+    "status": "proposed",
+    "avg_outcome_score": 0.0,
+    "skills_used": [
+      "skill_semantic_similarity",
+      "skill_stage_filter",
+      "skill_score_calculator"
+    ],
+    "connector_used": "conn_api_v1",
+    "server_id": "srv_003"
+  }
+]

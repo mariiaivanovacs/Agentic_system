@@ -1,0 +1,50 @@
+[
+  {
+    "id": "skill_filter_industry",
+    "name": "Filter by Industry",
+    "description": "Filters mentors by matching industry to company",
+    "language": "python",
+    "performance_score": 7.5,
+    "avg_execution_ms": 120
+  },
+  {
+    "id": "skill_random_sort",
+    "name": "Random Sort",
+    "description": "Randomly sorts mentor list \u2014 baseline only",
+    "language": "python",
+    "performance_score": 3.0,
+    "avg_execution_ms": 50
+  },
+  {
+    "id": "skill_semantic_similarity",
+    "name": "Semantic Similarity",
+    "description": "Uses embeddings to match mentor skills to company pain points",
+    "language": "python",
+    "performance_score": 9.2,
+    "avg_execution_ms": 850
+  },
+  {
+    "id": "skill_score_calculator",
+    "name": "Score Calculator",
+    "description": "Calculates weighted match score from multiple factors",
+    "language": "python",
+    "performance_score": 8.1,
+    "avg_execution_ms": 200
+  },
+  {
+    "id": "skill_availability_check",
+    "name": "Availability Check",
+    "description": "Filters out mentors who are unavailable",
+    "language": "python",
+    "performance_score": 8.8,
+    "avg_execution_ms": 80
+  },
+  {
+    "id": "skill_stage_filter",
+    "name": "Stage Filter",
+    "description": "Matches mentor experience to company funding stage",
+    "language": "python",
+    "performance_score": 7.9,
+    "avg_execution_ms": 100
+  }
+]

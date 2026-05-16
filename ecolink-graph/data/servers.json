@@ -1,0 +1,62 @@
+[
+  {
+    "id": "srv_001",
+    "name": "Server Alpha",
+    "cpu_capacity": 100,
+    "current_load": 85,
+    "status": "overloaded",
+    "error_rate_history": [
+      0.01,
+      0.05,
+      0.12,
+      0.2,
+      0.25
+    ],
+    "region": "KL-East"
+  },
+  {
+    "id": "srv_002",
+    "name": "Server Beta",
+    "cpu_capacity": 100,
+    "current_load": 42,
+    "status": "healthy",
+    "error_rate_history": [
+      0.01,
+      0.01,
+      0.02,
+      0.01,
+      0.01
+    ],
+    "region": "KL-West"
+  },
+  {
+    "id": "srv_003",
+    "name": "Server Gamma",
+    "cpu_capacity": 100,
+    "current_load": 10,
+    "status": "healthy",
+    "error_rate_history": [
+      0.0,
+      0.01,
+      0.0,
+      0.01,
+      0.0
+    ],
+    "region": "KL-Central"
+  },
+  {
+    "id": "srv_004",
+    "name": "Server Delta",
+    "cpu_capacity": 100,
+    "current_load": 95,
+    "status": "critical",
+    "error_rate_history": [
+      0.1,
+      0.18,
+      0.25,
+      0.3,
+      0.35
+    ],
+    "region": "KL-North"
+  }
+]

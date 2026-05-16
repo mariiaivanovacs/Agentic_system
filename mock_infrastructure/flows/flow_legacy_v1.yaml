@@ -1,0 +1,14 @@
+flow_id: legacy_matcher_v1
+description: "Old random matcher — filters by exact industry string then randomly shuffles mentors"
+status: active
+version: "1.0"
+steps:
+  - skill: filter_by_industry_exact
+    config:
+      match_mode: exact
+      case_sensitive: true
+  - skill: random_shuffle
+    config:
+      seed: null
+output: matches
+runs_on: server_1

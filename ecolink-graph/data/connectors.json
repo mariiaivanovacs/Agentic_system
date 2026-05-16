@@ -1,0 +1,38 @@
+[
+  {
+    "id": "conn_csv_v1",
+    "name": "CSV Connector v1",
+    "type": "csv",
+    "description": "Reads company and mentor data from CSV files",
+    "version": "1.0",
+    "status": "active",
+    "error_rate": 0.01
+  },
+  {
+    "id": "conn_sql_v1",
+    "name": "SQL Connector v1",
+    "type": "sql",
+    "description": "Reads from legacy PostgreSQL database",
+    "version": "1.0",
+    "status": "deprecated",
+    "error_rate": 0.25
+  },
+  {
+    "id": "conn_sql_v2",
+    "name": "SQL Connector v2",
+    "type": "sql",
+    "description": "Improved SQL connector with connection pooling",
+    "version": "2.0",
+    "status": "active",
+    "error_rate": 0.01
+  },
+  {
+    "id": "conn_api_v1",
+    "name": "API Connector v1",
+    "type": "api",
+    "description": "Reads from external partner APIs",
+    "version": "1.0",
+    "status": "active",
+    "error_rate": 0.02
+  }
+]
