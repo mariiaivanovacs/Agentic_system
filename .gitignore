@@ -45,3 +45,5 @@ build/
 checkpoints/
 .langgraph/
 .agent_runs/
+.agent_events/
+.playwright-cli/
