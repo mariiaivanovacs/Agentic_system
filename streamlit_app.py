@@ -1051,159 +1051,236 @@ elif page == "Flows":
     )
     if status and not flows.empty:
         flows = flows[flows["status"].isin(status)]
-    display_table(flows, height=320)
+    display_table(flows, height=300)
 
+    st.divider()
     st.subheader("Optimize a Flow")
-    st.caption("Select a flow to run the agent and propose an improved version — no need to leave this page.")
+    st.caption("Select one of the original flows below. The agent will analyse it and propose an improved version without leaving this page.")
 
     all_flows = load_flows()
-    flow_names = all_flows["name"].tolist() if not all_flows.empty else []
 
-    selected_flow_name = st.selectbox("Select flow to optimize", flow_names)
+    # ── Only show real original flows, not agent-generated proposals ──
+    original_flows = all_flows[
+        ~all_flows["name"].fillna("").str.startswith("newflow") &
+        ~all_flows["status"].fillna("").isin(["proposed", "rejected"])
+    ] if not all_flows.empty else all_flows
 
-    # Get selected flow details for display
-    selected_row = all_flows[all_flows["name"] == selected_flow_name]
-    selected_score   = float(selected_row["avg_score"].values[0]) if not selected_row.empty and selected_row["avg_score"].values[0] else 0
-    selected_skills  = selected_row["skills"].values[0] if not selected_row.empty else []
-    selected_conn    = selected_row["connector"].values[0] if not selected_row.empty else "unknown"
-    selected_status  = selected_row["status"].values[0] if not selected_row.empty else ""
+    if original_flows.empty:
+        st.info("No original flows found to optimize.")
+    else:
+        # ── Flow selection as clean cards ──
+        selected_idx = st.session_state.get("selected_flow_idx", 0)
+        selected_idx = min(selected_idx, len(original_flows) - 1)
 
-    # Show selected flow info
-    with st.container(border=True):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Flow", selected_flow_name[:22])
-        c2.metric("Current Score", selected_score if selected_score else "N/A")
-        c3.metric("Connector", selected_conn or "—")
-        c4.metric("Status", selected_status or "—")
-
-    # Animation function with shimmer effect
-    opt_phase = st.session_state.get("opt_phase", "idle")
-    opt_slot  = st.empty()
-
-    def opt_anim(phase="idle", flow_name=""):
-        phases_map = {
-            "idle":       (-1, f"Ready — click Optimize to improve '{flow_name}'"),
-            "reading":    (0,  f"Planner reading '{flow_name}' skills and connectors from Neo4j graph..."),
-            "thinking":   (1,  f"Generator asking Gemini AI how to improve '{flow_name}'..."),
-            "proposing":  (2,  f"Critic validating the proposed replacement flow against constraints..."),
-            "validating": (3,  f"Simulator testing the new flow safely in sandbox environment..."),
-            "done":       (4,  f"Complete — improved version of '{flow_name}' saved as proposal"),
-            "error":      (-2, "No new proposals were created — try again in a moment"),
-        }
-        active, msg = phases_map.get(phase, phases_map["idle"])
-
-        agents = [
-            ("Planner",   "Reads flow + history", "#3267a8", "#dcecff"),
-            ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
-            ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
-            ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
-        ]
-
-        cards = ""
-        for i, (name, role, color, bg) in enumerate(agents):
-            is_a = active == i
-            is_d = active > i and active >= 0
-            op   = "1" if (is_a or is_d) else "0.28"
-            bd   = f"2px solid {color}" if is_a else "1px solid #d8d1c2"
-            cbg  = bg if is_a else "#fffaf0"
-            pulse = "animation:pulse-card 1.4s ease-in-out infinite;" if is_a else ""
-            shimmer = '<div style="position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:shimmer 1.3s infinite;pointer-events:none;"></div>' if is_a else ""
-
-            if is_a:
-                dot = f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:{color};animation:blink .9s infinite;margin-right:6px;flex-shrink:0;" aria-hidden="true"></span>'
-            elif is_d:
-                dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#167447;margin-right:6px;flex-shrink:0;" aria-hidden="true"></span>'
+        cols = st.columns(len(original_flows))
+        for i, (_, row) in enumerate(original_flows.iterrows()):
+            score = row.get("avg_score")
+            score_val = float(score) if score and str(score) != "nan" else None
+            if score_val is None:
+                score_display = "N/A"
+                score_color = "#65706d"
+            elif score_val < 5:
+                score_display = f"{score_val:.1f} — low"
+                score_color = "#a73737"
+            elif score_val < 7:
+                score_display = f"{score_val:.1f} — ok"
+                score_color = "#a55b19"
             else:
-                dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d8d1c2;margin-right:6px;flex-shrink:0;" aria-hidden="true"></span>'
+                score_display = f"{score_val:.1f} — good"
+                score_color = "#167447"
 
-            cards += f'<div style="background:{cbg};border:{bd};border-radius:12px;padding:14px 12px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:6px;">{dot}<span style="font-size:.84rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.72rem;color:#65706d;line-height:1.4;">{role}</div></div>'
+            is_sel = selected_idx == i
+            border = "2px solid #19211f" if is_sel else "1px solid #d8d1c2"
+            bg = "#19211f" if is_sel else "#fffaf0"
+            txt = "#f7f1e4" if is_sel else "#19211f"
+            sub = "#a8a49e" if is_sel else "#65706d"
 
-            if i < 3:
-                ac = color if (is_a or is_d) else "#d8d1c2"
-                cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:20px;" aria-hidden="true">&rarr;</div>'
+            with cols[i]:
+                st.markdown(f"""
+                <div style="background:{bg};border:{border};border-radius:10px;
+                            padding:12px 14px;cursor:pointer;transition:all .2s;
+                            margin-bottom:8px;">
+                    <div style="font-size:.82rem;font-weight:600;color:{txt};margin-bottom:4px;
+                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                        {row['name']}
+                    </div>
+                    <div style="font-size:.72rem;color:{score_color if not is_sel else '#a8a49e'};">
+                        Score: {score_display}
+                    </div>
+                    <div style="font-size:.7rem;color:{sub};margin-top:2px;">
+                        {row.get('status','') or '—'}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("Select", key=f"sel_{i}", use_container_width=True):
+                    st.session_state["selected_flow_idx"] = i
+                    st.session_state["opt_phase"] = "idle"
+                    st.rerun()
 
-        pct = max(0, int(active / 4 * 100)) if active >= 0 else 0
+        # ── Selected flow details — compact row ──
+        sel_row     = original_flows.iloc[selected_idx]
+        sel_name    = sel_row["name"]
+        sel_score   = sel_row.get("avg_score")
+        sel_score_f = float(sel_score) if sel_score and str(sel_score) != "nan" else None
+        sel_conn    = sel_row.get("connector")
+        sel_conn    = sel_conn if sel_conn and str(sel_conn) != "nan" else "—"
+        sel_skills  = sel_row.get("skills") or []
+        sel_status  = sel_row.get("status") or "—"
 
-        if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
-        elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
-        elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
-        else:                 sb,sbd,sc = "#edf5ff","#3267a8","#3267a8"
+        st.markdown(f"""
+        <div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:10px;
+                    padding:12px 16px;margin:8px 0 12px;display:flex;gap:24px;
+                    flex-wrap:wrap;align-items:center;">
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Selected flow</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_name}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Current score</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{f"{sel_score_f:.1f}" if sel_score_f is not None else "N/A"}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Connector</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_conn}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Status</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_status}</div>
+            </div>
+            <div>
+                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Skills</div>
+                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{len(sel_skills) if isinstance(sel_skills, list) else 0} skills</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-        return f"""<style>
+        # ── Agent animation ──
+        opt_phase = st.session_state.get("opt_phase", "idle")
+        opt_slot  = st.empty()
+
+        def opt_anim(phase="idle", flow_name=""):
+            phases_map = {
+                "idle":       (-1, f"Ready — click Optimize to improve '{flow_name}'"),
+                "reading":    (0,  f"Planner reading '{flow_name}' skills and history from Neo4j..."),
+                "thinking":   (1,  f"Generator asking Gemini AI how to improve '{flow_name}'..."),
+                "proposing":  (2,  f"Critic validating the proposed replacement flow..."),
+                "validating": (3,  f"Simulator testing the new flow in sandbox..."),
+                "done":       (4,  f"Complete — improved version of '{flow_name}' saved as proposal"),
+                "error":      (-2, "No new proposals were created — try again in a moment"),
+            }
+            active, msg = phases_map.get(phase, phases_map["idle"])
+            agents = [
+                ("Planner",   "Reads flow + history", "#3267a8", "#dcecff"),
+                ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
+                ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
+                ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
+            ]
+            cards = ""
+            for i, (name, role, color, bg) in enumerate(agents):
+                is_a = active == i
+                is_d = active > i and active >= 0
+                op   = "1" if (is_a or is_d) else "0.55"
+                bd   = f"2px solid {color}" if is_a else "1px solid #d8d1c2"
+                cbg  = bg if is_a else "#fffaf0"
+                pulse = "animation:pulse-card 1.4s ease-in-out infinite;" if is_a else ""
+                shimmer = '<div style="position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:shimmer 1.3s infinite;pointer-events:none;"></div>' if is_a else ""
+                if is_a:
+                    dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{color};animation:blink .9s infinite;margin-right:5px;flex-shrink:0;"></span>'
+                elif is_d:
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#167447;margin-right:5px;flex-shrink:0;"></span>'
+                else:
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d8d1c2;margin-right:5px;flex-shrink:0;"></span>'
+                cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#65706d;line-height:1.3;">{role}</div></div>'
+                if i < 3:
+                    ac = color if (is_a or is_d) else "#d8d1c2"
+                    cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:16px;">&rarr;</div>'
+            pct = max(0, int(active / 4 * 100)) if active >= 0 else 0
+            if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
+            elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
+            elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
+            else:                 sb,sbd,sc = "#edf5ff","#3267a8","#3267a8"
+            return f"""<style>
 @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
-@keyframes pulse-card{{0%,100%{{box-shadow:0 0 0 0 rgba(50,103,168,.18)}}50%{{box-shadow:0 0 0 6px rgba(50,103,168,.06)}}}}
+@keyframes pulse-card{{0%,100%{{box-shadow:0 0 0 0 rgba(50,103,168,.18)}}50%{{box-shadow:0 0 0 5px rgba(50,103,168,.06)}}}}
 @keyframes shimmer{{to{{left:140%}}}}
 </style>
-<div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:14px;padding:20px 20px 16px;">
-<div style="display:grid;grid-template-columns:1fr 32px 1fr 32px 1fr 32px 1fr;align-items:center;gap:3px;margin-bottom:14px;">{cards}</div>
-<div style="background:#ede8df;border-radius:999px;height:3px;margin-bottom:10px;overflow:hidden;">
-<div style="background:#0f7b63;height:3px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
-<div style="background:{sb};border:1px solid {sbd};border-radius:8px;padding:9px 13px;font-size:.79rem;color:{sc};font-weight:500;">{msg}</div>
+<div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
+<div style="display:grid;grid-template-columns:1fr 24px 1fr 24px 1fr 24px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
+<div style="background:#ede8df;border-radius:999px;height:2px;margin-bottom:9px;overflow:hidden;">
+<div style="background:#0f7b63;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
+<div style="background:{sb};border:1px solid {sbd};border-radius:7px;padding:8px 12px;font-size:.76rem;color:{sc};font-weight:500;">{msg}</div>
 </div>"""
 
-    opt_slot.markdown(opt_anim(opt_phase, selected_flow_name), unsafe_allow_html=True)
+        opt_slot.markdown(opt_anim(opt_phase, sel_name), unsafe_allow_html=True)
 
-    # Result panel after done
-    if opt_phase == "done":
-        with st.container(border=True):
-            st.markdown("**What the agent improved**")
-            ca, cb = st.columns(2)
-            with ca:
-                st.markdown(f"**Before:** {selected_flow_name}")
-                st.markdown(f"Score: `{selected_score}`")
-                st.markdown(f"Connector: `{selected_conn or '—'}`")
-            with cb:
-                st.markdown("**After:** New proposed flow")
-                st.markdown("Score: `estimated higher`")
-                st.markdown("Connector: `optimised`")
+        # Result panel after done
+        if opt_phase == "done":
+            st.markdown(f"""
+            <div style="background:#f0faf5;border:1px solid #167447;border-radius:10px;
+                        padding:14px 16px;margin-bottom:10px;">
+                <div style="font-size:.8rem;font-weight:600;color:#167447;margin-bottom:8px;">What the agent improved</div>
+                <div style="display:flex;gap:32px;flex-wrap:wrap;">
+                    <div>
+                        <div style="font-size:.68rem;color:#65706d;">Before</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">{sel_name}</div>
+                        <div style="font-size:.72rem;color:#a73737;">Score: {f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
+                    </div>
+                    <div style="font-size:18px;color:#d8d1c2;align-self:center;">&rarr;</div>
+                    <div>
+                        <div style="font-size:.68rem;color:#65706d;">After</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">New proposed flow</div>
+                        <div style="font-size:.72rem;color:#167447;">Score: estimated higher</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
             st.info("Go to Proposals page to Approve or Reject this proposal.")
 
-    if st.button("Optimize this flow", type="primary", use_container_width=True):
-        goal = f"Optimize the flow named '{selected_flow_name}'. Current score is {selected_score}. Analyse its skills and historical match failures. Propose a better version with improved skills and connectors."
-        st.session_state["opt_phase"] = "reading"
-        opt_slot.markdown(opt_anim("reading", selected_flow_name), unsafe_allow_html=True)
+        if st.button("Optimize this flow", type="primary", use_container_width=True):
+            goal = f"Optimize the flow named '{sel_name}'. Current score is {sel_score_f}. Analyse its skills and historical match failures. Propose a better version."
+            st.session_state["opt_phase"] = "reading"
+            opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
 
-        env = os.environ.copy()
-        proc = subprocess.Popen(
-            [sys.executable, "main.py", "--goal", goal],
-            cwd=ROOT, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        for raw_line in proc.stdout:
-            ll = raw_line.lower()
-            if any(x in ll for x in ["query_graph","querying","reading","graph","neo4j"]):
-                if st.session_state.get("opt_phase") != "reading":
-                    st.session_state["opt_phase"] = "reading"
-                    opt_slot.markdown(opt_anim("reading", selected_flow_name), unsafe_allow_html=True)
-            elif any(x in ll for x in ["gemini","llm","generat","propose","200 ok"]):
-                if st.session_state.get("opt_phase") != "thinking":
-                    st.session_state["opt_phase"] = "thinking"
-                    opt_slot.markdown(opt_anim("thinking", selected_flow_name), unsafe_allow_html=True)
-            elif any(x in ll for x in ["critic","validat","check"]):
-                if st.session_state.get("opt_phase") != "proposing":
-                    st.session_state["opt_phase"] = "proposing"
-                    opt_slot.markdown(opt_anim("proposing", selected_flow_name), unsafe_allow_html=True)
-            elif any(x in ll for x in ["simulat","sandbox"]):
-                if st.session_state.get("opt_phase") != "validating":
-                    st.session_state["opt_phase"] = "validating"
-                    opt_slot.markdown(opt_anim("validating", selected_flow_name), unsafe_allow_html=True)
+            env = os.environ.copy()
+            proc = subprocess.Popen(
+                [sys.executable, "main.py", "--goal", goal],
+                cwd=ROOT, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            for raw_line in proc.stdout:
+                ll = raw_line.lower()
+                if any(x in ll for x in ["query_graph","querying","reading","graph","neo4j"]):
+                    if st.session_state.get("opt_phase") != "reading":
+                        st.session_state["opt_phase"] = "reading"
+                        opt_slot.markdown(opt_anim("reading", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["gemini","llm","generat","propose","200 ok"]):
+                    if st.session_state.get("opt_phase") != "thinking":
+                        st.session_state["opt_phase"] = "thinking"
+                        opt_slot.markdown(opt_anim("thinking", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["critic","validat","check"]):
+                    if st.session_state.get("opt_phase") != "proposing":
+                        st.session_state["opt_phase"] = "proposing"
+                        opt_slot.markdown(opt_anim("proposing", sel_name), unsafe_allow_html=True)
+                elif any(x in ll for x in ["simulat","sandbox"]):
+                    if st.session_state.get("opt_phase") != "validating":
+                        st.session_state["opt_phase"] = "validating"
+                        opt_slot.markdown(opt_anim("validating", sel_name), unsafe_allow_html=True)
 
-        proc.wait()
-        clear_data_cache()
+            proc.wait()
+            clear_data_cache()
 
-        # ── FIX: check proposals actually created, not return code ──
-        updated_flows = load_flows()
-        has_proposals = not updated_flows[updated_flows["status"].fillna("") == "proposed"].empty
+            updated_flows = load_flows()
+            has_proposals = not updated_flows[updated_flows["status"].fillna("") == "proposed"].empty
 
-        if has_proposals:
-            st.session_state["opt_phase"] = "done"
-            opt_slot.markdown(opt_anim("done", selected_flow_name), unsafe_allow_html=True)
-            st.success("Optimization complete — go to Proposals to approve the new flow!")
-        else:
-            st.session_state["opt_phase"] = "error"
-            opt_slot.markdown(opt_anim("error", selected_flow_name), unsafe_allow_html=True)
-            st.warning("No new proposals were created. Try again in a moment.")
+            if has_proposals:
+                st.session_state["opt_phase"] = "done"
+                opt_slot.markdown(opt_anim("done", sel_name), unsafe_allow_html=True)
+                st.success("Optimization complete — go to Proposals to approve the new flow!")
+            else:
+                st.session_state["opt_phase"] = "error"
+                opt_slot.markdown(opt_anim("error", sel_name), unsafe_allow_html=True)
+                st.warning("No new proposals were created. Try again in a moment.")
 
 
 elif page == "Proposals":
