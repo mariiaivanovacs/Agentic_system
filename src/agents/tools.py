@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 import jwt
 import yaml
 from langchain_core.tools import tool
-from neo4j import GraphDatabase, Query
+from neo4j import GraphDatabase, Query, READ_ACCESS, WRITE_ACCESS
 from neo4j import exceptions as neo4j_exc
 from tenacity import (
     retry,
@@ -109,7 +109,7 @@ def verify_neo4j_connection() -> None:
     driver = _get_driver()
     try:
         driver.verify_connectivity()
-        with driver.session(database=_db()) as session:
+        with driver.session(database=_db(), default_access_mode=READ_ACCESS) as session:
             session.run(Query("RETURN 1 AS ok", timeout=_query_timeout())).single()
     except Exception as exc:
         raise RuntimeError(
@@ -124,13 +124,13 @@ def verify_neo4j_connection() -> None:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(neo4j_exc.ServiceUnavailable),
+    retry=retry_if_exception_type((neo4j_exc.ServiceUnavailable, neo4j_exc.SessionExpired)),
     reraise=True,
 )
 def _run_read_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
     driver = _get_driver()
     try:
-        with driver.session(database=_db()) as session:
+        with driver.session(database=_db(), default_access_mode=READ_ACCESS) as session:
             result = session.run(Query(cypher, timeout=_query_timeout()), params or {})
             return [dict(record) for record in result]
     finally:
@@ -140,14 +140,14 @@ def _run_read_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(neo4j_exc.ServiceUnavailable),
+    retry=retry_if_exception_type((neo4j_exc.ServiceUnavailable, neo4j_exc.SessionExpired)),
     reraise=True,
 )
 def _run_write_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
     """Execute a write Cypher query. Params are passed as a dict (matching _run_read_cypher)."""
     driver = _get_driver()
     try:
-        with driver.session(database=_db()) as session:
+        with driver.session(database=_db(), default_access_mode=WRITE_ACCESS) as session:
             result = session.run(Query(cypher, timeout=_query_timeout()), params or {})
             return [dict(record) for record in result]
     finally:
@@ -1290,6 +1290,202 @@ def approve_skill_modification(skill_id: str) -> None:
     
     result = graph_queries.approve_skill_modification(skill_id=skill_id)
     logger.info("SkillModificationProposal %s approved and applied: %s", skill_id, result)
+
+
+def create_architecture_proposal(payload: Dict) -> str:
+    """Persist a tested architecture proposal for admin approval.
+
+    The payload must be sanitized before it reaches this function. Credential
+    values are intentionally not accepted; only credential reference names are
+    stored so approved replacements can keep using the existing environment.
+    """
+    proposal_id = payload["proposal_id"]
+    summary = payload.get("summary", {})
+    validation = payload.get("validation", {})
+    _run_write_cypher(
+        """
+        MERGE (p:ArchitectureProposal {id: $id})
+        SET p.project_id = $project_id,
+            p.project_name = $project_name,
+            p.status = 'proposed',
+            p.replacement_mode = $replacement_mode,
+            p.test_status = $test_status,
+            p.tested = $tested,
+            p.summary = $summary,
+            p.payload_json = $payload_json,
+            p.credential_refs = $credential_refs,
+            p.created_at = coalesce(p.created_at, datetime()),
+            p.updated_at = datetime()
+        WITH p
+        OPTIONAL MATCH (project:Project {id: $project_id})
+        FOREACH (_ IN CASE WHEN project IS NULL THEN [] ELSE [1] END |
+            MERGE (project)-[:HAS_ARCHITECTURE_PROPOSAL]->(p)
+        )
+        """,
+        {
+            "id": proposal_id,
+            "project_id": payload.get("project_id"),
+            "project_name": payload.get("project_name"),
+            "replacement_mode": payload.get("replacement_mode", "merge"),
+            "test_status": validation.get("status", "unknown"),
+            "tested": validation.get("status") == "success",
+            "summary": summary.get("title", "Architecture proposal"),
+            "payload_json": json.dumps(payload),
+            "credential_refs": payload.get("credential_refs", []),
+        },
+    )
+    return proposal_id
+
+
+def list_architecture_proposals(project_id: Optional[str] = None, status: Optional[str] = None) -> List[Dict]:
+    """Return architecture proposals, newest first."""
+    clauses = []
+    params: Dict = {}
+    if project_id:
+        clauses.append("p.project_id = $project_id")
+        params["project_id"] = project_id
+    if status:
+        clauses.append("p.status = $status")
+        params["status"] = status
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    return _run_read_cypher(
+        f"""
+        MATCH (p:ArchitectureProposal)
+        {where}
+        RETURN p.id AS id,
+               p.project_id AS project_id,
+               p.project_name AS project_name,
+               p.status AS status,
+               p.replacement_mode AS replacement_mode,
+               p.test_status AS test_status,
+               p.tested AS tested,
+               p.summary AS summary,
+               p.payload_json AS payload_json,
+               p.credential_refs AS credential_refs,
+               toString(p.created_at) AS created_at,
+               toString(p.updated_at) AS updated_at
+        ORDER BY p.updated_at DESC
+        LIMIT 50
+        """,
+        params,
+    )
+
+
+def approve_architecture_proposal(proposal_id: str) -> Dict:
+    """Apply a tested architecture proposal as active architecture metadata."""
+    rows = _run_read_cypher(
+        "MATCH (p:ArchitectureProposal {id: $id}) RETURN p.payload_json AS payload_json, p.tested AS tested",
+        {"id": proposal_id},
+    )
+    if not rows:
+        raise ValueError(f"ArchitectureProposal not found: {proposal_id}")
+    if not rows[0].get("tested"):
+        raise ValueError("Only successfully tested architecture proposals can be approved.")
+
+    payload = json.loads(rows[0]["payload_json"])
+    project_id = payload["project_id"]
+    replacement_mode = payload.get("replacement_mode", "merge")
+    if replacement_mode == "replace":
+        _run_write_cypher(
+            """
+            MATCH (n)
+            WHERE n.project_id = $project_id
+              AND ('ArchitectureRule' IN labels(n) OR 'ArchitectureConnector' IN labels(n))
+            DETACH DELETE n
+            """,
+            {"project_id": project_id},
+        )
+
+    for rule in payload.get("communication_rules", []):
+        rule_id = f"{proposal_id}_rule_{uuid.uuid5(uuid.NAMESPACE_URL, rule.get('name', 'rule')).hex[:8]}"
+        _run_write_cypher(
+            """
+            MERGE (r:ArchitectureRule {id: $id})
+            SET r.project_id = $project_id,
+                r.proposal_id = $proposal_id,
+                r.name = $name,
+                r.rule = $rule,
+                r.status = 'active',
+                r.updated_at = datetime()
+            WITH r
+            MATCH (p:Project {id: $project_id})
+            MERGE (p)-[:HAS_ARCHITECTURE_RULE]->(r)
+            """,
+            {
+                "id": rule_id,
+                "project_id": project_id,
+                "proposal_id": proposal_id,
+                "name": rule.get("name"),
+                "rule": rule.get("rule"),
+            },
+        )
+
+    for connector in payload.get("database_connectors", []):
+        connector_id = f"{proposal_id}_connector_{connector.get('id')}"
+        _run_write_cypher(
+            """
+            MERGE (c:ArchitectureConnector {id: $id})
+            SET c.project_id = $project_id,
+                c.proposal_id = $proposal_id,
+                c.source_connector_id = $source_connector_id,
+                c.name = $name,
+                c.type = $type,
+                c.description = $description,
+                c.version = $version,
+                c.status = 'active',
+                c.credential_refs = $credential_refs,
+                c.updated_at = datetime()
+            WITH c
+            MATCH (p:Project {id: $project_id})
+            MERGE (p)-[:HAS_ARCHITECTURE_CONNECTOR]->(c)
+            """,
+            {
+                "id": connector_id,
+                "project_id": project_id,
+                "proposal_id": proposal_id,
+                "source_connector_id": connector.get("id"),
+                "name": connector.get("name"),
+                "type": connector.get("type"),
+                "description": connector.get("description"),
+                "version": connector.get("version", "1.0"),
+                "credential_refs": payload.get("credential_refs", []),
+            },
+        )
+
+    _run_write_cypher(
+        """
+        MATCH (proposal:ArchitectureProposal {id: $proposal_id})
+        SET proposal.status = 'approved',
+            proposal.approved_at = datetime(),
+            proposal.updated_at = datetime()
+        WITH proposal
+        MATCH (project:Project {id: $project_id})
+        SET project.active_architecture_proposal_id = $proposal_id,
+            project.architecture_status = 'approved',
+            project.credential_refs = $credential_refs,
+            project.updated_at = datetime()
+        MERGE (project)-[:APPROVED_ARCHITECTURE]->(proposal)
+        """,
+        {
+            "proposal_id": proposal_id,
+            "project_id": project_id,
+            "credential_refs": payload.get("credential_refs", []),
+        },
+    )
+    return {"status": "approved", "proposal_id": proposal_id, "project_id": project_id}
+
+
+def reject_architecture_proposal(proposal_id: str, reason: str = "Rejected by admin") -> Dict:
+    _run_write_cypher(
+        """
+        MATCH (p:ArchitectureProposal {id: $id})
+        SET p.status = 'rejected',
+            p.rejection_reason = $reason,
+            p.updated_at = datetime()
+        """,
+        {"id": proposal_id, "reason": reason},
+    )
+    return {"status": "rejected", "proposal_id": proposal_id}
 
 
 def reject_skill_modification(skill_id: str, reason: str = "") -> None:

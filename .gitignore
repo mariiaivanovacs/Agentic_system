@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.test_tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -46,4 +47,6 @@ checkpoints/
 .langgraph/
 .agent_runs/
 .agent_events/
+.agent_architecture_sandbox/
 .playwright-cli/
+requirements.txt
