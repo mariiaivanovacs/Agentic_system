@@ -36,7 +36,7 @@ from src.agents.tools import (
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
-IMPROVEMENT_THRESHOLD = 1.3  # simulation must beat baseline by this factor
+IMPROVEMENT_THRESHOLD = 1.1  # simulation must beat baseline by this factor
 
 
 # --------------------------------------------------------------------------- #
@@ -94,6 +94,44 @@ def _structured_invoke(llm: ChatGoogleGenerativeAI, prompt: str, schema):
     return llm.with_structured_output(schema).invoke(prompt)
 
 
+def _extract_flow_references(flow_def: dict) -> tuple[set[str], set[str]]:
+    skills: set[str] = set()
+    connectors: set[str] = set()
+
+    for step in flow_def.get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        skill = step.get("skill")
+        if skill:
+            skills.add(str(skill))
+        connector = step.get("connector") or step.get("connector_id")
+        if connector:
+            connectors.add(str(connector))
+
+    for key in ("connector", "connector_id", "connector_used", "reads_from"):
+        connector = flow_def.get(key)
+        if connector:
+            connectors.add(str(connector))
+
+    return skills, connectors
+
+
+def _normalise_flow_def(flow_def: dict) -> dict:
+    """Accept either top-level flow fields or {flow_id: {...}} YAML."""
+    if "steps" in flow_def or "runs_on" in flow_def:
+        return flow_def
+    if len(flow_def) != 1:
+        return flow_def
+
+    flow_id, nested = next(iter(flow_def.items()))
+    if not isinstance(nested, dict):
+        return flow_def
+
+    normalised = dict(nested)
+    normalised.setdefault("flow_id", str(flow_id))
+    return normalised
+
+
 # --------------------------------------------------------------------------- #
 # Node 1 — Planner                                                             #
 # --------------------------------------------------------------------------- #
@@ -107,9 +145,13 @@ def planner_node(state: AgentState) -> dict:
 
     flow_scores: List[Dict] = query_graph.invoke({
         "cypher_query": (
-            "MATCH (et:ExecutionTrace)-[:RAN_FLOW]->(f:Flow), "
-            "      (et)-[:RESULTED_IN]->(o:Outcome) "
-            "RETURN f.id AS flow_id, round(avg(o.score), 2) AS avg_score, count(et) AS runs "
+            "MATCH (f:Flow {status: 'active'}) "
+            "OPTIONAL MATCH (et:ExecutionTrace)-[:RAN_FLOW]->(f) "
+            "OPTIONAL MATCH (et)-[:RESULTED_IN]->(o:Outcome) "
+            "WITH f, round(avg(o.score), 2) AS trace_avg, count(et) AS simulation_runs "
+            "RETURN f.id AS flow_id, "
+            "       coalesce(f.avg_outcome_score, trace_avg, 0.0) AS avg_score, "
+            "       simulation_runs "
             "ORDER BY avg_score ASC"
         )
     })
@@ -125,7 +167,7 @@ def planner_node(state: AgentState) -> dict:
 
 Goal: {goal}
 
-== Historical flow performance (Graph A) ==
+== Active flow performance ==
 {json.dumps(flow_scores, indent=2)}
 
 == Active flows with their skills (Graph B) ==
@@ -241,8 +283,13 @@ def critic_node(state: AgentState) -> dict:
 
     # Step 1: parse YAML locally
     syntax_error: Optional[str] = None
+    flow_def: dict = {}
     try:
-        yaml.safe_load(flow_yaml)
+        parsed = yaml.safe_load(flow_yaml)
+        if isinstance(parsed, dict):
+            flow_def = _normalise_flow_def(parsed)
+        else:
+            syntax_error = "YAML must parse to a mapping/object."
     except yaml.YAMLError as exc:
         syntax_error = str(exc)
 
@@ -262,6 +309,48 @@ def critic_node(state: AgentState) -> dict:
         sid: f"load={s['load']:.0%} error_rate={s['error_rate']:.1%}"
         for sid, s in infra.items()
     }
+
+    local_issues: List[str] = []
+    if syntax_error:
+        local_issues.append(f"YAML syntax/schema error: {syntax_error}")
+    else:
+        referenced_skills, referenced_connectors = _extract_flow_references(flow_def)
+        unknown_skills = sorted(referenced_skills - valid_skills)
+        unknown_connectors = sorted(referenced_connectors - valid_connectors)
+        if unknown_skills:
+            local_issues.append(f"Unknown skill IDs: {unknown_skills}")
+        if unknown_connectors:
+            local_issues.append(f"Unknown connector IDs: {unknown_connectors}")
+
+        runs_on = flow_def.get("runs_on")
+        if not runs_on:
+            local_issues.append("Missing required runs_on server ID.")
+        elif runs_on not in infra:
+            local_issues.append(f"Unknown runs_on server ID: {runs_on}")
+        else:
+            stats = infra[runs_on]
+            if stats["load"] >= 0.80 or stats["error_rate"] >= 0.03:
+                local_issues.append(
+                    f"Server {runs_on} is not healthy "
+                    f"(load={stats['load']:.0%}, error_rate={stats['error_rate']:.1%})."
+                )
+
+        if not referenced_skills:
+            local_issues.append("No skills found in steps[*].skill.")
+
+    if local_issues:
+        suggestions = (
+            "Regenerate the YAML using only valid skill IDs from Graph B, "
+            "a healthy runs_on server, and steps[*].skill references."
+        )
+        return {
+            "messages": [
+                AIMessage(content=f"Critic result: FAIL\nIssues: {local_issues}")
+            ],
+            "critic_passed": False,
+            "critic_feedback": suggestions,
+            "retry_count": retry_count + 1,
+        }
 
     prompt = f"""You are the Critic agent for EcoLink NeuroCore. Review the proposed flow YAML.
 

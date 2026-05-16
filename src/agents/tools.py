@@ -13,9 +13,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 import time
 import uuid
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import jwt
 import yaml
@@ -83,11 +86,11 @@ def verify_neo4j_connection() -> None:
     retry=retry_if_exception_type(neo4j_exc.ServiceUnavailable),
     reraise=True,
 )
-def _run_read_cypher(cypher: str) -> List[Dict]:
+def _run_read_cypher(cypher: str, params: Optional[Dict] = None) -> List[Dict]:
     driver = _get_driver()
     try:
         with driver.session(database=_db()) as session:
-            result = session.run(Query(cypher, timeout=_query_timeout()))
+            result = session.run(Query(cypher, timeout=_query_timeout()), params or {})
             return [dict(record) for record in result]
     finally:
         driver.close()
@@ -171,6 +174,83 @@ def _capability_token(flow_id: str) -> str:
     return jwt.encode(payload, secret, algorithm="HS256")
 
 
+def _build_snapshot(industry: Optional[str] = None) -> dict:
+    """Query Neo4j Graph A for companies and mentors to build a sandbox snapshot.
+
+    Falls back to sample data if Neo4j is unavailable, so the sandbox can always run.
+    """
+    _SAMPLE = {
+        "companies": [
+            {"id": "C-01", "name": "Nexus AI", "industry": "Fintech"},
+            {"id": "C-02", "name": "Etech Finance", "industry": "Fintech"},
+        ],
+        "mentors": [
+            {"id": "M-99", "name": "Dr. Kuan Studio", "expertise": ["Finance", "Scaling"]},
+            {"id": "M-88", "name": "Darveen Ventures", "expertise": ["Marketing", "Product"]},
+        ],
+    }
+    try:
+        if industry:
+            company_rows = _run_read_cypher(
+                "MATCH (c:Company) WHERE c.industry = $industry "
+                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
+                "LIMIT 15",
+                {"industry": industry},
+            )
+        else:
+            company_rows = _run_read_cypher(
+                "MATCH (c:Company) "
+                "RETURN c.id AS id, c.name AS name, c.industry AS industry "
+                "LIMIT 15"
+            )
+
+        mentor_rows = _run_read_cypher(
+            "MATCH (m:Mentor) "
+            "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise "
+            "LIMIT 10"
+        )
+
+        companies = [
+            {"id": r["id"], "name": r["name"], "industry": r.get("industry", "")}
+            for r in company_rows
+        ]
+        mentors = [
+            {"id": r["id"], "name": r["name"], "expertise": r.get("expertise") or []}
+            for r in mentor_rows
+        ]
+
+        if not companies or not mentors:
+            logger.warning("Empty snapshot from Neo4j — falling back to sample data.")
+            return _SAMPLE
+
+        return {"companies": companies, "mentors": mentors}
+    except Exception as exc:
+        logger.warning("Could not build snapshot from Neo4j (%s); using sample data.", exc)
+        return _SAMPLE
+
+
+def _parse_sandbox_output(stdout: str) -> Optional[List[dict]]:
+    """Extract the JSON trace list from between DATA_STREAM_START/END markers."""
+    if "DATA_STREAM_START" not in stdout or "DATA_STREAM_END" not in stdout:
+        return None
+    start = stdout.index("DATA_STREAM_START") + len("DATA_STREAM_START")
+    end = stdout.index("DATA_STREAM_END")
+    try:
+        return json.loads(stdout[start:end].strip())
+    except json.JSONDecodeError:
+        return None
+
+
+def _traces_to_metrics(traces: List[dict], latency_ms: int) -> Dict:
+    scores = [
+        t.get("simulated_outcome_score", 0.0)
+        for t in traces
+        if t.get("status") == "SIMULATION_SUCCESS"
+    ]
+    avg_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+    return {"match_score": avg_score, "latency_ms": latency_ms, "sample_size": len(scores)}
+
+
 def _mock_sandbox(flow_yaml: str) -> Dict:
     """Deterministic local simulation based on skills present in the YAML.
 
@@ -203,8 +283,105 @@ def _mock_sandbox(flow_yaml: str) -> Dict:
     }
 
 
-def _cloud_run_sandbox(flow_yaml: str, dataset_snapshot_id: str, token: str) -> Dict:
+def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
+    """Run sandbox_task.py as a local subprocess.
+
+    This is the default non-mock mode: real simulation logic from sandbox-system/,
+    real Neo4j snapshot data, no GCP required. Uses the DATA_STREAM_START/END
+    protocol defined in sandbox_task.py to extract results.
+    """
+    sandbox_script = (
+        Path(__file__).resolve().parent.parent.parent
+        / "sandbox-system"
+        / "sandbox_task.py"
+    )
+    if not sandbox_script.exists():
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": f"sandbox_task.py not found at {sandbox_script}",
+        }
+
+    try:
+        flow_def = yaml.safe_load(flow_yaml) or {}
+        if not isinstance(flow_def, dict):
+            flow_def = {}
+        # Handle top-level nested YAML (e.g. {flow_proposal_v2: {steps: ...}})
+        if "flow_id" not in flow_def and len(flow_def) == 1:
+            key = next(iter(flow_def))
+            if isinstance(flow_def[key], dict):
+                flow_name = str(key)
+            else:
+                flow_name = str(key)
+        else:
+            flow_name = flow_def.get("flow_id", "proposed_flow")
+    except yaml.YAMLError:
+        flow_name = "proposed_flow"
+
+    env = os.environ.copy()
+    env["SNAPSHOT_DATA"] = json.dumps(snapshot)
+    env["PROPOSED_FLOW"] = str(flow_name)
+
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(sandbox_script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": "Sandbox subprocess timed out after 60 seconds.",
+        }
+
+    latency_ms = round((time.time() - t0) * 1000)
+    logger.debug("Sandbox stdout:\n%s", proc.stdout)
+
+    if proc.returncode != 0:
+        logger.error("Sandbox stderr:\n%s", proc.stderr)
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": proc.stderr or f"Sandbox exited with code {proc.returncode}",
+        }
+
+    traces = _parse_sandbox_output(proc.stdout)
+    if traces is None:
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": (
+                f"No DATA_STREAM_START/END markers in sandbox output. "
+                f"stdout: {proc.stdout[:400]}"
+            ),
+        }
+
+    return {
+        "status": "success",
+        "metrics": _traces_to_metrics(traces, latency_ms),
+        "error_log": None,
+        "traces": traces,
+    }
+
+
+def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
+    """Trigger sandbox_task.py via a Google Cloud Run Job.
+
+    Passes SNAPSHOT_DATA + PROPOSED_FLOW env vars as expected by sandbox_task.py.
+    The Cloud Run job must already exist (see sandbox-system/Dockerfile and
+    SandboxExecutor.py for setup instructions).
+    """
     from google.cloud import run_v2
+
+    try:
+        flow_def = yaml.safe_load(flow_yaml) or {}
+        flow_name = flow_def.get("flow_id", "proposed_flow") if isinstance(flow_def, dict) else "proposed_flow"
+    except yaml.YAMLError:
+        flow_name = "proposed_flow"
 
     client = run_v2.JobsClient()
     project = os.environ["GOOGLE_CLOUD_PROJECT"]
@@ -217,8 +394,9 @@ def _cloud_run_sandbox(flow_yaml: str, dataset_snapshot_id: str, token: str) -> 
             container_overrides=[
                 run_v2.RunJobRequest.Overrides.ContainerOverride(
                     env=[
-                        run_v2.EnvVar(name="FLOW_YAML", value=flow_yaml),
-                        run_v2.EnvVar(name="DATASET_SNAPSHOT_ID", value=dataset_snapshot_id),
+                        # Match sandbox_task.py env var names exactly
+                        run_v2.EnvVar(name="SNAPSHOT_DATA", value=json.dumps(snapshot)),
+                        run_v2.EnvVar(name="PROPOSED_FLOW", value=flow_name),
                         run_v2.EnvVar(name="CAPABILITY_TOKEN", value=token),
                     ]
                 )
@@ -228,9 +406,11 @@ def _cloud_run_sandbox(flow_yaml: str, dataset_snapshot_id: str, token: str) -> 
     try:
         operation = client.run_job(request=request)
         result = operation.result(timeout=300)
+        # Cloud Run logs are not directly accessible here; return execution metadata.
+        # For production, poll Cloud Logging for DATA_STREAM_START/END output.
         return {
             "status": "success",
-            "metrics": {"gcp_execution_id": result.name},
+            "metrics": {"gcp_execution_name": result.name, "match_score": 0.0, "latency_ms": 0},
             "error_log": None,
         }
     except TimeoutError:
@@ -245,34 +425,54 @@ def _cloud_run_sandbox(flow_yaml: str, dataset_snapshot_id: str, token: str) -> 
 def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
     """Send a proposed flow YAML to the Secure Sandbox and retrieve performance metrics.
 
-    A JWT capability token is generated automatically to restrict which
-    connectors and skills the sandbox is allowed to invoke.
+    Sandbox mode is controlled by two env vars:
+      SANDBOX_MOCK=true   → deterministic local mock (default, no dependencies)
+      SANDBOX_MOCK=false  → real sandbox using sandbox_task.py
+      SANDBOX_MODE=local     → run sandbox_task.py as a subprocess (no GCP)
+      SANDBOX_MODE=cloudrun  → trigger sandbox_task.py via Cloud Run Job (needs GCP)
 
-    Set SANDBOX_MOCK=true in .env to run a deterministic local simulation
-    without needing Google Cloud Run.
+    A JWT capability token is always generated to scope allowed connectors/skills.
+    The snapshot (companies + mentors) is built from live Neo4j data.
 
     Args:
         flow_yaml: Full YAML text of the proposed flow definition.
-        dataset_snapshot_id: ID of the historical dataset snapshot to test against.
+        dataset_snapshot_id: Hint for snapshot selection (industry or snapshot ID).
 
     Returns:
         Dict with:
           status      — 'success' or 'fail'
-          metrics     — dict with latency_ms, match_score, sample_size (on success)
+          metrics     — dict with match_score, latency_ms, sample_size (on success)
           error_log   — error string or None
+          traces      — list of per-company simulation traces (local/cloudrun modes)
     """
     try:
-        flow_def = yaml.safe_load(flow_yaml)
+        flow_def = yaml.safe_load(flow_yaml) or {}
     except yaml.YAMLError as exc:
         return {"status": "fail", "metrics": {}, "error_log": f"Invalid YAML: {exc}"}
+
+    if not isinstance(flow_def, dict):
+        flow_def = {}
 
     flow_id = flow_def.get("flow_id", f"flow_{uuid.uuid4().hex[:8]}")
     token = _capability_token(flow_id)
 
     use_mock = os.environ.get("SANDBOX_MOCK", "true").lower() == "true"
     if use_mock:
+        logger.info("Sandbox running in MOCK mode.")
         return _mock_sandbox(flow_yaml)
-    return _cloud_run_sandbox(flow_yaml, dataset_snapshot_id, token)
+
+    sandbox_mode = os.environ.get("SANDBOX_MODE", "local").lower()
+    snapshot = _build_snapshot()
+    logger.info(
+        "Sandbox snapshot: %d companies, %d mentors — mode: %s",
+        len(snapshot.get("companies", [])),
+        len(snapshot.get("mentors", [])),
+        sandbox_mode,
+    )
+
+    if sandbox_mode == "cloudrun":
+        return _cloud_run_sandbox(flow_yaml, snapshot, token)
+    return _local_sandbox(flow_yaml, snapshot)
 
 
 # --------------------------------------------------------------------------- #

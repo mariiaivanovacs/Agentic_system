@@ -1,0 +1,117 @@
+nodes:
+  Company:
+    required: [id, name, industry, stage]
+    optional: [pain_points, revenue, founded_year]
+
+  Mentor:
+    required: [id, name, expertise_tags, industry_focus, availability, past_success_score, years_experience]
+    optional: [expertise, success_score, available]
+
+  Programme:
+    required: [name]
+    optional: []
+
+  Flow:
+    required: [id, name, description, status, avg_outcome_score]
+    optional: []
+
+  Skill:
+    required: [id, name, description, language, performance_score, avg_execution_ms]
+    optional: []
+
+  Connector:
+    required: [id, name, type, description, version, status, error_rate]
+    optional: []
+
+  Server:
+    required: [id, name, cpu_capacity, current_load, status, region]
+    optional: [error_rate_history]
+
+  ExecutionTrace:
+    required: [id, status, timestamp]
+    optional: []
+
+  Outcome:
+    required: [score, date]
+    optional: []
+
+  WebSite:
+    required: [domain, start_url, indexed_at]
+    optional: []
+
+  WebPage:
+    required: [url, title, indexed_at]
+    optional: [description, h1, word_count, status_code]
+
+  SchemaNode:
+    required: [label, required_fields]
+    optional: [optional_fields]
+
+  SchemaEdge:
+    required: [rel_type, from_label, to_label]
+    optional: []
+
+  IndexRun:
+    required: [id, source, source_type, indexed_at]
+    optional: [connector_count, skill_count, flow_count]
+
+relationships:
+  MATCHED_WITH:
+    from: Company
+    to: Mentor
+    properties: [interaction_id, programme_name, outcome_score, feedback, date]
+
+  ENROLLED_IN:
+    from: Company
+    to: Programme
+    properties: []
+
+  USES:
+    from: Flow
+    to: Skill
+    properties: []
+
+  READS_FROM:
+    from: Flow
+    to: Connector
+    properties: []
+
+  RUNS_ON:
+    from: Flow
+    to: Server
+    properties: []
+
+  RAN_FLOW:
+    from: ExecutionTrace
+    to: Flow
+    properties: []
+
+  RESULTED_IN:
+    from: ExecutionTrace
+    to: Outcome
+    properties: []
+
+  PROCESSED_COMPANY:
+    from: ExecutionTrace
+    to: Company
+    properties: []
+
+  HAS_PAGE:
+    from: WebSite
+    to: WebPage
+    properties: []
+
+  LINKS_TO:
+    from: WebPage
+    to: WebPage
+    properties: [anchor_text]
+
+  INDEXED_BY:
+    from: Connector
+    to: IndexRun
+    properties: []
+
+  DISCOVERED_BY:
+    from: Skill
+    to: IndexRun
+    properties: []

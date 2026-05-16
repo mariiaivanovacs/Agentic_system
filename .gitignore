@@ -44,3 +44,4 @@ build/
 # LangGraph / local checkpoint artifacts
 checkpoints/
 .langgraph/
+.agent_runs/
