@@ -26,28 +26,28 @@ load_dotenv()
 # --------------------------------------------------------------------------- #
 
 NODE_COLOURS = {
-    "WebSite":  "#4A90D9",   # blue
-    "WebPage":  "#7ED321",   # green
-    "Company":  "#F5A623",   # orange
-    "Mentor":   "#9B59B6",   # purple
-    "Flow":     "#E74C3C",   # red
-    "Skill":    "#1ABC9C",   # teal
-    "Connector":"#F39C12",   # amber
-    "Server":   "#95A5A6",   # grey
-    "ExecutionTrace": "#E67E22",  # dark orange
+    "WebSite":  "#4f6f8f",
+    "WebPage":  "#788a3c",
+    "Company":  "#357960",
+    "Mentor":   "#7a4f93",
+    "Flow":     "#9d174d",
+    "Skill":    "#4f6f8f",
+    "Connector":"#9f5b39",
+    "Server":   "#756b70",
+    "ExecutionTrace": "#467982",
 }
-DEFAULT_COLOUR = "#BDC3C7"
+DEFAULT_COLOUR = "#d9c4cf"
 
 EDGE_COLOURS = {
-    "LINKS_TO":     "#7ED321",
-    "HAS_PAGE":     "#4A90D9",
-    "MATCHED_WITH": "#9B59B6",
-    "USES":         "#1ABC9C",
-    "RUNS_ON":      "#95A5A6",
-    "RAN_FLOW":     "#E67E22",
-    "RESULTED_IN":  "#E74C3C",
+    "LINKS_TO":     "#788a3c",
+    "HAS_PAGE":     "#4f6f8f",
+    "MATCHED_WITH": "#9d174d",
+    "USES":         "#4f6f8f",
+    "RUNS_ON":      "#756b70",
+    "RAN_FLOW":     "#467982",
+    "RESULTED_IN":  "#b4234a",
 }
-DEFAULT_EDGE_COLOUR = "#BDC3C7"
+DEFAULT_EDGE_COLOUR = "#d9c4cf"
 
 
 # --------------------------------------------------------------------------- #
@@ -156,8 +156,8 @@ def build_html(nodes: list[dict], edges: list[dict], title: str,
     net = Network(
         height="800px",
         width="100%",
-        bgcolor="#1a1a2e",
-        font_color="#ecf0f1",
+        bgcolor="#fcfafb",
+        font_color="#20181d",
         directed=True,
         notebook=False,
     )
@@ -188,7 +188,7 @@ def build_html(nodes: list[dict], edges: list[dict], title: str,
             title=tooltip,
             color=colour,
             size=20 if label_type in ("WebSite", "Company", "Flow") else 14,
-            font={"size": 11, "color": "#ecf0f1"},
+            font={"size": 11, "color": "#20181d", "strokeWidth": 3, "strokeColor": "#fcfafb"},
         )
 
     for e in edges:
@@ -203,12 +203,12 @@ def build_html(nodes: list[dict], edges: list[dict], title: str,
                 label=str(e.get("label", ""))[:30] if e.get("label") else rel,
                 color=colour,
                 arrows="to",
-                font={"size": 9, "color": "#bdc3c7"},
+                font={"size": 9, "color": "#6f626a", "strokeWidth": 2, "strokeColor": "#fcfafb"},
             )
 
     # inject a title banner
     net.html = net.generate_html()
-    banner = f'<div style="position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#16213e;color:#ecf0f1;padding:8px 24px;border-radius:8px;font-family:sans-serif;font-size:14px;z-index:999;">{title}</div>'
+    banner = f'<div style="position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#ffffff;color:#9d174d;padding:8px 24px;border:1px solid #eadde4;border-radius:8px;font-family:Avenir Next, Helvetica Neue, Helvetica, sans-serif;font-size:14px;font-weight:700;z-index:999;box-shadow:0 16px 36px rgba(71,31,51,.07);">{title}</div>'
     net.html = net.html.replace("<body>", f"<body>{banner}", 1)
 
     with open(out_path, "w", encoding="utf-8") as f:

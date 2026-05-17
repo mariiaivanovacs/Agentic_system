@@ -86,6 +86,26 @@ def test_analyzer_ids_are_stable_for_repeated_scans() -> None:
         assert first.metadata["scan_id"] == second.metadata["scan_id"]
 
 
+def test_analyzer_detects_non_order_business_journeys() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        _write(
+            root / "education" / "course_routes.ts",
+            """
+router.post("/courses/:id/enroll", async () => {});
+const enrollCourse = () => localStorage.setItem("course", "1");
+const completeLesson = () => true;
+""",
+        )
+
+        system = CodebaseAnalyzer(str(root), project_name="Learning App").discover()
+        flows = [node for node in system.code_nodes if node.label == "BusinessFlow"]
+
+        assert flows
+        assert any("Enroll Course" in flow.name or "Complete Lesson" in flow.name for flow in flows)
+        assert all(flow.properties.get("flow_type") == "business_logic" for flow in flows)
+
+
 def test_schema_knows_software_graph_labels_and_relationships() -> None:
     validator = SchemaValidator()
     for label in ["Project", "Repository", "File", "Function", "Route", "Integration", "DataStore", "Risk", "BusinessFlow", "FlowStep"]:
@@ -100,6 +120,16 @@ def test_schema_knows_software_graph_labels_and_relationships() -> None:
                 "confidence": 1.0,
             },
         )
+    validator.validate_node(
+        "SchemaChangeProposal",
+        {
+            "id": "schema_proposal",
+            "label": "LearningModule",
+            "status": "proposed",
+            "proposed_by": "agent",
+            "reason": "Education platforms may need a first-class learning unit primitive.",
+        },
+    )
     validator.validate_edge("PROJECT_HAS_REPOSITORY", "Project", "Repository")
     validator.validate_edge("REPOSITORY_HAS_FILE", "Repository", "File")
     validator.validate_edge("FILE_DEFINES_FUNCTION", "File", "Function")
@@ -171,6 +201,7 @@ if __name__ == "__main__":
         test_safe_discovery_ignores_dependencies_and_secrets,
         test_analyzer_extracts_project_scoped_code_primitives,
         test_analyzer_ids_are_stable_for_repeated_scans,
+        test_analyzer_detects_non_order_business_journeys,
         test_schema_knows_software_graph_labels_and_relationships,
         test_connector_units_are_read_only_and_registered,
         test_key_files_compile,

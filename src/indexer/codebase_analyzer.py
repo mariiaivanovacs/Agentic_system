@@ -141,6 +141,7 @@ ACTION_VERBS = {
     "delete",
     "donate",
     "download",
+    "enroll",
     "fetch",
     "filter",
     "find",
@@ -175,6 +176,8 @@ ACTION_VERBS = {
     "validate",
     "verify",
     "view",
+    "learn",
+    "complete",
 }
 WRITE_ACTION_VERBS = {
     "add",
@@ -184,6 +187,7 @@ WRITE_ACTION_VERBS = {
     "create",
     "delete",
     "donate",
+    "enroll",
     "generate",
     "process",
     "purge",
@@ -234,6 +238,11 @@ BUSINESS_FILE_HINTS = {
     "checkout",
     "command",
     "dashboard",
+    "education",
+    "lesson",
+    "course",
+    "quiz",
+    "student",
     "form",
     "handler",
     "handlers",
@@ -291,7 +300,7 @@ PRIMITIVE_DESCRIPTIONS = {
     ),
     "BusinessFlow": (
         "A business-logic capability inferred from entrypoints, functions, services, and storage usage.",
-        "A user-facing thing the app can do, shown as an ordered chain of software parts.",
+        "A primary transaction or journey the app can support, such as learning, checkout, funding, account access, or matching.",
     ),
     "FlowStep": (
         "An ordered step inside a business flow, linked to the primitive that provides evidence for the step.",

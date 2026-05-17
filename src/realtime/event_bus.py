@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,8 @@ def read_events(limit: int = 200, thread_id: str | None = None) -> list[dict[str
     if not EVENT_FILE.exists():
         return []
 
-    rows: list[dict[str, Any]] = []
+    max_rows = max(1, int(limit))
+    rows: deque[dict[str, Any]] = deque(maxlen=max_rows)
     with EVENT_FILE.open("r", encoding="utf-8") as fh:
         for line in fh:
             if not line.strip():
@@ -63,7 +65,7 @@ def read_events(limit: int = 200, thread_id: str | None = None) -> list[dict[str
             if thread_id and event.get("thread_id") != thread_id:
                 continue
             rows.append(event)
-    return rows[-max(1, int(limit)):]
+    return list(rows)
 
 
 def publish_event(
@@ -94,4 +96,3 @@ def publish_event(
         return response.json()
     except Exception:
         return append_event(event)
-

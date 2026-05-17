@@ -109,7 +109,7 @@ class RecommendedAction(BaseModel):
     action_type: str = Field(
         description=(
             "One of: create_skill | modify_workflow | modify_code | add_validation | "
-            "add_observability | flag_risk | request_admin_approval"
+            "add_observability | flag_risk | request_admin_approval | request_schema_extension"
         )
     )
     target_node_id: str = Field(description="ID of the graph node this action applies to")
@@ -124,6 +124,18 @@ class RecommendedAction(BaseModel):
     code_patch: Optional[CodePatch] = Field(
         default=None,
         description="File patch to apply in the isolated code sandbox — only for modify_code actions",
+    )
+    schema_label: Optional[str] = Field(
+        default=None,
+        description="Proposed graph node label — only for request_schema_extension actions",
+    )
+    schema_required_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Required fields for the proposed node label",
+    )
+    schema_optional_fields: Optional[List[str]] = Field(
+        default=None,
+        description="Optional fields for the proposed node label",
     )
 
 
@@ -519,17 +531,19 @@ Use the Codebase Evidence nodes above to identify which files to modify.
 Only propose changes you are confident about based on the graph evidence."""
 
     allowed_action_types = (
-        "modify_workflow | add_validation | add_observability | flag_risk | request_admin_approval"
+        "modify_workflow | add_validation | add_observability | flag_risk | request_admin_approval | request_schema_extension"
         if restrict_to_existing_capabilities
-        else "create_skill | modify_workflow | modify_code | add_validation | add_observability | flag_risk | request_admin_approval"
+        else "create_skill | modify_workflow | modify_code | add_validation | add_observability | flag_risk | request_admin_approval | request_schema_extension"
     )
     missing_capability_instruction = (
         "Do not propose new skills for selected codebase BusinessFlows. Stay grounded in the existing "
         "BusinessFlow/FlowStep/primitive graph. If the existing graph lacks a capability, use "
-        "request_admin_approval rather than create_skill."
+        "request_admin_approval rather than create_skill. If the graph schema itself is missing a node type, "
+        "use request_schema_extension with schema_label and fields; do not invent a live label."
         if restrict_to_existing_capabilities
         else "Do not invent new executable node types. If a missing capability is required, "
-        "use create_skill/request_admin_approval so it remains a proposal until reviewed."
+        "use create_skill/request_admin_approval. If a missing graph primitive type is required, "
+        "use request_schema_extension so it remains a proposal until reviewed."
     )
 
     prompt = f"""You are an Ecosystem Architect for EcoLink, a mentor–startup matching platform.
@@ -567,6 +581,8 @@ Generate recommended_actions to address the hypothesis. Each action MUST have:
 - target_node_id: an ID from the Codebase Evidence or graph above
 - evidence_node_ids: IDs from the Codebase Evidence that justify the action
 - description: what this action does and why
+For request_schema_extension actions, set schema_label, schema_required_fields,
+schema_optional_fields, and target_node_id to the Project or closest existing primitive.
 
 In proposal-only mode, action_type MUST NOT be modify_code and MUST NOT include code_patch.
 
@@ -845,7 +861,14 @@ def critic_node(state: AgentState) -> dict:
             event_type="decision",
             title="Critic rejected flow locally",
             detail="; ".join(local_issues),
-            payload={"issues": local_issues, "retry_count": retry_count + 1},
+            payload={
+                "issues": local_issues,
+                "suggestions": suggestions,
+                "retry_count": retry_count + 1,
+                "invalid_skills": list(unknown_skills),
+                "invalid_connectors": list(unknown_connectors),
+                "critic_path": "deterministic",
+            },
         )
         return {
             "messages": [
@@ -922,6 +945,10 @@ def critic_node(state: AgentState) -> dict:
         payload={
             "critic_passed": output.is_valid,
             "evidence_node_ids": valid_evidence,
+            "issues": output.issues if not output.is_valid else [],
+            "suggestions": output.suggestions if not output.is_valid else "",
+            "retry_count": retry_count + (0 if output.is_valid else 1),
+            "critic_path": "llm",
         },
     )
 
@@ -1314,6 +1341,26 @@ Do NOT include a decision field — that is computed automatically."""
                 "justification": output.reason,
             },
         })
+        for action in state.get("recommended_actions", []):
+            if action.get("action_type") != "request_schema_extension":
+                continue
+            try:
+                schema_proposal_id = propose_change.invoke({
+                    "change_type": "schema_extension",
+                    "details": {
+                        "label": action.get("schema_label") or action.get("description", "NewPrimitive"),
+                        "required_fields": action.get("schema_required_fields") or ["id", "name"],
+                        "optional_fields": action.get("schema_optional_fields") or [],
+                        "reason": action.get("description") or "Agent requested a graph schema extension.",
+                        "project_id": state.get("project_id"),
+                        "relationship_examples": action.get("evidence_node_ids", []),
+                    },
+                })
+                updates["messages"].append(
+                    AIMessage(content=f"Schema extension proposal saved with ID: {schema_proposal_id}")
+                )
+            except Exception as exc:
+                logger.warning("Could not save schema extension proposal: %s", exc)
         updates["proposal_id"] = proposal_id
         updates["human_approval_required"] = True
         updates["retry_context"] = None          # clear stale retry context on success
@@ -1326,7 +1373,7 @@ Do NOT include a decision field — that is computed automatically."""
         for skill_id in skills_used:
             try:
                 # Calculate improved metrics from simulation
-                exec_time_ms = latest.get("metrics", {}).get("execution_time_ms", 0.0)
+                exec_time_ms = latest.get("metrics", {}).get("latency_ms", 0.0)
                 if exec_time_ms > 0:
                     propose_skill_update.invoke({
                         "skill_id": skill_id,
@@ -1387,6 +1434,7 @@ Do NOT include a decision field — that is computed automatically."""
                     "threshold": round(threshold, 3),
                 },
                 "llm_reason": output.reason,
+                "updated_hypothesis": output.updated_hypothesis or "",
             },
         )
 

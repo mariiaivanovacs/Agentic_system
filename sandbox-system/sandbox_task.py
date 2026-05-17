@@ -24,11 +24,23 @@ Each trace dict:
 """
 from __future__ import annotations
 
+import tarfile
 import json
 import os
 import random
 import re
+import shutil
+import sys
+import tempfile
 from difflib import SequenceMatcher
+from pathlib import Path
+
+import jwt
+
+
+def _log(severity: str, message: str) -> None:
+    """Write a single structured JSON log line consumed by Cloud Logging."""
+    print(json.dumps({"severity": severity, "message": message}), flush=True)
 
 # PyYAML — available in local mode (same venv as orchestrator) and in Cloud Run
 # if the Dockerfile installs it.  Graceful fallback for minimal environments.
@@ -194,6 +206,7 @@ SKILL_ALIASES: dict = {
     "skill_score_by_expertise_depth": "score_by_expertise_depth",
     "skill_pain_point_match": "pain_point_match",
     "skill_score_calculator": "score_by_expertise_depth",
+    "score_calculator": "score_by_expertise_depth",
 }
 
 
@@ -202,6 +215,148 @@ def _resolve_skill(skill_id: str) -> tuple[str, object]:
     if canonical not in SKILL_REGISTRY and canonical.startswith("skill_"):
         canonical = canonical.removeprefix("skill_")
     return canonical, SKILL_REGISTRY.get(canonical)
+
+
+# --------------------------------------------------------------------------- #
+# Capability token validation                                                  #
+# --------------------------------------------------------------------------- #
+
+class CapabilityError(RuntimeError):
+    """Raised when a sandbox capability token does not authorize the run."""
+
+
+def _public_key() -> str:
+    key = os.getenv("CAPABILITY_JWT_PUBLIC_KEY", "").strip()
+    if key:
+        return key.replace("\\n", "\n")
+
+    key_path = os.getenv("CAPABILITY_JWT_PUBLIC_KEY_PATH", "").strip()
+    if key_path:
+        return Path(key_path).expanduser().read_text(encoding="utf-8")
+
+    raise CapabilityError("CAPABILITY_JWT_PUBLIC_KEY or CAPABILITY_JWT_PUBLIC_KEY_PATH is required.")
+
+
+def _flow_references(flow_def: dict) -> tuple[set[str], set[str]]:
+    skills: set[str] = set()
+    connectors: set[str] = set()
+    for step in flow_def.get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        skill = step.get("skill") or step.get("skill_id")
+        if skill:
+            skills.add(_resolve_skill(str(skill))[0])
+        connector = step.get("connector") or step.get("connector_id")
+        if connector:
+            connectors.add(str(connector))
+
+    for key in ("connector", "connector_id", "connector_used", "reads_from"):
+        connector = flow_def.get(key)
+        if connector:
+            connectors.add(str(connector))
+    return skills, connectors
+
+
+def _parse_flow_for_auth(flow_yaml_text: str, legacy_flow_id: str) -> dict:
+    if not flow_yaml_text:
+        return {"flow_id": legacy_flow_id, "steps": []}
+    raw = _parse_yaml(flow_yaml_text) or {}
+    flow_def = _normalise_flow(raw)
+    if not isinstance(flow_def, dict):
+        raise CapabilityError("PROPOSED_FLOW_YAML must parse to a flow object.")
+    if "flow_id" not in flow_def and isinstance(raw, dict) and len(raw) == 1:
+        flow_def = dict(flow_def)
+        flow_def.setdefault("flow_id", next(iter(raw)))
+    flow_def.setdefault("flow_id", legacy_flow_id)
+    return flow_def
+
+
+def _validate_capability(flow_yaml_text: str, legacy_flow_id: str) -> dict:
+    token = os.getenv("CAPABILITY_TOKEN", "").strip()
+    if not token:
+        raise CapabilityError("CAPABILITY_TOKEN is required.")
+
+    expected_audience = os.getenv("CAPABILITY_TOKEN_AUDIENCE", "ecolink-sandbox-job")
+    try:
+        claims = jwt.decode(
+            token,
+            _public_key(),
+            algorithms=["RS256"],
+            audience=expected_audience,
+            options={
+                "require": [
+                    "aud",
+                    "exp",
+                    "iat",
+                    "flow_id",
+                    "project_id",
+                    "run_id",
+                    "allowed_skills",
+                    "allowed_connectors",
+                ]
+            },
+        )
+    except jwt.PyJWTError as exc:
+        raise CapabilityError(f"Invalid CAPABILITY_TOKEN: {exc}") from exc
+
+    flow_def = _parse_flow_for_auth(flow_yaml_text, legacy_flow_id)
+    expected_flow_id = str(flow_def.get("flow_id") or legacy_flow_id)
+    if str(claims.get("flow_id")) != expected_flow_id:
+        raise CapabilityError("CAPABILITY_TOKEN flow_id does not match PROPOSED_FLOW_YAML.")
+
+    expected_project = os.getenv("PROJECT_ID", "").strip()
+    if expected_project and str(claims.get("project_id")) != expected_project:
+        raise CapabilityError("CAPABILITY_TOKEN project_id does not match PROJECT_ID.")
+
+    expected_run = os.getenv("RUN_ID", "").strip()
+    if expected_run and str(claims.get("run_id")) != expected_run:
+        raise CapabilityError("CAPABILITY_TOKEN run_id does not match RUN_ID.")
+
+    allowed_skills = set(str(s) for s in claims.get("allowed_skills") or [])
+    allowed_connectors = set(str(c) for c in claims.get("allowed_connectors") or [])
+    flow_skills, flow_connectors = _flow_references(flow_def)
+
+    denied_skills = sorted(flow_skills - allowed_skills)
+    if denied_skills:
+        raise CapabilityError(f"Flow uses unauthorized skills: {', '.join(denied_skills)}")
+
+    denied_connectors = sorted(flow_connectors - allowed_connectors)
+    if denied_connectors:
+        raise CapabilityError(f"Flow uses unauthorized connectors: {', '.join(denied_connectors)}")
+
+    return claims
+
+
+def _download_source_bundle() -> None:
+    uri = os.getenv("SOURCE_BUNDLE_GCS_URI", "").strip()
+    if not uri:
+        return
+    if not uri.startswith("gs://"):
+        raise CapabilityError("SOURCE_BUNDLE_GCS_URI must be a gs:// URI.")
+
+    try:
+        from google.cloud import storage  # noqa: PLC0415
+    except ImportError as exc:
+        raise CapabilityError("google-cloud-storage is required to download source bundles.") from exc
+
+    bucket_name, blob_name = uri.removeprefix("gs://").split("/", 1)
+    target_root = Path("/tmp/source_bundle")
+    shutil.rmtree(target_root, ignore_errors=True)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    archive_path = Path(tempfile.mkdtemp(prefix="source_bundle_")) / "source.tar.gz"
+    try:
+        client = storage.Client()
+        client.bucket(bucket_name).blob(blob_name).download_to_filename(str(archive_path))
+        with tarfile.open(archive_path, "r:gz") as tar:
+            for member in tar.getmembers():
+                target = (target_root / member.name).resolve()
+                if not str(target).startswith(str(target_root.resolve())):
+                    raise CapabilityError("Source bundle contains an unsafe path.")
+            tar.extractall(target_root)
+        _log("INFO", f"source bundle downloaded to {target_root}")
+    finally:
+        shutil.rmtree(str(archive_path.parent), ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -215,9 +370,11 @@ def _normalise_flow(flow_def: dict) -> dict:
     if "steps" in flow_def or "runs_on" in flow_def:
         return flow_def
     if len(flow_def) == 1:
-        inner = next(iter(flow_def.values()))
+        flow_id, inner = next(iter(flow_def.items()))
         if isinstance(inner, dict):
-            return inner
+            normalised = dict(inner)
+            normalised.setdefault("flow_id", str(flow_id))
+            return normalised
     return flow_def
 
 
@@ -235,7 +392,7 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
         raw = _parse_yaml(flow_yaml_text)
         flow_def = _normalise_flow(raw or {})
     except Exception as exc:
-        print(f"WARNING: Could not parse flow YAML ({exc}). Using random_shuffle fallback.")
+        _log("WARNING", f"Could not parse flow YAML ({exc}). Using random_shuffle fallback.")
         flow_def = {}
 
     flow_id = flow_def.get("flow_id", "proposed_flow")
@@ -256,7 +413,7 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
     ]
 
     if not candidates:
-        print("WARNING: No candidate pairs — empty companies or mentors list.")
+        _log("WARNING", "No candidate pairs — empty companies or mentors list.")
         return []
 
     # Execute each step in sequence -------------------------------------------
@@ -274,12 +431,12 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
             applied.append(canonical_skill)
             n = len(candidates)
             avg = round(sum(x["score"] for x in candidates) / n, 2) if n else 0.0
-            print(f"  [{canonical_skill}] {n} candidates, avg_score={avg}")
+            _log("INFO", f"[{canonical_skill}] {n} candidates, avg_score={avg}")
         else:
-            print(f"  WARNING: Unknown skill '{skill_id}' — skipping step.")
+            _log("WARNING", f"Unknown skill '{skill_id}' — skipping step.")
 
     if not applied:
-        print("WARNING: No recognisable skills in flow. Applying random_shuffle baseline.")
+        _log("WARNING", "No recognisable skills in flow. Applying random_shuffle baseline.")
         candidates = skill_random_shuffle(candidates, {})
         applied = ["random_shuffle"]
 
@@ -304,7 +461,7 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
 
     if traces:
         avg = round(sum(t["simulated_outcome_score"] for t in traces) / len(traces), 2)
-        print(f"STATUS: {len(traces)} matches produced. avg_score={avg}, skills={applied}")
+        _log("INFO", f"{len(traces)} matches produced. avg_score={avg}, skills={applied}")
 
     return traces
 
@@ -314,17 +471,28 @@ def run_flow(flow_yaml_text: str, companies: list, mentors: list) -> list:
 # --------------------------------------------------------------------------- #
 
 def run_simulation() -> None:
-    print("--- SANDBOX: INITIALIZING ---")
+    _log("INFO", "SANDBOX: INITIALIZING")
 
     snapshot_str    = os.getenv("SNAPSHOT_DATA", "{}")
     flow_yaml_text  = os.getenv("PROPOSED_FLOW_YAML", "")
     legacy_flow_id  = os.getenv("PROPOSED_FLOW", "unnamed_flow")
 
+    try:
+        claims = _validate_capability(flow_yaml_text, legacy_flow_id)
+        _log("INFO", (
+            f"capability token accepted "
+            f"run_id={claims.get('run_id')} project_id={claims.get('project_id')}"
+        ))
+        _download_source_bundle()
+    except CapabilityError as exc:
+        _log("ERROR", str(exc))
+        sys.exit(2)
+
     # Parse snapshot -----------------------------------------------------------
     try:
         snapshot = json.loads(snapshot_str)
     except json.JSONDecodeError as exc:
-        print(f"ERROR: SNAPSHOT_DATA is not valid JSON: {exc}")
+        _log("ERROR", f"SNAPSHOT_DATA is not valid JSON: {exc}")
         print("DATA_STREAM_START")
         print(json.dumps([]))
         print("DATA_STREAM_END")
@@ -332,15 +500,15 @@ def run_simulation() -> None:
 
     companies = snapshot.get("companies", [])
     mentors   = snapshot.get("mentors", [])
-    print(f"STATUS: {len(companies)} companies, {len(mentors)} mentors loaded.")
+    _log("INFO", f"{len(companies)} companies, {len(mentors)} mentors loaded.")
 
     # Execute flow or fall back to legacy random path --------------------------
     if flow_yaml_text:
-        print(f"STATUS: Executing flow YAML ({len(flow_yaml_text)} chars).")
+        _log("INFO", f"Executing flow YAML ({len(flow_yaml_text)} chars).")
         traces = run_flow(flow_yaml_text, companies, mentors)
     else:
         # Legacy path — no YAML provided, random baseline so old callers don't break
-        print(f"WARNING: PROPOSED_FLOW_YAML not set. Using random baseline for '{legacy_flow_id}'.")
+        _log("WARNING", f"PROPOSED_FLOW_YAML not set. Using random baseline for '{legacy_flow_id}'.")
         traces = []
         for company in companies:
             mentor = random.choice(mentors) if mentors else None
@@ -364,7 +532,7 @@ def run_simulation() -> None:
         round(sum(t["simulated_outcome_score"] for t in baseline_traces) / len(baseline_traces), 2)
         if baseline_traces else 5.0
     )
-    print(f"STATUS: within-sample random baseline avg={baseline_avg}")
+    _log("INFO", f"within-sample random baseline avg={baseline_avg}")
 
     # Output as a dict so downstream can extract sandbox_baseline_score.
     # _parse_sandbox_output in tools.py handles both list and dict formats.

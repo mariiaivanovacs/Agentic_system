@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import defaultdict
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -20,6 +22,8 @@ import yaml
 from dotenv import load_dotenv
 
 from src.agents.tools import (
+    _build_snapshot,
+    _run_read_cypher,
     activate_proposal,
     approve_architecture_proposal,
     approve_skill_proposal,
@@ -33,6 +37,11 @@ from src.agents.tools import (
     set_flow_container_url,
     simulate_flow,
     verify_neo4j_connection,
+)
+from src.agents.cloud_run_urls import (
+    cloud_run_execution_url as build_cloud_run_execution_url,
+    cloud_run_job_url as build_cloud_run_job_url,
+    cloud_run_logs_url as build_cloud_run_logs_url,
 )
 from src.agents.architecture_sandbox import (
     build_architecture_proposal,
@@ -69,23 +78,47 @@ st.markdown(
     """
     <style>
     :root {
-        --ink: #19211f;
-        --muted: #65706d;
-        --paper: #f5f2eb;
-        --panel: #fffaf0;
-        --line: #d8d1c2;
-        --accent: #0f7b63;
-        --warn: #a55b19;
-        --bad: #a73737;
-        --good: #167447;
+        --ink: #20181d;
+        --muted: #6f626a;
+        --paper: #fcfafb;
+        --panel: #ffffff;
+        --panel-soft: #fbf3f7;
+        --line: #eadde4;
+        --line-strong: #d9c4cf;
+        --accent: #9d174d;
+        --accent-soft: #f9dce8;
+        --accent-comp: #3f6f5b;
+        --accent-comp-soft: #eaf4ef;
+        --warn: #9a5b13;
+        --bad: #b4234a;
+        --good: #1d7555;
+        --shadow: 0 16px 36px rgba(71, 31, 51, .07);
     }
     .stApp {
-        background:
-            linear-gradient(90deg, rgba(25,33,31,.04) 1px, transparent 1px),
-            linear-gradient(180deg, rgba(25,33,31,.035) 1px, transparent 1px),
-            var(--paper);
-        background-size: 26px 26px;
+        background: var(--paper);
         color: var(--ink);
+        font-family: "Avenir Next", "Helvetica Neue", Helvetica, sans-serif;
+    }
+    .stApp header[data-testid="stHeader"] {
+        background:
+            linear-gradient(90deg, rgba(234,244,239,.96), rgba(255,247,250,.96));
+        border-bottom: 1px solid var(--line);
+        box-shadow: 0 8px 28px rgba(71, 31, 51, .04);
+    }
+    .stApp [data-testid="stToolbar"] {
+        color: var(--muted);
+    }
+    .stApp [data-testid="stStatusWidget"],
+    .stApp [data-testid="stSpinner"] {
+        background: rgba(255,255,255,.94) !important;
+        color: var(--accent) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 8px !important;
+        box-shadow: 0 12px 28px rgba(71,31,51,.06) !important;
+    }
+    .stApp [data-testid="stStatusWidget"] *,
+    .stApp [data-testid="stSpinner"] * {
+        color: var(--accent) !important;
     }
     .stApp [data-testid="stAppViewContainer"],
     .stApp [data-testid="stMain"],
@@ -108,24 +141,56 @@ st.markdown(
     .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
         color: var(--ink);
         letter-spacing: 0;
+        font-family: "Avenir Next", "Helvetica Neue", Helvetica, sans-serif;
+        font-weight: 720;
     }
     h1 {
-        font-family: Georgia, "Times New Roman", serif;
-        font-size: 2.35rem;
-        line-height: 1.02;
-        margin-bottom: .2rem;
+        font-size: 2.05rem;
+        line-height: 1.08;
+        margin-bottom: .35rem;
     }
     section[data-testid="stSidebar"] {
-        background: #201f1b;
+        background:
+            linear-gradient(180deg, #ffffff 0%, #fff7fa 54%, #f7fbf8 100%);
+        border-right: 1px solid var(--line);
+        box-shadow: 10px 0 30px rgba(71, 31, 51, .035);
     }
     section[data-testid="stSidebar"] * {
-        color: #f7f1e4;
+        color: var(--ink);
     }
     section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
     section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
     section[data-testid="stSidebar"] label,
     section[data-testid="stSidebar"] span {
-        color: #f7f1e4;
+        color: var(--ink);
+    }
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2,
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 {
+        color: var(--ink);
+        font-size: 1rem;
+        font-weight: 760;
+        margin-bottom: .7rem;
+    }
+    section[data-testid="stSidebar"] [role="radiogroup"] {
+        gap: .12rem;
+    }
+    section[data-testid="stSidebar"] [role="radio"] {
+        border-radius: 8px;
+        padding: 5px 8px;
+        transition: background .16s ease, color .16s ease;
+    }
+    section[data-testid="stSidebar"] [role="radio"]:has(input:checked) {
+        background: rgba(157, 23, 77, .08);
+        color: var(--accent);
+    }
+    section[data-testid="stSidebar"] [role="radio"]:hover {
+        background: rgba(63, 111, 91, .08);
+    }
+    section[data-testid="stSidebar"] button {
+        border-radius: 8px !important;
+        border-color: var(--line-strong) !important;
+        background: rgba(255,255,255,.9) !important;
+        box-shadow: 0 10px 24px rgba(71,31,51,.045);
     }
     .stApp div[data-testid="stAlert"] *,
     .stApp div[data-testid="stExpander"] *,
@@ -136,12 +201,22 @@ st.markdown(
     .stApp div[data-testid="stTextArea"] * {
         color: var(--ink);
     }
+    .stApp div[data-baseweb="select"] > div,
+    .stApp div[data-baseweb="select"] input,
+    .stApp div[data-baseweb="select"] [role="combobox"] {
+        background: var(--panel) !important;
+        color: var(--ink) !important;
+        border-color: var(--line) !important;
+    }
+    .stApp div[data-baseweb="select"] svg {
+        fill: var(--muted) !important;
+    }
     .stApp div[data-testid="stAlert"] {
-        background: rgba(255,250,240,.94);
+        background: rgba(255,255,255,.96);
         border-color: var(--line);
     }
     .stApp div[data-testid="stExpander"] {
-        background: rgba(255,250,240,.78);
+        background: rgba(255,255,255,.88);
         border-color: var(--line);
     }
     .stApp div[data-testid="stMetric"] label,
@@ -156,17 +231,24 @@ st.markdown(
     .stApp input,
     .stApp textarea {
         color: var(--ink) !important;
-        background: #fffaf0 !important;
+        background: var(--panel) !important;
+        border-color: var(--line) !important;
     }
     .stApp input::placeholder,
     .stApp textarea::placeholder {
-        color: #8d8578 !important;
+        color: #a3929c !important;
     }
     .stApp button[kind="secondary"],
     .stApp button[data-testid="baseButton-secondary"] {
         color: var(--ink);
-        background: #fffaf0;
+        background: var(--panel);
         border-color: var(--line);
+    }
+    .stApp button[kind="secondary"]:hover,
+    .stApp button[data-testid="baseButton-secondary"]:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--panel-soft);
     }
     .stApp button[kind="primary"],
     .stApp button[data-testid="baseButton-primary"] {
@@ -176,27 +258,64 @@ st.markdown(
     }
     .stApp pre,
     .stApp code {
-        color: #1f2a28;
-        background: #fffaf0;
+        color: #3d2732;
+        background: #fff6fa;
+    }
+    .stApp [data-testid="stCodeBlock"],
+    .stApp [data-testid="stJson"],
+    .stApp [data-testid="stJson"] pre,
+    .stApp [data-testid="stCodeBlock"] pre {
+        background: #fff7fa !important;
+        color: var(--ink) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 8px !important;
+    }
+    .stApp [data-testid="stCodeBlock"] *,
+    .stApp [data-testid="stJson"] * {
+        background-color: transparent !important;
+        color: var(--ink) !important;
     }
     div[data-testid="stMetric"] {
-        background: rgba(255,250,240,.92);
+        background: rgba(255,255,255,.96);
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 14px 14px 10px;
-        box-shadow: 0 8px 22px rgba(33,30,22,.06);
+        box-shadow: var(--shadow);
     }
     div[data-testid="stDataFrame"] {
         border: 1px solid var(--line);
         border-radius: 8px;
         overflow: hidden;
+        background: var(--panel-soft);
+        box-shadow: 0 12px 30px rgba(71, 31, 51, .045);
+    }
+    div[data-testid="stDataFrame"] [role="grid"],
+    div[data-testid="stDataFrame"] [data-testid="stDataFrameResizable"] {
+        background: #fff9fc !important;
+    }
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        background: #f5eef2 !important;
+        color: var(--ink) !important;
+        border-color: var(--line) !important;
+    }
+    div[data-testid="stDataFrame"] [role="gridcell"] {
+        background: #fff9fc !important;
+        color: var(--ink) !important;
+        border-color: #f0e5eb !important;
+    }
+    div[data-testid="stDataFrame"] [role="row"]:nth-child(even) [role="gridcell"] {
+        background: #fcf5f8 !important;
+    }
+    div[data-testid="stDataFrame"] canvas,
+    div[data-testid="stDataFrame"] svg {
+        background: #fff9fc !important;
     }
     .status-pill {
         display: inline-block;
         padding: 3px 9px;
         border-radius: 999px;
         border: 1px solid var(--line);
-        background: #fffaf0;
+        background: var(--panel);
         font-size: .78rem;
         margin-right: 6px;
     }
@@ -214,17 +333,18 @@ st.markdown(
         flex-wrap: wrap;
         gap: 8px;
         padding: 12px 16px;
-        background: rgba(255,250,240,0.9);
-        border: 1px solid #d8d1c2;
-        border-radius: 10px;
+        background: rgba(255,255,255,0.92);
+        border: 1px solid var(--line);
+        border-radius: 8px;
         margin-bottom: 10px;
+        box-shadow: 0 10px 28px rgba(71,31,51,.04);
     }
     .legend-item {
         display: flex;
         align-items: center;
         gap: 6px;
         font-size: 0.78rem;
-        color: #19211f;
+        color: var(--ink);
         font-weight: 500;
     }
     .legend-dot {
@@ -235,25 +355,25 @@ st.markdown(
         flex-shrink: 0;
     }
     .graph-tip {
-        background: rgba(15,123,99,0.06);
-        border: 1px solid rgba(15,123,99,0.2);
+        background: rgba(157,23,77,0.07);
+        border: 1px solid rgba(157,23,77,0.2);
         border-radius: 8px;
         padding: 8px 14px;
         font-size: 0.82rem;
-        color: #0f7b63;
+        color: var(--accent);
         margin-bottom: 10px;
     }
     .agent-log {
-        background: #1a1f1d;
-        color: #a8f0d0;
-        border-radius: 10px;
+        background: #fff7fa;
+        color: #3d2732;
+        border-radius: 8px;
         padding: 14px 18px;
-        font-family: 'Courier New', monospace;
+        font-family: "SFMono-Regular", Consolas, monospace;
         font-size: 0.8rem;
         line-height: 1.7;
         max-height: 200px;
         overflow-y: auto;
-        border: 1px solid #2e2c28;
+        border: 1px solid var(--line);
     }
     </style>
     """,
@@ -626,6 +746,42 @@ def load_code_nodes(project_id: str | None = None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=20)
+def load_primitive_relationship_rows(project_id: str, node_id: str) -> pd.DataFrame:
+    return df(
+        run_read(
+            f"""
+            MATCH (n {{id: {json.dumps(node_id)}}})
+            OPTIONAL MATCH (src)-[in_rel]->(n)
+            WHERE src.project_id = {json.dumps(project_id)} OR src.id = {json.dumps(project_id)}
+            WITH n, collect({{
+                direction: 'incoming',
+                relationship: type(in_rel),
+                neighbor_type: labels(src)[0],
+                neighbor: coalesce(src.display_name, src.name, src.id)
+            }}) AS incoming
+            OPTIONAL MATCH (n)-[out_rel]->(dst)
+            WHERE dst.project_id = {json.dumps(project_id)} OR dst.id = {json.dumps(project_id)}
+            WITH incoming + collect({{
+                direction: 'outgoing',
+                relationship: type(out_rel),
+                neighbor_type: labels(dst)[0],
+                neighbor: coalesce(dst.display_name, dst.name, dst.id)
+            }}) AS rows
+            UNWIND rows AS row
+            WITH row
+            WHERE row.relationship IS NOT NULL
+            RETURN row.direction AS direction,
+                   row.relationship AS relationship,
+                   row.neighbor_type AS neighbor_type,
+                   row.neighbor AS neighbor
+            ORDER BY direction, relationship, neighbor
+            LIMIT 80
+            """
+        )
+    )
+
+
+@st.cache_data(ttl=20)
 def load_business_flow_rows(project_id: str) -> pd.DataFrame:
     return df(
         run_read(
@@ -667,6 +823,7 @@ def add_business_flow_display_columns(flows: pd.DataFrame) -> pd.DataFrame:
         return flows
     rows = flows.copy()
     rows["ordered_chain"] = rows.apply(business_flow_sentence, axis=1)
+    rows["transaction_journey"] = rows.apply(lambda row: transaction_journey_kind(row)[0], axis=1)
     rows["source_hint"] = rows["source_paths"].apply(
         lambda paths: Path(str(paths[0])).name
         if isinstance(paths, list) and paths
@@ -674,7 +831,7 @@ def add_business_flow_display_columns(flows: pd.DataFrame) -> pd.DataFrame:
     )
     rows["flow_display"] = rows.apply(
         lambda row: (
-            f"{row.get('business_flow') or row.get('id')} "
+            f"{row.get('transaction_journey') or 'primary journey'} · {row.get('business_flow') or row.get('id')} "
             f"· {row.get('entrypoint') or row.get('source_hint') or 'entry'} "
             f"· {str(row.get('id') or '')[-10:]}"
         ),
@@ -995,6 +1152,7 @@ def load_architecture_artifacts() -> pd.DataFrame:
             MATCH (n)
             WHERE any(label IN labels(n) WHERE label IN [
                 'Flow', 'Pipeline', 'SkillProposal', 'ExecutionTrace', 'Outcome',
+                'SchemaChangeProposal',
                 'AppProfile', 'WebSite', 'WebPage', 'WebEntity', 'Project',
                 'Repository', 'File', 'Route', 'Service', 'Function',
                 'DatabaseModel', 'DatabaseTable', 'DataStore', 'Entity', 'Workflow',
@@ -1002,7 +1160,7 @@ def load_architecture_artifacts() -> pd.DataFrame:
             ])
             RETURN labels(n)[0] AS type,
                    coalesce(n.id, n.app_id, n.domain, n.url, n.name, elementId(n)) AS id,
-                   coalesce(n.name, n.title, n.entrypoint, n.status, '') AS name,
+                   coalesce(n.name, n.title, n.label, n.entrypoint, n.status, '') AS name,
                    n.status AS status,
                    coalesce(n.project_id, n.app_id) AS app_id
             ORDER BY type, id
@@ -1278,7 +1436,7 @@ def _append_optimized_flow_overlay(
                         "from": target["id"],
                         "to": node_id,
                         "label": "APPROVED_SANDBOX_OPTIMIZATION",
-                        "color": {"color": "#c01818", "highlight": "#8b0000", "hover": "#8b0000"},
+                        "color": {"color": "#9d174d", "highlight": "#7f123f", "hover": "#7f123f"},
                         "width": 3,
                         "dashes": True,
                     }
@@ -1402,11 +1560,152 @@ def load_legacy_graph_payload(limit: int = 180, scope: str = "Dual graph") -> di
 
 
 @st.cache_data(ttl=20)
+def load_agentic_architecture_graph_payload(project_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Build the dedicated agentic architecture graph shown by the last graph scope."""
+    project_rows = run_read(
+        f"""
+        MATCH (p:Project {{project_id: {json.dumps(project_id)}}})
+        RETURN p.name AS name, p.repo_path AS repo_path, p.last_scan_id AS last_scan_id
+        LIMIT 1
+        """
+    )
+    project_row = project_rows[0] if project_rows else {}
+
+    dynamic_rows = run_read(
+        f"""
+        OPTIONAL MATCH (f:Flow)
+        WHERE f.project_id = {json.dumps(project_id)}
+          AND f.status IN ['proposed', 'approved', 'active']
+        WITH collect({{
+            id: f.id,
+            name: coalesce(f.name, f.id),
+            status: f.status,
+            score: f.avg_outcome_score
+        }})[..8] AS flows
+        OPTIONAL MATCH (s:Skill)
+        WHERE s.project_id = {json.dumps(project_id)}
+           OR EXISTS {{
+                MATCH (s)-[:SKILL_DERIVED_FROM_FUNCTION]->(:Function {{project_id: {json.dumps(project_id)}}})
+           }}
+        WITH flows, collect({{
+            id: coalesce(s.id, s.name),
+            name: coalesce(s.name, s.id),
+            performance: s.performance_score
+        }})[..8] AS skills
+        OPTIONAL MATCH (ap:ArchitectureProposal {{project_id: {json.dumps(project_id)}}})
+        WITH flows, skills, collect({{
+            id: ap.id,
+            name: coalesce(ap.summary, ap.id),
+            status: ap.status,
+            tested: ap.tested
+        }})[..5] AS architecture_proposals
+        RETURN flows, skills, architecture_proposals
+        """
+    )
+    dynamic = dynamic_rows[0] if dynamic_rows else {}
+    flows = [row for row in dynamic.get("flows", []) if row.get("id")]
+    skills = [row for row in dynamic.get("skills", []) if row.get("id")]
+    architecture_proposals = [
+        row for row in dynamic.get("architecture_proposals", []) if row.get("id")
+    ]
+
+    nodes: list[dict[str, Any]] = [
+        {
+            "id": "project",
+            "label": project_row.get("name") or "Connected Project",
+            "group": "Project",
+            "project_id": project_id,
+            "source_path": project_row.get("repo_path"),
+            "scan_id": project_row.get("last_scan_id"),
+            "description": "Application codebase connected to the agentic system.",
+        },
+        {"id": "graph_store", "label": "Neo4j Graph Store", "group": "GraphStore", "description": "Typed project graph, flow registry, execution traces, approvals, and architecture metadata."},
+        {"id": "graphrag", "label": "GraphRAG Retriever", "group": "AgentTool", "description": "Retrieves graph evidence for planning, critique, and architecture review."},
+        {"id": "event_bus", "label": "Realtime Event Bus", "group": "Runtime", "description": "Publishes agent phases, sandbox logs, approvals, and UI updates."},
+        {"id": "planner", "label": "Planner", "group": "Agent", "description": "Finds evidence and forms an improvement hypothesis."},
+        {"id": "generator", "label": "Generator", "group": "Agent", "description": "Drafts flow YAML, code patches, or architecture proposals."},
+        {"id": "critic", "label": "Critic", "group": "Agent", "description": "Validates skills, connectors, policies, and infrastructure assumptions."},
+        {"id": "simulator", "label": "Simulator", "group": "Agent", "description": "Runs sandbox tests and records metrics."},
+        {"id": "evaluator", "label": "Evaluator", "group": "Agent", "description": "Compares sandbox score against baseline and retry thresholds."},
+        {"id": "human_approval", "label": "Human Approval", "group": "Approval", "description": "Admin gate for flow, skill, and architecture changes."},
+        {"id": "flow_registry", "label": "Flow Registry", "group": "Registry", "description": "Approved and active flows used by the runtime."},
+        {"id": "skill_registry", "label": "Skill Registry", "group": "Registry", "description": "Reusable skills derived from functions or human-approved proposals."},
+        {"id": "sandbox", "label": "Sandbox Runner", "group": "SandboxRuntime", "description": "Isolated execution boundary for simulations and architecture tests."},
+        {"id": "cloud_run", "label": "Cloud Run Job", "group": "SandboxRuntime", "description": "Remote container job that executes sandbox-system/sandbox_task.py."},
+        {"id": "architecture_sandbox", "label": "Architecture Sandbox", "group": "SandboxRuntime", "description": "Copies project/database shape and validates proposed architecture in isolation."},
+        {"id": "architecture_approval", "label": "Architecture Approval Queue", "group": "Approval", "description": "Tested architecture proposals awaiting approval or rejection."},
+    ]
+
+    edges: list[dict[str, Any]] = [
+        {"from": "project", "to": "graph_store", "label": "INDEXED_IN"},
+        {"from": "graph_store", "to": "graphrag", "label": "RETRIEVED_BY"},
+        {"from": "graphrag", "to": "planner", "label": "EVIDENCE"},
+        {"from": "planner", "to": "generator", "label": "HYPOTHESIS"},
+        {"from": "generator", "to": "critic", "label": "PROPOSAL"},
+        {"from": "critic", "to": "simulator", "label": "VALIDATED"},
+        {"from": "simulator", "to": "sandbox", "label": "RUNS"},
+        {"from": "sandbox", "to": "cloud_run", "label": "EXECUTES_ON"},
+        {"from": "simulator", "to": "evaluator", "label": "METRICS"},
+        {"from": "evaluator", "to": "generator", "label": "RETRY"},
+        {"from": "evaluator", "to": "human_approval", "label": "APPROVAL_REQUIRED"},
+        {"from": "human_approval", "to": "flow_registry", "label": "ACTIVATES"},
+        {"from": "flow_registry", "to": "graph_store", "label": "WRITES"},
+        {"from": "skill_registry", "to": "generator", "label": "AVAILABLE_SKILLS"},
+        {"from": "generator", "to": "architecture_sandbox", "label": "ARCHITECTURE_PROPOSAL"},
+        {"from": "architecture_sandbox", "to": "architecture_approval", "label": "TESTED"},
+        {"from": "architecture_approval", "to": "graph_store", "label": "APPROVED_METADATA"},
+        {"from": "event_bus", "to": "planner", "label": "OBSERVES"},
+        {"from": "event_bus", "to": "simulator", "label": "LOGS"},
+        {"from": "event_bus", "to": "human_approval", "label": "NOTIFIES"},
+    ]
+
+    for row in flows:
+        node_id = f"flow:{row['id']}"
+        nodes.append({
+            "id": node_id,
+            "label": row.get("name") or row["id"],
+            "group": "Flow",
+            "status": row.get("status"),
+            "score": row.get("score"),
+            "description": "Project flow managed by the agentic registry.",
+        })
+        edges.append({"from": "flow_registry", "to": node_id, "label": "CONTAINS"})
+        edges.append({"from": node_id, "to": "sandbox", "label": "TESTED_IN"})
+
+    for row in skills:
+        node_id = f"skill:{row['id']}"
+        nodes.append({
+            "id": node_id,
+            "label": row.get("name") or row["id"],
+            "group": "Skill",
+            "perf": row.get("performance"),
+            "description": "Skill available to generator/simulator.",
+        })
+        edges.append({"from": "skill_registry", "to": node_id, "label": "CONTAINS"})
+
+    for row in architecture_proposals:
+        node_id = f"arch:{row['id']}"
+        nodes.append({
+            "id": node_id,
+            "label": row.get("name") or row["id"],
+            "group": "ArchitectureProposal",
+            "status": row.get("status"),
+            "description": f"Tested: {row.get('tested')}",
+        })
+        edges.append({"from": "architecture_approval", "to": node_id, "label": "QUEUES"})
+
+    return {"nodes": nodes, "edges": edges}
+
+
+@st.cache_data(ttl=20)
 def load_project_graph_payload(
     project_id: str,
     limit: int = 180,
     scope: str = "Full Project Graph",
 ) -> dict[str, list[dict[str, Any]]]:
+    if scope == "Agentic Layer Links":
+        return load_agentic_architecture_graph_payload(project_id)
+
     scope_labels = {
         "Full Project Graph": [
             "Project", "Repository", "File", "Route", "Service", "Function",
@@ -1425,7 +1724,6 @@ def load_project_graph_payload(
             "Project", "Repository", "File", "DataStore", "DatabaseModel",
             "DatabaseTable", "Risk", "Integration",
         ],
-        "Agentic Layer Links": ["Project", "Repository", "File", "Function", "Skill"],
     }
     labels = scope_labels.get(scope, scope_labels["Full Project Graph"])
     label_filter = json.dumps(labels)
@@ -1436,6 +1734,7 @@ def load_project_graph_payload(
         WHERE any(label IN labels(n) WHERE label IN {label_filter})
           AND (
             n.project_id = {project_json}
+            OR n.id = {project_json}
             OR (
               'Skill' IN labels(n)
               AND EXISTS {{
@@ -1448,6 +1747,7 @@ def load_project_graph_payload(
         WHERE any(label IN labels(m) WHERE label IN {label_filter})
           AND (
             m.project_id = {project_json}
+            OR m.id = {project_json}
             OR (
               'Skill' IN labels(m)
               AND EXISTS {{
@@ -1547,7 +1847,63 @@ def display_table(data: pd.DataFrame, height: int = 280) -> None:
     if data.empty:
         st.info("No records yet.")
         return
-    st.dataframe(data, width="stretch", height=height, hide_index=True)
+    styled = (
+        data.style
+        .set_table_styles(
+            [
+                {
+                    "selector": "thead th",
+                    "props": [
+                        ("background-color", "#f5eef2"),
+                        ("color", "#20181d"),
+                        ("border-bottom", "1px solid #eadde4"),
+                        ("font-weight", "700"),
+                    ],
+                },
+                {
+                    "selector": "tbody td",
+                    "props": [
+                        ("background-color", "#fff9fc"),
+                        ("color", "#20181d"),
+                        ("border-color", "#f0e5eb"),
+                    ],
+                },
+                {
+                    "selector": "tbody tr:nth-child(even) td",
+                    "props": [("background-color", "#fcf5f8")],
+                },
+            ]
+        )
+    )
+    st.dataframe(styled, width="stretch", height=height, hide_index=True)
+
+
+def ui_value(value: Any, fallback: str = "Not linked") -> str:
+    if value is None:
+        return fallback
+    if isinstance(value, float) and pd.isna(value):
+        return fallback
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "nan", "null"}:
+        return fallback
+    return text
+
+
+def render_merge_success_panel(merge: dict[str, Any]) -> None:
+    flow_name = ui_value(merge.get("flow_name") or merge.get("name"), "Flow")
+    flow_id = ui_value(merge.get("flow_id") or merge.get("id"), "unknown")
+    event_id = ui_value(merge.get("merge_event_id"), "not recorded")
+    merged_at = ui_value(merge.get("last_registry_merge_at"), "just now")
+    merge_count = ui_value(merge.get("registry_merge_count"), "1")
+    st.success(f"Flow **{flow_name}** is now active in the registry.")
+    with st.container(border=True):
+        st.markdown("**Registry merge recorded**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Flow", flow_name)
+        m2.metric("Status", "active")
+        m3.metric("Merge count", merge_count)
+        m4.metric("Event", event_id)
+        st.caption(f"Flow ID `{flow_id}` was merged at `{merged_at}` and stored in Neo4j.")
 
 
 def schema_columns_table(schema: list[dict[str, Any]]) -> pd.DataFrame:
@@ -1637,7 +1993,7 @@ def _chain_items(chain: Any, fallback: Any = None) -> list[str]:
     return values
 
 
-def render_flow_chips(items: list[str], accent: str = "#0f7b63") -> None:
+def render_flow_chips(items: list[str], accent: str = "#9d174d") -> None:
     if not items:
         st.caption("No ordered graph chain captured.")
         return
@@ -1645,13 +2001,13 @@ def render_flow_chips(items: list[str], accent: str = "#0f7b63") -> None:
     for i, item in enumerate(items[:8]):
         chips += (
             f"<span style='display:inline-block;border:1px solid rgba(15,123,99,.35);"
-            f"background:#f5fbf8;color:#19211f;border-radius:999px;padding:5px 10px;"
+            f"background:#f5fbf8;color:#20181d;border-radius:999px;padding:5px 10px;"
             f"font-size:.75rem;margin:3px 4px 3px 0;'>{item}</span>"
         )
         if i < min(len(items), 8) - 1:
             chips += f"<span style='color:{accent};font-weight:700;margin-right:4px;'>→</span>"
     if len(items) > 8:
-        chips += f"<span style='color:#65706d;font-size:.75rem;'>+{len(items) - 8} more</span>"
+        chips += f"<span style='color:#6f626a;font-size:.75rem;'>+{len(items) - 8} more</span>"
     st.markdown(chips, unsafe_allow_html=True)
 
 
@@ -1727,15 +2083,15 @@ def flow_graph_dot(
     *,
     title: str,
     steps: list[dict[str, Any]],
-    accent: str = "#0f7b63",
+    accent: str = "#9d174d",
 ) -> str:
     if not steps:
         steps = [{"label": "No steps captured", "kind": "Empty", "detail": ""}]
     lines = [
         "digraph G {",
         "  graph [rankdir=LR, bgcolor=\"transparent\", pad=\"0.2\", nodesep=\"0.45\", ranksep=\"0.55\"];",
-        "  node [shape=box, style=\"rounded,filled\", fontname=\"Helvetica\", fontsize=10, margin=\"0.12,0.08\", color=\"#b7ad99\", fillcolor=\"#fffaf0\", fontcolor=\"#19211f\"];",
-        "  edge [color=\"#8f9f99\", penwidth=1.7, arrowsize=0.7];",
+        "  node [shape=box, style=\"rounded,filled\", fontname=\"Helvetica\", fontsize=10, margin=\"0.12,0.08\", color=\"#d9c4cf\", fillcolor=\"#ffffff\", fontcolor=\"#20181d\"];",
+        "  edge [color=\"#cbb9c3\", penwidth=1.7, arrowsize=0.7];",
         f"  label=\"{_dot_escape(title)}\";",
         "  labelloc=\"t\";",
         "  fontsize=12;",
@@ -1746,8 +2102,8 @@ def flow_graph_dot(
         label = _dot_escape(step.get("label"))
         detail = _dot_escape(step.get("detail"))
         kind = _dot_escape(step.get("kind"))
-        fill = "#eef8f3" if i else "#e9f2ff"
-        color = accent if i else "#3267a8"
+        fill = "#eaf4ef" if i else "#eef3fb"
+        color = accent if i else "#4f6f8f"
         dot_label = f"{i + 1}. {label}"
         if detail:
             dot_label += f"\\n{detail[:70]}"
@@ -1759,7 +2115,7 @@ def flow_graph_dot(
     for i in range(max(0, min(len(steps), 12) - 1)):
         lines.append(f"  {_dot_id('s', i)} -> {_dot_id('s', i + 1)};")
     if len(steps) > 12:
-        lines.append("  more [label=\"More steps hidden\", fillcolor=\"#f5f2eb\", color=\"#b7ad99\"];")
+        lines.append("  more [label=\"More steps hidden\", fillcolor=\"#fcfafb\", color=\"#d9c4cf\"];")
         lines.append(f"  {_dot_id('s', 11)} -> more;")
     lines.append("}")
     return "\n".join(lines)
@@ -1779,7 +2135,7 @@ def render_optimized_flow_graph(
             flow_graph_dot(
                 title="Current flow",
                 steps=before_steps,
-                accent="#3267a8",
+                accent="#4f6f8f",
             ),
             use_container_width=True,
         )
@@ -1789,7 +2145,7 @@ def render_optimized_flow_graph(
             flow_graph_dot(
                 title="Optimized flow",
                 steps=proposed_steps,
-                accent="#c01818",
+                accent="#9d174d",
             ),
             use_container_width=True,
         )
@@ -1800,7 +2156,7 @@ def render_optimized_flow_graph(
                 flow_graph_dot(
                     title="Optimized sandbox flow - approved state is still not real code",
                     steps=proposed_steps,
-                    accent="#c01818",
+                    accent="#9d174d",
                 ),
                 use_container_width=True,
             )
@@ -1809,10 +2165,180 @@ def render_optimized_flow_graph(
                 flow_graph_dot(
                     title="Current detected flow",
                     steps=before_steps,
-                    accent="#3267a8",
+                    accent="#4f6f8f",
                 ),
                 use_container_width=True,
             )
+
+
+def _graphrag_dot(context: dict[str, Any], flow_name: str = "") -> str:
+    """Build a graphviz DOT string from a GraphRAG context dict."""
+    industry = _dot_escape(context.get("industry") or "Unknown")
+    baseline = context.get("baseline_score") or 0
+    failures = context.get("failure_patterns") or []
+    successes = context.get("success_patterns") or []
+    skills = context.get("available_skills") or []
+    active_flows = context.get("active_flows") or []
+
+    lines = [
+        "digraph GraphRAG {",
+        '  graph [rankdir=TB, bgcolor="transparent", pad="0.3", nodesep="0.5", ranksep="0.7"];',
+        '  node [fontname="Helvetica", fontsize=10, margin="0.14,0.09"];',
+        '  edge [fontname="Helvetica", fontsize=9, penwidth=1.4, arrowsize=0.65];',
+    ]
+
+    # Industry node
+    title_label = _dot_escape(flow_name) + "\\n" if flow_name else ""
+    lines.append(
+        f'  industry [label="{title_label}{industry}\\nbaseline {baseline:.1f}", '
+        'shape=rectangle, style="rounded,filled", fillcolor="#eef3fb", '
+        'color="#4f6f8f", fontcolor="#20181d", fontsize=12, penwidth=2];'
+    )
+
+    # Failure cluster
+    if failures:
+        lines.append('  subgraph cluster_failures {')
+        lines.append('    label="Failure Patterns"; style="dashed"; color="#b4234a"; fontcolor="#b4234a"; fontsize=10;')
+        for i, fp in enumerate(failures[:4]):
+            co = _dot_escape(fp.get("company") or f"Company {i+1}")
+            me = _dot_escape(fp.get("mentor") or "")
+            sc = fp.get("score") or 0
+            lbl = f"{co}"
+            if me:
+                lbl += f"\\n→ {me}"
+            lbl += f"\\nscore {sc:.1f}"
+            lines.append(
+                f'    f{i} [label="{lbl}", shape=box, style="filled", '
+                f'fillcolor="#fde8e8", color="#b4234a", fontcolor="#b4234a"];'
+            )
+        lines.append("  }")
+        for i in range(min(len(failures), 4)):
+            lines.append(f'  industry -> f{i} [style=dashed, color="#b4234a", label="avoid"];')
+
+    # Success cluster
+    if successes:
+        lines.append('  subgraph cluster_successes {')
+        lines.append('    label="Success Patterns"; style="filled"; fillcolor="#f0faf5"; color="#3f6f5b"; fontcolor="#3f6f5b"; fontsize=10;')
+        for i, sp in enumerate(successes[:4]):
+            co = _dot_escape(sp.get("company") or f"Company {i+1}")
+            me = _dot_escape(sp.get("mentor") or "")
+            sc = sp.get("score") or 0
+            lbl = f"{co}"
+            if me:
+                lbl += f"\\n→ {me}"
+            lbl += f"\\nscore {sc:.1f}"
+            lines.append(
+                f'    s{i} [label="{lbl}", shape=box, style="filled", '
+                f'fillcolor="#eaf4ef", color="#3f6f5b", fontcolor="#3f6f5b"];'
+            )
+        lines.append("  }")
+        for i in range(min(len(successes), 4)):
+            lines.append(f'  industry -> s{i} [color="#3f6f5b", label="learn"];')
+
+    # Skills cluster
+    if skills:
+        lines.append('  subgraph cluster_skills {')
+        lines.append('    label="Available Skills"; color="#9d174d"; fontcolor="#9d174d"; fontsize=10;')
+        for i, sk in enumerate(skills[:6]):
+            name = _dot_escape(sk.get("name") or sk.get("id") or f"skill_{i}")
+            lang = _dot_escape(sk.get("language") or "")
+            perf = sk.get("performance_score") or 0
+            lbl = name
+            if lang:
+                lbl += f"\\n{lang}"
+            if perf:
+                lbl += f"  {perf:.1f}"
+            lines.append(
+                f'    sk{i} [label="{lbl}", shape=ellipse, style="filled", '
+                f'fillcolor="#eaf4ef", color="#9d174d", fontcolor="#9d174d"];'
+            )
+        lines.append("  }")
+        if active_flows:
+            for j, fl in enumerate(active_flows[:3]):
+                for sk_name in (fl.get("skill_names") or [])[:2]:
+                    for i, sk in enumerate(skills[:6]):
+                        if (sk.get("name") or "") == sk_name:
+                            lines.append(f'  fl{j} -> sk{i} [color="#9d174d", style=dashed];')
+
+    # Active flows
+    if active_flows:
+        lines.append('  subgraph cluster_flows {')
+        lines.append('    label="Active Flows"; color="#7a4f93"; fontcolor="#7a4f93"; fontsize=10;')
+        for j, fl in enumerate(active_flows[:3]):
+            name = _dot_escape(fl.get("name") or fl.get("flow_id") or f"flow_{j}")
+            sc = fl.get("avg_score") or 0
+            lbl = name
+            if sc:
+                lbl += f"\\nscore {sc:.1f}"
+            lines.append(
+                f'    fl{j} [label="{lbl}", shape=diamond, style="filled", '
+                f'fillcolor="#f3effb", color="#7a4f93", fontcolor="#7a4f93"];'
+            )
+        lines.append("  }")
+        for j in range(min(len(active_flows), 3)):
+            lines.append(f'  industry -> fl{j} [color="#7a4f93", label="flow"];')
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render_graphrag_context_viz(context: dict[str, Any], flow_name: str = "") -> None:
+    """Render GraphRAG evidence graph and summary metrics used during optimization."""
+    failures = context.get("failure_patterns") or []
+    successes = context.get("success_patterns") or []
+    skills = context.get("available_skills") or []
+    flows = context.get("active_flows") or []
+    sw_nodes = context.get("software_nodes") or []
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Industry", context.get("industry") or "—")
+    c2.metric("Baseline", f"{context.get('baseline_score') or 0:.1f}")
+    c3.metric("Failure patterns", len(failures))
+    c4.metric("Success patterns", len(successes))
+    c5.metric("Skills available", len(skills))
+
+    col_graph, col_detail = st.columns([3, 2])
+    with col_graph:
+        st.caption("GraphRAG evidence graph — entities the agent reasoned over")
+        try:
+            st.graphviz_chart(_graphrag_dot(context, flow_name), use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Graph render failed: {exc}")
+
+    with col_detail:
+        detail_tabs = st.tabs(["Failures", "Successes", "Skills", "Software"])
+        with detail_tabs[0]:
+            if failures:
+                display_table(
+                    df([{k: v for k, v in fp.items() if k in ("company", "mentor", "score", "feedback")} for fp in failures]),
+                    height=220,
+                )
+            else:
+                st.caption("No failure patterns found for this industry.")
+        with detail_tabs[1]:
+            if successes:
+                display_table(
+                    df([{k: v for k, v in sp.items() if k in ("company", "mentor", "score", "feedback")} for sp in successes]),
+                    height=220,
+                )
+            else:
+                st.caption("No success patterns found.")
+        with detail_tabs[2]:
+            if skills:
+                display_table(
+                    df([{k: v for k, v in sk.items() if k in ("name", "language", "performance_score", "avg_execution_ms")} for sk in skills]),
+                    height=220,
+                )
+            else:
+                st.caption("No skills in graph yet.")
+        with detail_tabs[3]:
+            if sw_nodes:
+                display_table(
+                    df([{k: v for k, v in n.items() if k in ("_label", "name", "source_path", "description")} for n in sw_nodes[:30]]),
+                    height=220,
+                )
+            else:
+                st.caption("No software nodes indexed for this project.")
 
 
 def render_admin_sandbox_preview(parsed_payload: dict[str, Any]) -> None:
@@ -1918,12 +2444,32 @@ def render_sandbox_review(result: dict[str, Any]) -> None:
     status = str(result.get("status") or "unknown")
     metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
     traces = result.get("traces") if isinstance(result.get("traces"), list) else []
+    run_meta = result.get("run") if isinstance(result.get("run"), dict) else {}
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Status", status.title())
     c2.metric("Score", metrics.get("match_score", "n/a"))
     c3.metric("Sample Size", metrics.get("sample_size", len(traces) or "n/a"))
     c4.metric("Latency", f"{metrics.get('latency_ms')} ms" if metrics.get("latency_ms") is not None else "n/a")
+
+    if run_meta:
+        with st.expander("Sandbox run details", expanded=True):
+            render_cloud_run_console_links(run_meta)
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Mode", run_meta.get("execution_mode", result.get("execution_mode", "unknown")))
+            r2.metric("Stage", run_meta.get("stage", "complete"))
+            r3.metric("Run ID", run_meta.get("run_id", "n/a"))
+            r4.metric("Execution", run_meta.get("execution_id", "pending"))
+            details = {
+                "project_id": run_meta.get("project_id"),
+                "gcp_project": run_meta.get("gcp_project"),
+                "region": run_meta.get("region"),
+                "job": run_meta.get("job"),
+                "source_bundle_gcs_uri": run_meta.get("source_bundle_gcs_uri"),
+            }
+            detail_rows = [{ "field": k, "value": v } for k, v in details.items() if v]
+            if detail_rows:
+                display_table(pd.DataFrame(detail_rows), height=190)
 
     if result.get("error_log"):
         st.error(result.get("error_log"))
@@ -1932,12 +2478,15 @@ def render_sandbox_review(result: dict[str, Any]) -> None:
         before = metrics.get("sandbox_baseline_score")
         after = metrics.get("match_score")
         if before is not None and after is not None:
+            _before_f = round(float(before), 2)
+            _after_f  = round(float(after), 2)
+            _delta    = round(_after_f - _before_f, 2)
+            _verdict  = "Same or better ✓" if _delta >= 0 else "Degraded ✗"
             st.markdown("**Sandbox comparison**")
-            render_flow_chips([
-                f"Baseline score {round(float(before), 2)}",
-                f"Candidate score {round(float(after), 2)}",
-                "Human review required",
-            ])
+            _sc1, _sc2, _sc3 = st.columns(3)
+            _sc1.metric("Baseline (random)", _before_f)
+            _sc2.metric("Optimized score",   _after_f, delta=_delta)
+            _sc3.metric("Verdict", _verdict)
 
     if traces:
         st.markdown("**Simulation trace sample**")
@@ -1945,6 +2494,142 @@ def render_sandbox_review(result: dict[str, Any]) -> None:
         display_table(trace_df, height=260)
     else:
         st.caption("No trace rows were returned for this sandbox run.")
+
+
+def sandbox_health_summary(result: dict[str, Any] | None) -> dict[str, Any]:
+    if not result:
+        return {
+            "label": "Not tested",
+            "tone": "idle",
+            "summary": "No sandbox run has been executed for this flow in this session.",
+        }
+    status = str(result.get("status") or "unknown")
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    traces = result.get("traces") if isinstance(result.get("traces"), list) else []
+    if status == "success":
+        score = metrics.get("match_score")
+        baseline = metrics.get("sandbox_baseline_score")
+        delta = None
+        if score is not None and baseline is not None:
+            delta = round(float(score) - float(baseline), 2)
+        return {
+            "label": "Working",
+            "tone": "good" if delta is None or delta >= 0 else "warn",
+            "summary": (
+                f"Sandbox completed with score {score}, baseline {baseline}, "
+                f"{len(traces)} trace row(s)."
+            ),
+            "delta": delta,
+        }
+    return {
+        "label": "Needs attention",
+        "tone": "bad",
+        "summary": result.get("error_log") or "Sandbox failed before producing metrics.",
+    }
+
+
+def render_sandbox_run_monitor(
+    *,
+    flow_id: str,
+    flow_name: str,
+    result: dict[str, Any] | None,
+    running: bool = False,
+) -> None:
+    """Compact operational monitor for the approved-flow sandbox path."""
+    summary = sandbox_health_summary(result)
+    tone = summary.get("tone")
+    run_meta = result.get("run") if isinstance(result, dict) and isinstance(result.get("run"), dict) else {}
+
+    with st.container(border=True):
+        top_cols = st.columns([1.2, 1, 1, 1])
+        top_cols[0].metric("Sandbox", "Running" if running else summary["label"])
+        top_cols[1].metric("Mode", run_meta.get("execution_mode", "Cloud Run"))
+        top_cols[2].metric("Stage", run_meta.get("stage", "waiting" if not result else "complete"))
+        top_cols[3].metric("Execution", run_meta.get("execution_id", "pending"))
+        render_cloud_run_console_links(run_meta)
+
+    if running:
+        st.info(f"Running Cloud Run sandbox for **{flow_name}**. This can take up to a few minutes.")
+    elif tone == "good":
+        st.success(summary["summary"])
+    elif tone == "warn":
+        st.warning(summary["summary"])
+    elif tone == "bad":
+        st.error(summary["summary"])
+    else:
+        st.caption(summary["summary"])
+
+    steps = [
+        ("Prepare", "Flow YAML loaded and capability token will be minted."),
+        ("Bundle", "Project source bundle uploaded to GCS when configured."),
+        ("Cloud Run", "Cloud Run Job executes sandbox-system/sandbox_task.py."),
+        ("Logs", "Cloud Logging is scanned for DATA_STREAM markers."),
+        ("Score", "Trace rows are converted into score, baseline, and verdict."),
+    ]
+    completed = 0
+    if result:
+        completed = 5 if result.get("status") == "success" else 3
+        stage = (result.get("run") or {}).get("stage")
+        if stage == "source_bundle_upload":
+            completed = 1
+        elif stage == "cloud_run_execution":
+            completed = 2
+        elif stage == "cloud_logging_parse":
+            completed = 3
+    if running:
+        completed = max(completed, 2)
+
+    html = ["<div style='display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0 14px;'>"]
+    for index, (label, desc) in enumerate(steps, start=1):
+        active = running and index == min(completed + 1, 5)
+        done = index <= completed and not active
+        color = "#3f6f5b" if done else "#9a5b13" if active else "#9c927f"
+        bg = "rgba(22,116,71,.10)" if done else "rgba(165,91,25,.12)" if active else "rgba(156,146,127,.10)"
+        border = "rgba(22,116,71,.35)" if done else "rgba(165,91,25,.45)" if active else "rgba(156,146,127,.25)"
+        state = "done" if done else "now" if active else "waiting"
+        html.append(
+            f"<div style='border:1px solid {border};background:{bg};border-radius:8px;padding:9px 10px;min-height:82px;'>"
+            f"<div style='font-size:11px;text-transform:uppercase;color:{color};font-weight:750;'>{escape(state)}</div>"
+            f"<div style='font-size:13px;color:#20181d;font-weight:700;margin-top:3px;'>{escape(label)}</div>"
+            f"<div style='font-size:11px;color:#6f626a;line-height:1.3;margin-top:4px;'>{escape(desc)}</div>"
+            "</div>"
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+    if result:
+        render_sandbox_review(result)
+
+
+def render_cloud_run_console_links(run_meta: dict[str, Any] | None) -> None:
+    execution_url = cloud_run_execution_url(run_meta)
+    logs_url = cloud_run_logs_url(run_meta)
+    job_url = cloud_run_job_url(run_meta)
+    links = [
+        ("Open Cloud Run execution", execution_url),
+        ("Open Cloud Run logs", logs_url),
+        ("Open Cloud Run job", job_url),
+    ]
+    available = [(label, url) for label, url in links if url]
+    if not available:
+        st.warning(
+            "No Cloud Run URL is available yet. Set GOOGLE_CLOUD_PROJECT, "
+            "SANDBOX_GCP_REGION, and SANDBOX_JOB_NAME to enable console links."
+        )
+        return
+    cols = st.columns(len(available))
+    for col, (label, url) in zip(cols, available):
+        col.link_button(label, url, use_container_width=True)
+
+
+def cloud_run_execution_url(run_meta: dict[str, Any] | None) -> str | None:
+    """Return a direct Cloud Run execution URL when result metadata includes one."""
+    return build_cloud_run_execution_url(run_meta)
+
+
+def cloud_run_logs_url(run_meta: dict[str, Any] | None) -> str | None:
+    """Return a Logs Explorer URL scoped to a Cloud Run execution."""
+    return build_cloud_run_logs_url(run_meta)
 
 
 def summarize_agent_failure(output: str, exit_code: int | None = None) -> str:
@@ -2004,39 +2689,132 @@ def business_flow_sentence(row: pd.Series, limit: int = 8) -> str:
     return " -> ".join(shown) + suffix
 
 
-def cloud_run_job_url() -> str | None:
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-    region = os.environ.get("SANDBOX_GCP_REGION") or os.environ.get("GOOGLE_CLOUD_LOCATION")
-    job = os.environ.get("SANDBOX_JOB_NAME")
-    if not project or not region or not job:
-        return None
-    return (
-        "https://console.cloud.google.com/run/jobs/details/"
-        f"{region}/{job}/executions?project={project}"
-    )
+def transaction_journey_kind(row: pd.Series) -> tuple[str, str]:
+    """Infer the user/business transaction this static flow most likely represents."""
+    text_parts = [
+        row.get("business_flow"),
+        row.get("entrypoint"),
+        row.get("flow_type"),
+        row.get("evidence_summary"),
+    ]
+    for step in row.get("steps") or []:
+        if isinstance(step, dict):
+            text_parts.extend([step.get("step"), step.get("primitive"), step.get("evidence")])
+    text = " ".join(str(part or "") for part in text_parts).lower()
+    patterns = [
+        (("course", "lesson", "learn", "quiz", "assignment", "enroll", "student", "education"), "learning journey", "education"),
+        (("order", "cart", "checkout", "payment", "invoice", "refund", "ship"), "commerce transaction", "commerce"),
+        (("campaign", "donate", "donation", "fund", "pledge", "donor"), "funding transaction", "funding"),
+        (("login", "signin", "signup", "register", "auth", "profile", "account"), "account journey", "identity"),
+        (("match", "recommend", "score", "rank", "search", "filter"), "matching journey", "recommendation"),
+        (("message", "chat", "reply", "notification", "send"), "communication journey", "communication"),
+        (("upload", "download", "file", "document", "media"), "content workflow", "content"),
+    ]
+    for keywords, label, domain in patterns:
+        if any(keyword in text for keyword in keywords):
+            return label, domain
+    return "primary transaction journey", "general"
+
+
+def business_flow_description(row: pd.Series) -> str:
+    """Return a short operator-facing explanation of what a static flow means."""
+    steps = row.get("steps") or []
+    step_count = len(steps) if isinstance(steps, list) else 0
+    entrypoint = row.get("entrypoint") or "the detected entry point"
+    stores = row.get("datastores") or []
+    integrations = row.get("integrations") or []
+    risks = row.get("risks") or []
+    journey_label, domain = transaction_journey_kind(row)
+
+    clauses = [
+        f"This looks like a {journey_label}, not necessarily an order flow. "
+        f"It starts from `{entrypoint}` and contains {step_count} static step(s)."
+    ]
+    if domain != "general":
+        clauses.append(f"The label comes from domain hints in routes, functions, files, and step evidence.")
+    if stores:
+        clauses.append(f"It touches storage: {compact_list(stores, 4)}.")
+    if integrations:
+        clauses.append(f"It calls external integration(s): {compact_list(integrations, 3)}.")
+    if risks:
+        clauses.append(f"Static analysis flagged review items: {compact_list(risks, 3)}.")
+    if not stores and not integrations and not risks:
+        clauses.append("No storage, integration, or explicit risk node is attached yet.")
+    return " ".join(clauses)
+
+
+def render_business_flow_chain(row: pd.Series, limit: int = 12) -> None:
+    """Render ordered BusinessFlow steps as a readable timeline."""
+    steps = row.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        st.caption("No ordered steps detected yet.")
+        return
+
+    cards = []
+    for index, step in enumerate(steps[:limit], 1):
+        if not isinstance(step, dict):
+            continue
+        step_type = escape(str(step.get("step_type") or step.get("primitive_type") or "Step"))
+        primitive = escape(str(step.get("primitive") or step.get("step") or "unknown"))
+        evidence = escape(str(step.get("evidence") or ""))
+        evidence_html = (
+            f"<div style='font-size:11px;color:#6f626a;line-height:1.3;margin-top:4px;'>{evidence[:130]}</div>"
+            if evidence else ""
+        )
+        cards.append(
+            f"""
+            <div style="display:flex;gap:10px;align-items:flex-start;margin:0 0 10px;">
+              <div style="width:26px;height:26px;border-radius:50%;background:#fff3f8;color:#9d174d;border:1px solid #eadde4;
+                          display:flex;align-items:center;justify-content:center;font-size:12px;
+                          font-weight:700;flex:0 0 26px;">{index}</div>
+              <div style="border:1px solid #eadde4;background:#ffffff;border-radius:8px;
+                          padding:8px 10px;flex:1;min-width:0;">
+                <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+                            color:#9d174d;font-weight:700;">{step_type}</div>
+                <div style="font-size:13px;color:#20181d;font-weight:650;word-break:break-word;">{primitive}</div>
+                {evidence_html}
+              </div>
+            </div>
+            """
+        )
+
+    more = ""
+    if len(steps) > limit:
+        more = f"<div style='color:#6f626a;font-size:12px;margin-left:36px;'>+{len(steps) - limit} more step(s)</div>"
+    st.markdown("".join(cards) + more, unsafe_allow_html=True)
+
+
+def cloud_run_job_url(run_meta: dict[str, Any] | None = None) -> str | None:
+    return build_cloud_run_job_url(run_meta)
 
 
 def graph_legend_html() -> str:
     items = [
-        ("Project", "#d8f3dc", "#167447"),
-        ("Repository", "#cdeff2", "#217b84"),
-        ("File", "#f1eadb", "#6d6252"),
-        ("Route", "#d7e8ff", "#3267a8"),
-        ("Business Flow", "#f8dfb2", "#a55b19"),
-        ("Flow Step", "#fff0c2", "#a55b19"),
-        ("Workflow", "#f8dfb2", "#a55b19"),
-        ("Function / Skill", "#dcecff", "#3267a8"),
-        ("Storage", "#ead8ff", "#6845a4"),
-        ("Risk", "#f0d6d6", "#a73737"),
-        ("Company", "#d7efe5", "#167447"),
-        ("Mentor", "#e7e0ff", "#5f4bb6"),
-        ("Programme", "#f3e5ab", "#8b6d12"),
-        ("Flow", "#fff0c2", "#a55b19"),
-        ("Approved sandbox optimization", "#ffd6d6", "#c01818"),
-        ("Connector", "#ffd9cc", "#b54a2c"),
-        ("Server", "#e7e3d8", "#6d6252"),
-        ("Proposed", "#fff9c2", "#d4a017"),
-        ("Agent active", "#d0f4de", "#0f7b63"),
+        ("Project", "#eaf4ef", "#3f6f5b"),
+        ("Repository", "#edf5f7", "#4d7882"),
+        ("File", "#f6f1eb", "#756b70"),
+        ("Route", "#eef3fb", "#4f6f8f"),
+        ("Business Flow", "#fff1df", "#9a5b13"),
+        ("Flow Step", "#fff6d9", "#9a5b13"),
+        ("Workflow", "#fff1df", "#9a5b13"),
+        ("Function / Skill", "#eef3fb", "#4f6f8f"),
+        ("Storage", "#f3effb", "#7660a8"),
+        ("Risk", "#fde8ee", "#b4234a"),
+        ("Company", "#eaf4ef", "#3f6f5b"),
+        ("Mentor", "#f3effb", "#7a4f93"),
+        ("Programme", "#fff2cb", "#8a6f2b"),
+        ("Flow", "#fff6d9", "#9a5b13"),
+        ("Approved sandbox optimization", "#f9dce8", "#9d174d"),
+        ("Connector", "#fff0e8", "#9f5b39"),
+        ("Server", "#f4f0f2", "#756b70"),
+        ("Proposed", "#fff9c2", "#bf8b16"),
+        ("Agent active", "#f9dce8", "#9d174d"),
+        ("Agent", "#f9dce8", "#9d174d"),
+        ("Agent Tool", "#eef3fb", "#4f6f8f"),
+        ("Graph Store", "#f3effb", "#7660a8"),
+        ("Sandbox Runtime", "#eaf4ef", "#3f6f5b"),
+        ("Approval", "#fff3f8", "#9d174d"),
+        ("Registry", "#fff6d9", "#9a5b13"),
     ]
     dots = "".join(
         f'<div class="legend-item"><div class="legend-dot" '
@@ -2054,37 +2832,46 @@ def graph_html(
     """Interactive graph with search, click details, and active-agent highlighting."""
 
     groups = {
-        "Company": {"color": {"background": "#d7efe5", "border": "#167447"}},
-        "Mentor": {"color": {"background": "#e7e0ff", "border": "#5f4bb6"}},
-        "Flow": {"color": {"background": "#fff0c2", "border": "#a55b19"}},
-        "Skill": {"color": {"background": "#dcecff", "border": "#3267a8"}},
-        "Connector": {"color": {"background": "#ffd9cc", "border": "#b54a2c"}},
-        "Server": {"color": {"background": "#e7e3d8", "border": "#6d6252"}},
-        "ExecutionTrace": {"color": {"background": "#cdeff2", "border": "#217b84"}},
-        "Outcome": {"color": {"background": "#f0d6d6", "border": "#a73737"}},
-        "Programme": {"color": {"background": "#f3e5ab", "border": "#8b6d12"}},
-        "WebSite": {"color": {"background": "#d7e8ff", "border": "#3267a8"}},
-        "WebPage": {"color": {"background": "#e9f7cf", "border": "#6f9b20"}},
-        "WebEntity": {"color": {"background": "#ffd9ed", "border": "#a63171"}},
-        "AppProfile": {"color": {"background": "#cfe7df", "border": "#0f7b63"}},
-        "Pipeline": {"color": {"background": "#f8dfb2", "border": "#a55b19"}},
-        "SkillProposal": {"color": {"background": "#ead8ff", "border": "#6845a4"}},
-        "Project": {"color": {"background": "#d8f3dc", "border": "#167447"}},
-        "Repository": {"color": {"background": "#cdeff2", "border": "#217b84"}},
-        "File": {"color": {"background": "#f1eadb", "border": "#6d6252"}},
-        "Route": {"color": {"background": "#d7e8ff", "border": "#3267a8"}},
-        "Service": {"color": {"background": "#fff0c2", "border": "#a55b19"}},
-        "Function": {"color": {"background": "#dcecff", "border": "#3267a8"}},
-        "DatabaseModel": {"color": {"background": "#ead8ff", "border": "#6845a4"}},
-        "DatabaseTable": {"color": {"background": "#ead8ff", "border": "#6845a4"}},
-        "DataStore": {"color": {"background": "#d7efe5", "border": "#167447"}},
-        "Entity": {"color": {"background": "#ffd9ed", "border": "#a63171"}},
-        "Workflow": {"color": {"background": "#f8dfb2", "border": "#a55b19"}},
-        "BusinessFlow": {"color": {"background": "#f8dfb2", "border": "#a55b19"}},
-        "FlowStep": {"color": {"background": "#fff0c2", "border": "#a55b19"}},
-        "Integration": {"color": {"background": "#ffd9cc", "border": "#b54a2c"}},
-        "Artifact": {"color": {"background": "#e9f7cf", "border": "#6f9b20"}},
-        "Risk": {"color": {"background": "#f0d6d6", "border": "#a73737"}},
+        "Company": {"color": {"background": "#eaf4ef", "border": "#3f6f5b"}},
+        "Mentor": {"color": {"background": "#f3effb", "border": "#7a4f93"}},
+        "Flow": {"color": {"background": "#fff6d9", "border": "#9a5b13"}},
+        "Skill": {"color": {"background": "#eef3fb", "border": "#4f6f8f"}},
+        "Connector": {"color": {"background": "#fff0e8", "border": "#9f5b39"}},
+        "Server": {"color": {"background": "#f4f0f2", "border": "#756b70"}},
+        "ExecutionTrace": {"color": {"background": "#edf5f7", "border": "#4d7882"}},
+        "Outcome": {"color": {"background": "#fde8ee", "border": "#b4234a"}},
+        "Programme": {"color": {"background": "#fff2cb", "border": "#8a6f2b"}},
+        "WebSite": {"color": {"background": "#eef3fb", "border": "#4f6f8f"}},
+        "WebPage": {"color": {"background": "#f3f7e7", "border": "#788a3c"}},
+        "WebEntity": {"color": {"background": "#fff0f6", "border": "#9d174d"}},
+        "AppProfile": {"color": {"background": "#eaf4ef", "border": "#9d174d"}},
+        "Pipeline": {"color": {"background": "#fff1df", "border": "#9a5b13"}},
+        "SkillProposal": {"color": {"background": "#f3effb", "border": "#7660a8"}},
+        "SchemaChangeProposal": {"color": {"background": "#fff2cb", "border": "#8a6f2b"}},
+        "Project": {"color": {"background": "#eaf4ef", "border": "#3f6f5b"}},
+        "Repository": {"color": {"background": "#edf5f7", "border": "#4d7882"}},
+        "File": {"color": {"background": "#f6f1eb", "border": "#756b70"}},
+        "Route": {"color": {"background": "#eef3fb", "border": "#4f6f8f"}},
+        "Service": {"color": {"background": "#fff6d9", "border": "#9a5b13"}},
+        "Function": {"color": {"background": "#eef3fb", "border": "#4f6f8f"}},
+        "DatabaseModel": {"color": {"background": "#f3effb", "border": "#7660a8"}},
+        "DatabaseTable": {"color": {"background": "#f3effb", "border": "#7660a8"}},
+        "DataStore": {"color": {"background": "#eaf4ef", "border": "#3f6f5b"}},
+        "Entity": {"color": {"background": "#fff0f6", "border": "#9d174d"}},
+        "Workflow": {"color": {"background": "#fff1df", "border": "#9a5b13"}},
+        "BusinessFlow": {"color": {"background": "#fff1df", "border": "#9a5b13"}},
+        "FlowStep": {"color": {"background": "#fff6d9", "border": "#9a5b13"}},
+        "Integration": {"color": {"background": "#fff0e8", "border": "#9f5b39"}},
+        "Artifact": {"color": {"background": "#f3f7e7", "border": "#788a3c"}},
+        "Risk": {"color": {"background": "#fde8ee", "border": "#b4234a"}},
+        "Agent": {"color": {"background": "#f9dce8", "border": "#9d174d"}},
+        "AgentTool": {"color": {"background": "#eef3fb", "border": "#4f6f8f"}},
+        "GraphStore": {"color": {"background": "#f3effb", "border": "#7660a8"}},
+        "Runtime": {"color": {"background": "#edf5f7", "border": "#4d7882"}},
+        "SandboxRuntime": {"color": {"background": "#eaf4ef", "border": "#3f6f5b"}},
+        "Approval": {"color": {"background": "#fff3f8", "border": "#9d174d"}},
+        "Registry": {"color": {"background": "#fff6d9", "border": "#9a5b13"}},
+        "ArchitectureProposal": {"color": {"background": "#fff0f6", "border": "#9d174d"}},
     }
 
     size_map = {
@@ -2115,9 +2902,51 @@ def graph_html(
         "Outcome": 12,
         "Risk": 16,
         "SkillProposal": 16,
+        "SchemaChangeProposal": 16,
+        "Agent": 24,
+        "AgentTool": 18,
+        "GraphStore": 20,
+        "Runtime": 18,
+        "SandboxRuntime": 20,
+        "Approval": 20,
+        "Registry": 20,
+        "ArchitectureProposal": 17,
     }
 
-    diagram_scopes = {"Workflow Pipeline", "Storage & Risk"}
+    # Light structured-diagram palette used only for ERD/architecture scopes.
+    erd_colors: dict[str, dict[str, str]] = {
+        "Project":       {"bg": "#eaf4ef", "border": "#3f6f5b"},
+        "Repository":    {"bg": "#f4f0f2", "border": "#756b70"},
+        "BusinessFlow":  {"bg": "#fff1df", "border": "#9a5b13"},
+        "Workflow":      {"bg": "#fff1df", "border": "#9a5b13"},
+        "Route":         {"bg": "#eef3fb", "border": "#4f6f8f"},
+        "FlowStep":      {"bg": "#fff6d9", "border": "#9a5b13"},
+        "Service":       {"bg": "#eef3fb", "border": "#4f6f8f"},
+        "Function":      {"bg": "#eef3fb", "border": "#4f6f8f"},
+        "File":          {"bg": "#ffffff", "border": "#d9c4cf"},
+        "DataStore":     {"bg": "#eaf4ef", "border": "#3f6f5b"},
+        "DatabaseModel": {"bg": "#f3effb", "border": "#7660a8"},
+        "DatabaseTable": {"bg": "#f3effb", "border": "#7660a8"},
+        "Integration":   {"bg": "#fff0e8", "border": "#9f5b39"},
+        "Artifact":      {"bg": "#f3f7e7", "border": "#788a3c"},
+        "Risk":          {"bg": "#fde8ee", "border": "#b4234a"},
+        "Flow":          {"bg": "#f9dce8", "border": "#9d174d"},
+        "Entity":        {"bg": "#fff0f6", "border": "#9d174d"},
+        "Pipeline":      {"bg": "#fff2cb", "border": "#8a6f2b"},
+        "Skill":         {"bg": "#eef3fb", "border": "#4f6f8f"},
+        "Connector":     {"bg": "#fff0e8", "border": "#9f5b39"},
+        "Server":        {"bg": "#f4f0f2", "border": "#756b70"},
+        "Agent":         {"bg": "#f9dce8", "border": "#9d174d"},
+        "AgentTool":     {"bg": "#eef3fb", "border": "#4f6f8f"},
+        "GraphStore":    {"bg": "#f3effb", "border": "#7660a8"},
+        "Runtime":       {"bg": "#edf5f7", "border": "#4d7882"},
+        "SandboxRuntime":{"bg": "#eaf4ef", "border": "#3f6f5b"},
+        "Approval":      {"bg": "#fff3f8", "border": "#9d174d"},
+        "Registry":      {"bg": "#fff6d9", "border": "#9a5b13"},
+        "ArchitectureProposal": {"bg": "#fff0f6", "border": "#9d174d"},
+    }
+
+    diagram_scopes = {"Workflow Pipeline", "Storage & Risk", "Agentic Layer Links"}
     is_structured_diagram = scope in diagram_scopes
     level_map = {
         "Workflow Pipeline": {
@@ -2147,6 +2976,19 @@ def graph_html(
             "Integration": 3,
             "Risk": 4,
         },
+        "Agentic Layer Links": {
+            "Project": 0,
+            "GraphStore": 1,
+            "AgentTool": 2,
+            "Agent": 3,
+            "SandboxRuntime": 4,
+            "Runtime": 4,
+            "Approval": 5,
+            "Registry": 6,
+            "Flow": 7,
+            "Skill": 7,
+            "ArchitectureProposal": 7,
+        },
     }.get(scope, {})
     shape_map = {
         "Project": "hexagon",
@@ -2171,6 +3013,7 @@ def graph_html(
         "ExecutionTrace": "box",
         "Outcome": "diamond",
         "SkillProposal": "box",
+        "SchemaChangeProposal": "box",
         "Server": "box",
         "Company": "box",
         "Mentor": "box",
@@ -2180,6 +3023,14 @@ def graph_html(
         "WebEntity": "box",
         "AppProfile": "box",
         "Pipeline": "box",
+        "Agent": "box",
+        "AgentTool": "box",
+        "GraphStore": "database",
+        "Runtime": "box",
+        "SandboxRuntime": "box",
+        "Approval": "diamond",
+        "Registry": "database",
+        "ArchitectureProposal": "box",
     }
 
     def styled_edge(edge: dict[str, Any]) -> dict[str, Any]:
@@ -2188,7 +3039,7 @@ def graph_html(
         if rel == "APPROVED_SANDBOX_OPTIMIZATION":
             next_edge.update(
                 {
-                    "color": {"color": "#c01818", "highlight": "#8b0000", "hover": "#8b0000"},
+                    "color": {"color": "#9d174d", "highlight": "#7f123f", "hover": "#7f123f"},
                     "width": 3,
                     "dashes": True,
                 }
@@ -2196,77 +3047,91 @@ def graph_html(
         elif "RISK" in rel:
             next_edge.update(
                 {
-                    "color": {"color": "#a73737", "highlight": "#7a1c1c", "hover": "#7a1c1c"},
+                    "color": {"color": "#b4234a", "highlight": "#8f1d3b", "hover": "#8f1d3b"},
                     "width": 2.2,
                 }
             )
         elif "DATASTORE" in rel or "MODEL" in rel or "TABLE" in rel:
             next_edge.update(
                 {
-                    "color": {"color": "#6845a4", "highlight": "#4e347a", "hover": "#4e347a"},
+                    "color": {"color": "#7660a8", "highlight": "#5f4f88", "hover": "#5f4f88"},
                     "width": 1.8,
                 }
             )
         elif "INTEGRATION" in rel or "CONNECTOR" in rel:
             next_edge.update(
                 {
-                    "color": {"color": "#b54a2c", "highlight": "#87351f", "hover": "#87351f"},
+                    "color": {"color": "#9f5b39", "highlight": "#7d442b", "hover": "#7d442b"},
                     "width": 1.8,
                 }
             )
         elif rel in {"HAS_BUSINESS_FLOW", "HAS_STEP", "USES_PRIMITIVE", "FILE_DEFINES_WORKFLOW"}:
             next_edge.update(
                 {
-                    "color": {"color": "#a55b19", "highlight": "#78410f", "hover": "#78410f"},
+                    "color": {"color": "#9a5b13", "highlight": "#74440f", "hover": "#74440f"},
                     "width": 1.9,
                 }
             )
         elif rel.startswith("FILE_DEFINES") or rel.startswith("REPOSITORY_HAS"):
             next_edge.update(
                 {
-                    "color": {"color": "#8b8175", "highlight": "#19211f", "hover": "#19211f"},
+                    "color": {"color": "#a99aa3", "highlight": "#756b70", "hover": "#756b70"},
                     "width": 1.35,
                 }
             )
         return next_edge
 
     badge_colors = {
-        "Project": "#167447",
-        "Repository": "#217b84",
-        "File": "#6d6252",
-        "Route": "#3267a8",
-        "Service": "#a55b19",
-        "Workflow": "#a55b19",
-        "BusinessFlow": "#a55b19",
-        "FlowStep": "#a55b19",
-        "Function": "#3267a8",
-        "Skill": "#3267a8",
-        "DataStore": "#167447",
-        "DatabaseModel": "#6845a4",
-        "DatabaseTable": "#6845a4",
-        "Entity": "#a63171",
-        "Integration": "#b54a2c",
-        "Artifact": "#6f9b20",
-        "Risk": "#a73737",
-        "Company": "#167447",
-        "Mentor": "#5f4bb6",
-        "Flow": "#a55b19",
-        "Connector": "#b54a2c",
-        "Server": "#6d6252",
-        "Programme": "#8b6d12",
-        "ExecutionTrace": "#217b84",
-        "Outcome": "#a73737",
-        "AppProfile": "#0f7b63",
-        "Pipeline": "#a55b19",
-        "SkillProposal": "#6845a4",
-        "WebSite": "#3267a8",
-        "WebPage": "#6f9b20",
-        "WebEntity": "#a63171",
+        "Project": "#3f6f5b",
+        "Repository": "#4d7882",
+        "File": "#756b70",
+        "Route": "#4f6f8f",
+        "Service": "#9a5b13",
+        "Workflow": "#9a5b13",
+        "BusinessFlow": "#9a5b13",
+        "FlowStep": "#9a5b13",
+        "Function": "#475569",
+        "Skill": "#4f6f8f",
+        "DataStore": "#357960",
+        "DatabaseModel": "#7660a8",
+        "DatabaseTable": "#7660a8",
+        "Entity": "#9d174d",
+        "Integration": "#9f5b39",
+        "Artifact": "#788a3c",
+        "Risk": "#b4234a",
+        "Company": "#357960",
+        "Mentor": "#7a4f93",
+        "Flow": "#9d174d",
+        "Connector": "#9f5b39",
+        "Server": "#756b70",
+        "Programme": "#8a6f2b",
+        "ExecutionTrace": "#467982",
+        "Outcome": "#b4234a",
+        "AppProfile": "#9d174d",
+        "Pipeline": "#8a6f2b",
+        "SkillProposal": "#7660a8",
+        "SchemaChangeProposal": "#8a6f2b",
+        "WebSite": "#4f6f8f",
+        "WebPage": "#788a3c",
+        "WebEntity": "#9d174d",
+        "Agent": "#9d174d",
+        "AgentTool": "#4f6f8f",
+        "GraphStore": "#7660a8",
+        "Runtime": "#4d7882",
+        "SandboxRuntime": "#3f6f5b",
+        "Approval": "#9d174d",
+        "Registry": "#9a5b13",
+        "ArchitectureProposal": "#9d174d",
     }
 
     active_ids = set(agent_active_ids or [])
     nodes = []
     node_details = {}
+    structured_rows: dict[int, int] = defaultdict(int)
+    structured_totals: dict[int, int] = defaultdict(int)
+    if is_structured_diagram:
+        for raw_node in payload["nodes"]:
+            structured_totals[level_map.get(raw_node.get("group"), 3)] += 1
 
     for node in payload["nodes"]:
         status = node.get("status")
@@ -2283,48 +3148,77 @@ def graph_html(
             "size": size_map.get(group, 14) * (1.35 if is_active else 1),
         }
         if is_structured_diagram:
-            node_data["level"] = level_map.get(group, 3)
-            node_data["margin"] = {"top": 8, "right": 14, "bottom": 8, "left": 14}
-            node_data["widthConstraint"] = {"minimum": 110, "maximum": 200}
-            node_data["heightConstraint"] = {"minimum": 36}
-
-        if is_active:
+            level = level_map.get(group, 3)
+            row_index = structured_rows[level]
+            row_total = max(structured_totals[level], 1)
+            structured_rows[level] += 1
+            x_spacing = 255 if scope == "Storage & Risk" else 285
+            y_spacing = 84 if row_total > 8 else 104
+            node_data["x"] = level * x_spacing
+            node_data["y"] = (row_index - (row_total - 1) / 2) * y_spacing
+            node_data["fixed"] = {"x": False, "y": False}
+            node_data["margin"] = {"top": 10, "right": 16, "bottom": 10, "left": 16}
+            node_data["widthConstraint"] = {"minimum": 120, "maximum": 210}
+            node_data["heightConstraint"] = {"minimum": 44}
+            # ERD-style label: type tag on the first line, truncated name below
+            node_data["label"] = f"«{group}»\n{label[:22]}"
+            _ec = erd_colors.get(group, {"bg": "#ffffff", "border": "#d9c4cf"})
             node_data["color"] = {
-                "background": "#d0f4de",
-                "border": "#0f7b63",
-                "highlight": {"background": "#b7eecb", "border": "#0a5c49"},
+                "background": _ec["bg"],
+                "border": _ec["border"],
+                "highlight": {"background": "#ffffff", "border": "#9d174d"},
+                "hover":     {"background": "#ffffff", "border": "#9d174d"},
+            }
+            node_data["font"] = {
+                "face": "Avenir Next, Helvetica Neue, Helvetica, sans-serif",
+                "size": 11,
+                "color": "#20181d",
+                "strokeWidth": 0,
+                "multi": False,
             }
             node_data["shadow"] = {
                 "enabled": True,
-                "color": "rgba(15,123,99,0.4)",
+                "color": "rgba(71,31,51,0.08)",
+                "size": 10, "x": 0, "y": 0,
+            }
+
+        if is_active:
+            node_data["color"] = {
+                "background": "#f9dce8",
+                "border": "#9d174d",
+                "highlight": {"background": "#f4bdd2", "border": "#7f123f"},
+            }
+            node_data["shadow"] = {
+                "enabled": True,
+                "color": "rgba(157,23,77,0.28)",
                 "size": 16,
                 "x": 0,
                 "y": 0,
             }
         elif status == "sandbox_approved":
             node_data["color"] = {
-                "background": "#ffd6d6",
-                "border": "#c01818",
-                "highlight": {"background": "#ffc2c2", "border": "#8b0000"},
-                "hover": {"background": "#ffc2c2", "border": "#8b0000"},
+                "background": "#f9dce8",
+                "border": "#9d174d",
+                "highlight": {"background": "#f4bdd2", "border": "#7f123f"},
+                "hover": {"background": "#f4bdd2", "border": "#7f123f"},
             }
             node_data["shadow"] = {
                 "enabled": True,
-                "color": "rgba(192,24,24,0.35)",
+                "color": "rgba(157,23,77,0.25)",
                 "size": 14,
                 "x": 0,
                 "y": 0,
             }
         elif status in ("overloaded", "critical", "deprecated", "analysis_failed"):
             node_data["color"] = {
-                "background": "#fddede",
-                "border": "#a73737",
-                "highlight": {"background": "#fddede", "border": "#7a1c1c"},
+                "background": "#fde8ee",
+                "border": "#b4234a",
+                "highlight": {"background": "#fbd2dd", "border": "#8f1d3b"},
             }
         elif status == "proposed":
             node_data["color"] = {
                 "background": "#fff9c2",
-                "border": "#d4a017",
+                "border": "#bf8b16",
                 "highlight": {"background": "#fff9c2", "border": "#b8860b"},
             }
 
@@ -2361,6 +3255,14 @@ def graph_html(
             details["Entrypoint"] = node["entrypoint"]
         if node.get("flow_type"):
             details["Flow Type"] = node["flow_type"]
+        if node.get("label") and group == "SchemaChangeProposal":
+            details["Proposed Label"] = node["label"]
+        if node.get("reason"):
+            details["Reason"] = node["reason"]
+        if node.get("required_fields"):
+            details["Required Fields"] = compact_list(node["required_fields"], 8)
+        if node.get("optional_fields"):
+            details["Optional Fields"] = compact_list(node["optional_fields"], 8)
         if node.get("evidence_summary"):
             details["Evidence"] = node["evidence_summary"]
         if node.get("source_paths"):
@@ -2429,10 +3331,43 @@ def graph_html(
     layout_options = {"improvedLayout": True}
     edge_smooth: dict[str, Any] | bool = {"type": "cubicBezier", "forceDirection": "none", "roundness": 0.45}
     if is_structured_diagram:
+        physics_options = False
+        layout_options = {"improvedLayout": False}
+        edge_smooth: dict[str, Any] | bool = {"type": "curvedCW", "roundness": 0.1}
+        x_spacing_global = 250 if scope == "Agentic Layer Links" else 255 if scope == "Storage & Risk" else 285
+        if scope == "Workflow Pipeline":
+            lane_defs = [
+                {"level": 0, "label": "PROJECT",      "color": "rgba(63,185,80,.07)"},
+                {"level": 1, "label": "FLOWS",         "color": "rgba(240,136,62,.07)"},
+                {"level": 2, "label": "STEPS",         "color": "rgba(88,166,255,.07)"},
+                {"level": 3, "label": "SERVICES",      "color": "rgba(88,166,255,.04)"},
+                {"level": 4, "label": "STORAGE",       "color": "rgba(188,140,255,.07)"},
+                {"level": 5, "label": "RISKS",         "color": "rgba(255,123,114,.08)"},
+                {"level": 6, "label": "OPTIMIZATION",  "color": "rgba(240,136,62,.04)"},
+            ]
+        elif scope == "Storage & Risk":
+            lane_defs = [
+                {"level": 0, "label": "PROJECT",  "color": "rgba(63,185,80,.07)"},
+                {"level": 1, "label": "REPOS",     "color": "rgba(139,148,158,.06)"},
+                {"level": 2, "label": "FILES",     "color": "rgba(139,148,158,.04)"},
+                {"level": 3, "label": "STORAGE",   "color": "rgba(188,140,255,.07)"},
+                {"level": 4, "label": "RISKS",     "color": "rgba(255,123,114,.08)"},
+            ]
+        else:
+            lane_defs = [
+                {"level": 0, "label": "PROJECT", "color": "rgba(63,111,91,.07)"},
+                {"level": 1, "label": "GRAPH", "color": "rgba(118,96,168,.07)"},
+                {"level": 2, "label": "TOOLS", "color": "rgba(79,111,143,.06)"},
+                {"level": 3, "label": "AGENTS", "color": "rgba(157,23,77,.06)"},
+                {"level": 4, "label": "SANDBOX", "color": "rgba(63,111,91,.06)"},
+                {"level": 5, "label": "APPROVAL", "color": "rgba(157,23,77,.07)"},
+                {"level": 6, "label": "REGISTRY", "color": "rgba(154,91,19,.06)"},
+                {"level": 7, "label": "PROJECT OBJECTS", "color": "rgba(217,196,207,.10)"},
+            ]
         graph_caption = (
-            "Workflow lanes: project -> business flow -> implementation step -> dependency -> risk -> approved optimization"
-            if scope == "Workflow Pipeline"
-            else "Risk impact map: repository and files flow toward storage, integrations, and detected risks"
+            "Agentic architecture map: project graph -> tools -> agents -> sandbox -> approvals -> registry"
+            if scope == "Agentic Layer Links"
+            else "Drag any node to reposition — snaps to grid, position saved per session"
         )
     else:
         graph_caption = "Exploratory force layout for the full connected project graph"
@@ -2450,52 +3385,227 @@ def graph_html(
         ),
         nodes[0]["id"] if nodes else None,
     )
-    initial_scale = 0.42 if scope == "Workflow Pipeline" else 0.52
+    initial_scale = 0.72 if scope == "Workflow Pipeline" else 0.78
 
-    html = f"""
-    <div style="display:flex; gap:12px; height:720px;">
-      <div style="flex:1; position:relative;">
-        <div style="position:absolute; top:10px; left:10px; z-index:10; display:flex; gap:6px;">
-          <input id="searchBox" placeholder="Search node..." onkeyup="searchNode()"
-            style="padding:6px 12px; border-radius:8px; border:1px solid #d8d1c2;
-                   background:#fffaf0; font-size:13px; width:190px; outline:none;
-                   box-shadow:0 2px 8px rgba(0,0,0,0.08);">
-          <button onclick="resetView()"
-            style="padding:6px 12px; border-radius:8px; border:1px solid #d8d1c2;
-                   background:#fffaf0; cursor:pointer; font-size:12px; color:#65706d;">
-            Reset
-          </button>
+    if scope in {"Workflow Pipeline", "Storage & Risk"}:
+        if not nodes:
+            return """
+            <div style="height:220px;border:1px solid #eadde4;border-radius:8px;
+                        display:flex;align-items:center;justify-content:center;
+                        color:#6f626a;background:#ffffff;font-family:Avenir Next,Helvetica,sans-serif;">
+              No graph nodes are available for this scope yet.
+            </div>
+            """
+
+        node_by_id = {node["id"]: node for node in nodes}
+        x_values = [float(node.get("x", 0)) for node in nodes]
+        y_values = [float(node.get("y", 0)) for node in nodes]
+        min_x, max_x = min(x_values), max(x_values)
+        min_y, max_y = min(y_values), max(y_values)
+        pad_x, pad_y = 170, 130
+        box_w, box_h = 150, 58
+        canvas_w = max(960, int(max_x - min_x + pad_x * 2 + box_w))
+        canvas_h = max(560, int(max_y - min_y + pad_y * 2 + box_h))
+
+        def _sx(value: Any) -> float:
+            return float(value or 0) - min_x + pad_x
+
+        def _sy(value: Any) -> float:
+            return float(value or 0) - min_y + pad_y
+
+        lane_html = ""
+        lane_labels = []
+        for lane in lane_defs:
+            lx = lane["level"] * x_spacing_global - min_x + pad_x - x_spacing_global * 0.5
+            lane_html += (
+                f"<div style='position:absolute;left:{lx}px;top:0;width:{x_spacing_global}px;"
+                f"height:{canvas_h}px;background:{lane['color']};border-left:1px dashed #eadde4;'></div>"
+            )
+            lane_labels.append(
+                f"<div style='position:absolute;left:{lx}px;top:14px;width:{x_spacing_global}px;"
+                "text-align:center;font-size:10px;font-weight:800;color:#6f626a;"
+                f"letter-spacing:.08em;'>{escape(lane['label'])}</div>"
+            )
+
+        edge_lines = []
+        for edge in edges:
+            src = node_by_id.get(edge.get("from"))
+            dst = node_by_id.get(edge.get("to"))
+            if not src or not dst:
+                continue
+            rel = str(edge.get("label") or "")
+            color = "#d9c4cf"
+            width = 1.4
+            dash = ""
+            if "RISK" in rel:
+                color = "#b4234a"
+                width = 2
+            elif "DATASTORE" in rel or "TABLE" in rel or "MODEL" in rel:
+                color = "#7660a8"
+                width = 1.8
+            elif rel == "APPROVED_SANDBOX_OPTIMIZATION":
+                color = "#9d174d"
+                width = 2.4
+                dash = "stroke-dasharray='6 5'"
+            x1 = _sx(src.get("x")) + box_w
+            y1 = _sy(src.get("y")) + box_h / 2
+            x2 = _sx(dst.get("x"))
+            y2 = _sy(dst.get("y")) + box_h / 2
+            mid = (x1 + x2) / 2
+            edge_lines.append(
+                f"<path d='M{x1:.1f},{y1:.1f} C{mid:.1f},{y1:.1f} {mid:.1f},{y2:.1f} {x2:.1f},{y2:.1f}' "
+                f"fill='none' stroke='{color}' stroke-width='{width}' {dash} marker-end='url(#arrow)' />"
+            )
+
+        node_cards = []
+        for node in nodes:
+            group = node.get("group", "Node")
+            clean_label = str(node.get("label") or node.get("id", "")).replace("«", "").replace("»", " ")
+            display_label = clean_label.replace("\n", " ").strip()
+            color = node.get("color") if isinstance(node.get("color"), dict) else {}
+            bg = color.get("background") or groups.get(group, {}).get("color", {}).get("background", "#ffffff")
+            border = color.get("border") or groups.get(group, {}).get("color", {}).get("border", "#d9c4cf")
+            details_json = json.dumps(node_details.get(node["id"], {}))
+            node_cards.append(
+                f"<button class='node-card' onclick='showDetails({json.dumps(node['id'])}, {details_json})' "
+                f"style='left:{_sx(node.get('x'))}px;top:{_sy(node.get('y'))}px;"
+                f"background:{bg};border-color:{border};'>"
+                f"<span class='node-type'>{escape(group)}</span>"
+                f"<span class='node-name'>{escape(display_label[:42])}</span>"
+                "</button>"
+            )
+
+        return f"""
+        <style>
+          .staticGraphShell {{ height:720px; display:flex; gap:12px; font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif; }}
+          .staticGraphViewport {{ flex:1; min-width:0; overflow:auto; border:1px solid #eadde4; border-radius:8px; background:#fff; position:relative; }}
+          .staticGraphCanvas {{ position:relative; width:{canvas_w}px; height:{canvas_h}px; }}
+          .node-card {{ position:absolute; width:{box_w}px; min-height:{box_h}px; border:1.5px solid; border-radius:7px;
+            padding:8px 10px; text-align:left; cursor:pointer; box-shadow:0 8px 18px rgba(71,31,51,.08); color:#20181d; }}
+          .node-card:hover {{ outline:2px solid rgba(157,23,77,.22); }}
+          .node-type {{ display:block; font-size:9px; font-weight:800; color:#6f626a; text-transform:uppercase; letter-spacing:.06em; }}
+          .node-name {{ display:block; font-size:12px; font-weight:750; line-height:1.2; margin-top:3px; overflow-wrap:anywhere; }}
+          .staticDetail {{ width:310px; flex:0 0 310px; border:1px solid #eadde4; border-radius:8px; background:#fff7fa; overflow:auto; }}
+          .detailRow {{ padding:8px 0; border-bottom:1px solid #eadde4; }}
+          .detailKey {{ font-size:9px; font-weight:800; color:#6f626a; text-transform:uppercase; letter-spacing:.06em; }}
+          .detailVal {{ font-size:12px; color:#20181d; font-weight:650; overflow-wrap:anywhere; margin-top:3px; }}
+        </style>
+        <div class="staticGraphShell">
+          <div class="staticGraphViewport">
+            <div class="staticGraphCanvas">
+              {lane_html}
+              {''.join(lane_labels)}
+              <svg width="{canvas_w}" height="{canvas_h}" style="position:absolute;left:0;top:0;overflow:visible;">
+                <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto">
+                  <polygon points="0 0, 8 3.5, 0 7" fill="#9d8c96"></polygon>
+                </marker></defs>
+                {''.join(edge_lines)}
+              </svg>
+              {''.join(node_cards)}
+              <div style="position:absolute;left:12px;bottom:12px;background:rgba(255,255,255,.95);border:1px solid #eadde4;
+                border-radius:6px;padding:7px 10px;color:#6f626a;font-size:11px;font-weight:700;">{escape(graph_caption)}</div>
+            </div>
+          </div>
+          <div id="staticDetail" class="staticDetail">
+            <div style="padding:16px;border-bottom:1px solid #eadde4;">
+              <div style="font-size:10px;font-weight:800;color:#6f626a;text-transform:uppercase;letter-spacing:.08em;">Node Properties</div>
+              <div style="font-size:14px;color:#20181d;font-weight:750;margin-top:5px;">Nothing selected</div>
+            </div>
+            <div style="padding:28px 16px;color:#6f626a;font-size:12px;line-height:1.5;text-align:center;">
+              Click a node in the graph to inspect its properties.
+            </div>
+          </div>
+        </div>
+        <script>
+          function esc(v) {{
+            return String(v ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+          }}
+          function showDetails(id, details) {{
+            const rows = Object.entries(details || {{}})
+              .filter(([k]) => !['Type','Name'].includes(k))
+              .map(([k,v]) => `<div class="detailRow"><div class="detailKey">${{esc(k)}}</div><div class="detailVal">${{esc(v)}}</div></div>`)
+              .join('');
+            document.getElementById('staticDetail').innerHTML = `
+              <div style="padding:16px;border-bottom:1px solid #eadde4;background:#fff;">
+                <div style="font-size:10px;font-weight:800;color:#6f626a;text-transform:uppercase;letter-spacing:.08em;">${{esc(details.Type || 'Node')}}</div>
+                <div style="font-size:14px;color:#20181d;font-weight:800;margin-top:5px;overflow-wrap:anywhere;">${{esc(details.Name || id)}}</div>
+              </div>
+              <div style="padding:10px 16px;">${{rows || '<div style="color:#6f626a;font-size:12px;padding:12px 0;">No extra properties.</div>'}}</div>
+              <div style="margin:0 16px 14px;padding-top:8px;border-top:1px solid #eadde4;color:#9d8c96;font-size:10px;text-align:center;">id: ...${{String(id).slice(-10)}}</div>`;
+          }}
+        </script>
+        """
+
+    # ── Structured ERD view: light structured canvas ──────────────────────────
+    if is_structured_diagram:
+        html = f"""
+    <style>
+      #erdWrap * {{ box-sizing: border-box; }}
+      .erd-btn {{
+        padding:5px 11px; border-radius:3px; border:1px solid #d9c4cf;
+        background:#fff7fa; color:#6f626a; cursor:pointer; font-size:11px;
+        font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif; font-weight:700;
+        letter-spacing:.04em; transition:border-color .15s,color .15s;
+      }}
+      .erd-btn:hover {{ border-color:#9d174d; color:#20181d; }}
+      .erd-input {{
+        padding:5px 10px; border-radius:3px; border:1px solid #d9c4cf;
+        background:#ffffff; color:#20181d; font-size:11px; width:170px; outline:none;
+        font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;
+      }}
+      .erd-input:focus {{ border-color:#9d174d; }}
+      #savedBadge {{
+        position:absolute; top:10px; right:10px; z-index:20;
+        padding:4px 10px; border-radius:3px; font-size:10px; font-weight:700;
+        background:rgba(63,185,80,.15); border:1px solid #3f6f5b; color:#3f6f5b;
+        font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;
+        opacity:0; transition:opacity .3s; pointer-events:none;
+      }}
+    </style>
+    <div id="erdWrap" style="display:flex;gap:10px;height:740px;
+         background:#ffffff;padding:10px;border-radius:6px;">
+
+      <div style="flex:1;position:relative;">
+        <div style="position:absolute;top:10px;left:10px;z-index:20;
+                    display:flex;gap:6px;align-items:center;">
+          <input id="searchBox" class="erd-input"
+            placeholder="Search node…" onkeyup="searchNode()">
+          <button class="erd-btn" onclick="resetView()">Reset</button>
+          <button class="erd-btn" onclick="clearLayout()"
+            title="Remove all saved positions and refit">Clear Layout</button>
         </div>
 
-        <div id="agentIndicator"
-          style="position:absolute; top:10px; right:10px; z-index:10;
-                 padding:5px 12px; border-radius:8px; font-size:0.75rem;
-                 font-weight:600; display:none;
-                 background:#d0f4de; border:1px solid #0f7b63; color:#0a5c49;">
-          Agent running...
-        </div>
+        <div id="savedBadge">✓ Position saved</div>
 
-        <div style="position:absolute; bottom:12px; left:12px; z-index:10;
-                    background:rgba(255,250,240,.92); border:1px solid #d8d1c2;
-                    border-radius:8px; padding:6px 10px; color:#65706d;
-                    font-size:11px; font-weight:600; max-width:520px;
-                    box-shadow:0 3px 12px rgba(0,0,0,0.07);">
+        <div style="position:absolute;bottom:10px;left:10px;z-index:10;
+                    background:rgba(255,255,255,.94);border:1px solid #eadde4;
+                    border-radius:3px;padding:5px 10px;color:#6f626a;
+                    font-size:10px;font-weight:700;max-width:480px;
+                    font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;letter-spacing:.04em;">
           {graph_caption}
         </div>
 
         <div id="network"
-          style="height:100%; border:1px solid #d8d1c2; border-radius:12px;
-                 background:#fffaf0; box-shadow:0 4px 20px rgba(0,0,0,0.06);">
+          style="height:100%;border:1px solid #eadde4;border-radius:4px;
+                 background:#ffffff;
+                 box-shadow:0 0 0 1px rgba(240,246,252,.04),inset 0 1px 0 rgba(240,246,252,.02);">
         </div>
       </div>
 
       <div id="detailPanel"
-        style="width:285px; background:#fffaf0; border:1px solid #d8d1c2;
-               border-radius:12px; padding:20px; overflow-y:auto;
-               box-shadow:0 4px 20px rgba(0,0,0,0.06);
-               display:flex; flex-direction:column; gap:4px; flex-shrink:0;">
-        <div style="font-size:0.85rem; color:#65706d; text-align:center; margin-top:40px;">
-          Click any node to see its details
+        style="width:300px;background:#fff7fa;border:1px solid #eadde4;
+               border-radius:4px;overflow:hidden;
+               display:flex;flex-direction:column;flex-shrink:0;">
+        <div style="padding:14px 16px 10px;border-bottom:1px solid #eadde4;">
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;
+               color:#6f626a;font-weight:700;
+               font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">NODE PROPERTIES</div>
+          <div style="font-size:14px;color:#6f626a;font-weight:700;margin-top:6px;
+               font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">Nothing selected</div>
+        </div>
+        <div style="font-size:11px;color:#6f626a;text-align:center;padding:28px 16px;
+                    font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;line-height:1.6;">
+          Click any node to inspect<br>its graph properties.
         </div>
       </div>
     </div>
@@ -2509,155 +3619,203 @@ def graph_html(
       const badgeColor = {json.dumps(badge_colors)};
       const activeIds  = {json.dumps(list(active_ids))};
       const container  = document.getElementById("network");
-      const structuredDiagram = {json.dumps(is_structured_diagram)};
-      const initialFocusId = {json.dumps(initial_focus_id)};
-      const initialScale = {json.dumps(initial_scale)};
+      const xSpacing   = {x_spacing_global};
+      const laneDefs   = {json.dumps(lane_defs)};
+      const GRID       = 60;
+      const SKEY       = "ecl_pos_" + {json.dumps(scope)}.replace(/ /g,"_").replace(/&/g,"and");
 
       const options = {{
         groups,
-        interaction: {{
-          hover: true,
-          navigationButtons: true,
-          keyboard: true,
-          tooltipDelay: 80
-        }},
-        physics: {json.dumps(physics_options)},
+        interaction: {{ hover:true, navigationButtons:false, keyboard:true, tooltipDelay:60 }},
+        physics: false,
         nodes: {{
           font: {{
-            face: "Inter, sans-serif",
-            size: 12,
-            color: "#19211f",
-            strokeWidth: 3,
-            strokeColor: "#fffaf0"
+            face: "Avenir Next, Helvetica Neue, Helvetica, sans-serif",
+            size: 12, color: "#20181d", strokeWidth: 0
           }},
-          borderWidth: 2,
-          borderWidthSelected: 3,
-          shadow: {{ enabled: true, size: 8, x: 2, y: 3, color: "rgba(0,0,0,0.07)" }}
+          borderWidth: 1.5, borderWidthSelected: 2.5,
+          shadow: {{ enabled:true, size:10, x:0, y:0, color:"rgba(71,31,51,0.08)" }}
         }},
         edges: {{
-          arrows: {{ to: {{ enabled: true, scaleFactor: 0.45 }} }},
-          color: {{ color: "#b5a99a", highlight: "#0f7b63", hover: "#0f7b63" }},
-          font: {{ size: 9, align: "middle", color: "#7a6f63", strokeWidth: 2, strokeColor: "#fffaf0" }},
-          smooth: {json.dumps(edge_smooth)},
-          width: 1.2,
-          selectionWidth: 2.5
+          arrows: {{ to: {{ enabled:true, scaleFactor:0.6, type:"arrow" }} }},
+          color: {{ color:"#d9c4cf", highlight:"#9d174d", hover:"#7f123f" }},
+          font: {{ size:9, align:"middle", color:"#7d7078", strokeWidth:0 }},
+          smooth: {{ type:"curvedCW", roundness:0.1 }},
+          width: 1.5, selectionWidth: 2.5
         }},
-        layout: {json.dumps(layout_options)}
+        layout: {{ improvedLayout: false }}
       }};
 
-      const network = new vis.Network(container, {{ nodes: nodesData, edges: edgesData }}, options);
-      let initialViewApplied = false;
-      function applyInitialView() {{
-        if (initialViewApplied) return;
-        initialViewApplied = true;
-        if (structuredDiagram && initialFocusId) {{
-          network.focus(initialFocusId, {{
-            scale: initialScale,
-            locked: false,
-            animation: {{ duration: 650, easingFunction: "easeInOutQuad" }}
-          }});
-        }} else {{
-          network.fit({{ animation: {{ duration: 900, easingFunction: "easeInOutQuad" }} }});
-        }}
-        if (activeIds.length > 0) {{
-          document.getElementById("agentIndicator").style.display = "block";
-          pulseActiveNodes();
-        }}
+      const network = new vis.Network(container, {{ nodes:nodesData, edges:edgesData }}, options);
+
+      // Restore saved positions from localStorage
+      const savedPos = JSON.parse(localStorage.getItem(SKEY) || "{{}}");
+      if (Object.keys(savedPos).length) {{
+        nodesData.update(
+          Object.entries(savedPos).map(([id, p]) => ({{ id, x:p.x, y:p.y, fixed:{{x:true,y:true}} }}))
+        );
       }}
 
-      network.once("stabilizationIterationsDone", function() {{
-        applyInitialView();
-      }});
-      network.once("afterDrawing", function() {{
-        window.setTimeout(applyInitialView, 80);
+      // Draw lane column backgrounds in graph-space (pan + zoom with the canvas)
+      network.on("beforeDrawing", function(ctx) {{
+        const allPos = network.getPositions();
+        const ys = Object.values(allPos).map(p => p.y);
+        if (!ys.length) return;
+        const yMin = Math.min(...ys) - 120;
+        const yMax = Math.max(...ys) + 90;
+        for (const lane of laneDefs) {{
+          const cx = lane.level * xSpacing;
+          const x1 = cx - xSpacing * 0.5;
+          const x2 = cx + xSpacing * 0.5;
+          // strip fill
+          ctx.fillStyle = lane.color;
+          ctx.fillRect(x1, yMin, x2 - x1, yMax - yMin);
+          // left separator
+          ctx.save();
+          ctx.strokeStyle = "rgba(217,196,207,.8)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3,3]);
+          ctx.beginPath(); ctx.moveTo(x1, yMin); ctx.lineTo(x1, yMax); ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.restore();
+          // column header label
+          ctx.save();
+          ctx.fillStyle = "rgba(111,98,106,.85)";
+          ctx.font = "700 8px Avenir Next, Helvetica Neue, Helvetica, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(lane.label, cx, yMin + 18);
+          ctx.restore();
+        }}
       }});
 
-      let pulseUp = true;
-      function pulseActiveNodes() {{
-        if (activeIds.length === 0) return;
-        setInterval(() => {{
-          const updates = activeIds.map(id => {{
-            const node = nodesData.get(id);
-            if (!node) return null;
-            return {{
-              id,
-              size: pulseUp ? (node.size || 20) * 1.15 : (node.size || 20)
-            }};
-          }}).filter(Boolean);
-          nodesData.update(updates);
-          pulseUp = !pulseUp;
-        }}, 700);
+      // Initial fit after first draw
+      network.once("afterDrawing", function() {{
+        window.setTimeout(() => {{
+          network.fit({{ animation: {{ duration:700, easingFunction:"easeInOutQuad" }} }});
+        }}, 60);
+      }});
+
+      // Drag end: snap to 60-px grid and persist position to localStorage
+      network.on("dragEnd", function(params) {{
+        if (!params.nodes.length) return;
+        const id  = params.nodes[0];
+        const raw = network.getPositions([id])[id];
+        const snapped = {{
+          x: Math.round(raw.x / GRID) * GRID,
+          y: Math.round(raw.y / GRID) * GRID,
+        }};
+        nodesData.update([{{ id, x:snapped.x, y:snapped.y, fixed:{{x:true,y:true}} }}]);
+        const saved = JSON.parse(localStorage.getItem(SKEY) || "{{}}");
+        saved[id] = snapped;
+        localStorage.setItem(SKEY, JSON.stringify(saved));
+        flashSaved();
+      }});
+
+      function flashSaved() {{
+        const el = document.getElementById("savedBadge");
+        if (!el) return;
+        el.style.opacity = "1";
+        clearTimeout(el._fadeTimer);
+        el._fadeTimer = setTimeout(() => {{ el.style.opacity = "0"; }}, 1600);
+      }}
+
+      function clearLayout() {{
+        localStorage.removeItem(SKEY);
+        nodesData.update(nodesData.get().map(n => ({{ id:n.id, fixed:{{x:false,y:false}} }})));
+        network.fit({{ animation:{{ duration:500 }} }});
+      }}
+
+      // Detail panel — light details theme
+      const BLANK_PANEL = `
+        <div style="padding:14px 16px 10px;border-bottom:1px solid #eadde4;">
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#6f626a;
+               font-weight:700;font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">NODE PROPERTIES</div>
+          <div style="font-size:14px;color:#6f626a;font-weight:700;margin-top:6px;
+               font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">Nothing selected</div>
+        </div>
+        <div style="font-size:11px;color:#6f626a;text-align:center;padding:28px 16px;
+             font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;line-height:1.6;">
+          Click any node to inspect<br>its graph properties.
+        </div>`;
+
+      function esc(v) {{
+        return String(v ?? "")
+          .replaceAll("&","&amp;").replaceAll("<","&lt;")
+          .replaceAll(">","&gt;").replaceAll('"',"&quot;");
+      }}
+      function fmtVal(v) {{
+        const t = esc(v); return t.length > 200 ? t.slice(0,200)+"…" : t;
       }}
 
       function renderDetails(nodeId) {{
         const panel = document.getElementById("detailPanel");
-        const info = details[nodeId];
+        const info  = details[nodeId];
         if (!info) return;
-
-        const type = info["Type"] || "Node";
-        const name = info["Name"] || nodeId;
-        const color = badgeColor[type] || "#65706d";
-        const isActive = activeIds.includes(nodeId);
-
-        let rows = "";
+        const type = info["Type"]  || "Node";
+        const name = info["Name"]  || nodeId;
+        const col  = badgeColor[type] || "#9d174d";
+        const isAct = activeIds.includes(nodeId);
+        const PRI = new Set(["Status","Agent Status","Entrypoint","Route","Method",
+          "Storage Type","Risk Type","Severity","Confidence","Avg Score",
+          "Source Path","Evidence","Description","Technical"]);
+        let pRows = "", sRows = "";
         for (const [k, v] of Object.entries(info)) {{
           if (k === "Type" || k === "Name") continue;
-          const isAgentRow = k === "Agent Status";
-          rows += `
-            <div style="display:flex;justify-content:space-between;padding:7px 0;
-                        border-bottom:1px solid #ede8df;font-size:0.82rem;gap:8px;
-                        ${{isAgentRow ? 'background:#f0faf5;margin:0 -4px;padding:7px 4px;border-radius:4px;' : ''}}">
-              <span style="color:#65706d;font-weight:500;flex-shrink:0;">${{k}}</span>
-              <span style="color:${{isAgentRow ? '#0f7b63' : '#19211f'}};font-weight:600;text-align:right;word-break:break-word;">${{v}}</span>
-            </div>`;
-        }}
-
-        const activeBanner = isActive ? `
-          <div style="background:#d0f4de;border:1px solid #0f7b63;border-radius:6px;
-                      padding:6px 10px;font-size:0.75rem;color:#0a5c49;font-weight:600;
-                      margin-bottom:10px;">
-            Agent is currently processing this node
-          </div>` : "";
-
-        panel.innerHTML = `
-          ${{activeBanner}}
-          <div style="font-size:1rem;font-weight:700;color:#19211f;margin-bottom:4px;word-break:break-word;">${{name}}</div>
-          <div style="display:inline-block;padding:3px 10px;border-radius:999px;
-                      font-size:0.72rem;font-weight:600;color:white;
-                      background:${{color}};margin-bottom:14px;">${{type}}</div>
-          ${{rows}}
-          <div style="margin-top:10px;font-size:0.75rem;color:#9c927f;text-align:center;">
-            Node ID: ...${{String(nodeId).slice(-8)}}
+          const isAg = k === "Agent Status";
+          const row = `<div style="padding:8px 0;border-bottom:1px solid #eadde4;">
+            <div style="color:#7d7078;font-size:9px;text-transform:uppercase;
+                 letter-spacing:.07em;font-weight:700;margin-bottom:3px;
+                 font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">${{esc(k)}}</div>
+            <div style="color:${{isAg?"#9d174d":"#20181d"}};font-size:11px;
+                 font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;
+                 line-height:1.45;word-break:break-word;">${{fmtVal(v)}}</div>
           </div>`;
+          if (PRI.has(k) || isAg) pRows += row; else sRows += row;
+        }}
+        const agBanner = isAct
+          ? `<div style="background:rgba(157,23,77,.08);border:1px solid #9d174d;
+               border-radius:3px;padding:4px 9px;font-size:10px;color:#7f123f;margin-bottom:10px;
+               font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">▶ AGENT ACTIVE</div>` : "";
+        panel.innerHTML = `
+          <div style="padding:14px 16px 12px;border-bottom:1px solid #eadde4;">
+            ${{agBanner}}
+            <div style="font-size:9px;text-transform:uppercase;letter-spacing:.1em;
+                 color:#6f626a;font-weight:700;
+                 font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">NODE PROPERTIES</div>
+            <div style="font-size:13px;font-weight:700;color:#20181d;margin:6px 0;
+                 word-break:break-word;
+                 font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">${{esc(name)}}</div>
+            <div style="display:inline-block;padding:2px 9px;border-radius:2px;
+                 font-size:10px;font-weight:700;color:#9d174d;background:#fff3f8;border:1px solid ${{col}};
+                 font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">«${{esc(type)}}»</div>
+          </div>
+          <div style="padding:10px 16px;overflow-y:auto;flex:1;">
+            ${{pRows||'<div style="color:#7d7078;font-size:11px;padding:10px 0;font-family:\'Avenir Next\',\'Helvetica Neue\',Helvetica,sans-serif;">No properties.</div>'}}
+            ${{sRows?`<details style="margin-top:8px;"><summary style="cursor:pointer;color:#6f626a;font-size:10px;font-weight:700;font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">More…</summary><div style="margin-top:6px;">${{sRows}}</div></details>`:""}}
+          </div>
+          <div style="padding:7px 16px;border-top:1px solid #eadde4;font-size:9px;
+               color:#d9c4cf;text-align:center;
+               font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">
+            id: …${{String(nodeId).slice(-10)}}</div>`;
       }}
 
       network.on("click", function(params) {{
-        if (params.nodes.length === 0) {{
-          document.getElementById("detailPanel").innerHTML =
-            '<div style="font-size:0.85rem;color:#65706d;text-align:center;margin-top:40px;">Click any node to see its details</div>';
-          return;
+        if (!params.nodes.length) {{
+          document.getElementById("detailPanel").innerHTML = BLANK_PANEL; return;
         }}
         renderDetails(params.nodes[0]);
       }});
 
-      network.on("dragEnd", function(params) {{
-        if (params.nodes.length === 0) return;
-        const nodeId = params.nodes[0];
-        const pos = network.getPositions([nodeId])[nodeId];
-        nodesData.update([{{ id: nodeId, x: pos.x, y: pos.y }}]);
-      }});
-
       network.on("hoverNode", function() {{ container.style.cursor = "pointer"; }});
-      network.on("blurNode", function() {{ container.style.cursor = "default"; }});
+      network.on("blurNode",  function() {{ container.style.cursor = "default";  }});
 
       function searchNode() {{
         const q = document.getElementById("searchBox").value.toLowerCase();
         if (!q) {{ resetView(); return; }}
-        const allNodes = nodesData.get();
-        const match = allNodes.find(n => n.label && n.label.toLowerCase().includes(q));
+        const match = nodesData.get().find(n => (n.label||"").toLowerCase().includes(q));
         if (match) {{
           network.selectNodes([match.id]);
-          network.focus(match.id, {{ scale: 1.5, animation: {{ duration: 700 }} }});
+          network.focus(match.id, {{ scale:1.6, animation:{{ duration:600 }} }});
           renderDetails(match.id);
         }}
       }}
@@ -2665,9 +3823,208 @@ def graph_html(
       function resetView() {{
         document.getElementById("searchBox").value = "";
         network.unselectAll();
-        network.fit({{ animation: {{ duration: 600 }} }});
+        network.fit({{ animation:{{ duration:500 }} }});
+        document.getElementById("detailPanel").innerHTML = BLANK_PANEL;
+      }}
+    </script>
+    """
+    else:
+        # Force-layout view for broad project scopes.
+        html = f"""
+    <div style="display:flex; gap:12px; height:720px; font-family:'Avenir Next','Helvetica Neue',Helvetica,sans-serif;">
+      <div style="flex:1; position:relative;">
+        <div style="position:absolute; top:10px; left:10px; z-index:10; display:flex; gap:6px;">
+          <input id="searchBox" placeholder="Search node..." onkeyup="searchNode()"
+            style="padding:6px 12px; border-radius:8px; border:1px solid #eadde4;
+                   background:#ffffff; color:#20181d; font-size:13px; width:190px; outline:none;
+                   box-shadow:0 10px 24px rgba(71,31,51,0.06);">
+          <button onclick="resetView()"
+            style="padding:6px 12px; border-radius:8px; border:1px solid #eadde4;
+                   background:#ffffff; cursor:pointer; font-size:12px; color:#6f626a;">
+            Reset
+          </button>
+        </div>
+
+        <div id="agentIndicator"
+          style="position:absolute; top:10px; right:10px; z-index:10;
+                 padding:5px 12px; border-radius:8px; font-size:0.75rem;
+                 font-weight:600; display:none;
+                 background:#f9dce8; border:1px solid #9d174d; color:#7f123f;">
+          Agent running...
+        </div>
+
+        <div style="position:absolute; bottom:12px; left:12px; z-index:10;
+                    background:rgba(255,255,255,.94); border:1px solid #eadde4;
+                    border-radius:8px; padding:6px 10px; color:#6f626a;
+                    font-size:11px; font-weight:600; max-width:520px;
+                    box-shadow:0 10px 24px rgba(71,31,51,0.06);">
+          {graph_caption}
+        </div>
+
+        <div id="network"
+          style="height:100%; border:1px solid #eadde4; border-radius:12px;
+                 background:#ffffff; box-shadow:0 16px 36px rgba(71,31,51,0.07);">
+        </div>
+      </div>
+
+      <div id="detailPanel"
+        style="width:320px; background:#ffffff; border:1px solid #eadde4;
+               border-radius:12px; overflow:hidden;
+               box-shadow:0 16px 36px rgba(71,31,51,0.07);
+               display:flex; flex-direction:column; flex-shrink:0;">
+        <div style="padding:18px 18px 10px;border-bottom:1px solid #eadde4;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#6f626a;font-weight:700;">Node properties</div>
+          <div style="font-size:15px;color:#20181d;font-weight:750;margin-top:4px;">Nothing selected</div>
+        </div>
+        <div style="font-size:0.85rem; color:#6f626a; text-align:center; padding:34px 18px;">
+          Click any node to inspect its typed graph properties.
+        </div>
+      </div>
+    </div>
+
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script>
+      const nodesData  = new vis.DataSet({json.dumps(nodes)});
+      const edgesData  = new vis.DataSet({json.dumps(edges)});
+      const groups     = {json.dumps(groups)};
+      const details    = {json.dumps(node_details)};
+      const badgeColor = {json.dumps(badge_colors)};
+      const activeIds  = {json.dumps(list(active_ids))};
+      const container  = document.getElementById("network");
+
+      const options = {{
+        groups,
+        interaction: {{ hover:true, navigationButtons:true, keyboard:true, tooltipDelay:80 }},
+        physics: {json.dumps(physics_options)},
+        nodes: {{
+          font: {{
+            face: "Avenir Next, Helvetica Neue, Helvetica, sans-serif",
+            size: 12, color: "#20181d", strokeWidth: 3, strokeColor: "#ffffff"
+          }},
+          borderWidth: 2, borderWidthSelected: 3,
+          shadow: {{ enabled:true, size:8, x:2, y:3, color:"rgba(71,31,51,0.08)" }}
+        }},
+        edges: {{
+          arrows: {{ to: {{ enabled:true, scaleFactor:0.45 }} }},
+          color: {{ color:"#cbb9c3", highlight:"#9d174d", hover:"#9d174d" }},
+          font: {{ size:9, align:"middle", color:"#7d7078", strokeWidth:2, strokeColor:"#ffffff" }},
+          smooth: {json.dumps(edge_smooth)},
+          width: 1.2, selectionWidth: 2.5
+        }},
+        layout: {json.dumps(layout_options)}
+      }};
+
+      const network = new vis.Network(container, {{ nodes:nodesData, edges:edgesData }}, options);
+      let initialViewApplied = false;
+      function applyInitialView() {{
+        if (initialViewApplied) return;
+        initialViewApplied = true;
+        network.fit({{ animation:{{ duration:900, easingFunction:"easeInOutQuad" }} }});
+        if (activeIds.length > 0) {{
+          document.getElementById("agentIndicator").style.display = "block";
+          pulseActiveNodes();
+        }}
+      }}
+      network.once("stabilizationIterationsDone", applyInitialView);
+      network.once("afterDrawing", function() {{ window.setTimeout(applyInitialView, 80); }});
+
+      let pulseUp = true;
+      function pulseActiveNodes() {{
+        if (!activeIds.length) return;
+        setInterval(() => {{
+          const upd = activeIds.map(id => {{
+            const n = nodesData.get(id); if (!n) return null;
+            return {{ id, size: pulseUp ? (n.size||20)*1.15 : (n.size||20) }};
+          }}).filter(Boolean);
+          nodesData.update(upd); pulseUp = !pulseUp;
+        }}, 700);
+      }}
+
+      function renderDetails(nodeId) {{
+        const panel = document.getElementById("detailPanel");
+        const info  = details[nodeId]; if (!info) return;
+        const type  = info["Type"]||"Node"; const name = info["Name"]||nodeId;
+        const color = badgeColor[type]||"#6f626a";
+        const isActive = activeIds.includes(nodeId);
+        const PRI = new Set(["Status","Agent Status","Entrypoint","Route","Method",
+          "Storage Type","Risk Type","Severity","Confidence","Avg Score",
+          "Source Path","Evidence","Description","Technical","Stakeholder"]);
+        const he = v => String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;")
+          .replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
+        const fv = v => {{ const t=he(v); return t.length>180?t.slice(0,180)+"...":t; }};
+        let pRows="", sRows="";
+        for (const [k,v] of Object.entries(info)) {{
+          if (k==="Type"||k==="Name") continue;
+          const isAg = k==="Agent Status";
+          const row = `<div style="padding:9px 0;border-bottom:1px solid #eadde4;
+            ${{isAg?"background:#fff3f8;margin:0 -8px;padding:9px 8px;border-radius:6px;":""}}">
+            <div style="color:#6f626a;font-size:10px;text-transform:uppercase;
+                 letter-spacing:.04em;font-weight:750;margin-bottom:3px;">${{he(k)}}</div>
+            <div style="color:${{isAg?"#9d174d":"#20181d"}};font-size:12px;
+                 font-weight:650;line-height:1.35;word-break:break-word;">${{fv(v)}}</div>
+          </div>`;
+          if (PRI.has(k)||isAg) pRows+=row; else sRows+=row;
+        }}
+        const ab = isActive?`<div style="background:#f9dce8;border:1px solid #9d174d;
+          border-radius:6px;padding:6px 10px;font-size:.75rem;color:#7f123f;
+          font-weight:600;margin-bottom:10px;">Agent is currently processing this node</div>`:"";
+        panel.innerHTML=`
+          <div style="padding:18px;border-bottom:1px solid #eadde4;
+               background:linear-gradient(180deg,#ffffff,#fff7fa);">
+            ${{ab}}
+            <div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;
+                 color:#6f626a;font-weight:750;">Node properties</div>
+            <div style="font-size:1rem;font-weight:750;color:#20181d;margin:5px 0 8px;
+                 word-break:break-word;">${{he(name)}}</div>
+            <div style="display:inline-block;padding:4px 10px;border-radius:999px;
+                 font-size:.72rem;font-weight:750;color:white;background:${{color}};">
+              ${{he(type)}}</div>
+          </div>
+          <div style="padding:12px 18px;overflow-y:auto;">
+            ${{pRows||'<div style="color:#6f626a;font-size:12px;padding:12px 0;">No high-signal properties.</div>'}}
+            ${{sRows?`<details style="margin-top:10px;"><summary style="cursor:pointer;color:#6f626a;font-size:12px;font-weight:700;">More properties</summary><div style="margin-top:8px;">${{sRows}}</div></details>`:""}}
+          </div>
+          <div style="margin:0 18px 14px;padding-top:8px;border-top:1px solid #eadde4;
+               font-size:.75rem;color:#9d8c96;text-align:center;">
+            Node ID: ...${{String(nodeId).slice(-8)}}</div>`;
+      }}
+
+      network.on("click", function(params) {{
+        if (!params.nodes.length) {{
+          document.getElementById("detailPanel").innerHTML =
+            '<div style="padding:18px 18px 10px;border-bottom:1px solid #eadde4;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#6f626a;font-weight:700;">Node properties</div><div style="font-size:15px;color:#20181d;font-weight:750;margin-top:4px;">Nothing selected</div></div><div style="font-size:.85rem;color:#6f626a;text-align:center;padding:34px 18px;">Click any node to inspect its typed graph properties.</div>';
+          return;
+        }}
+        renderDetails(params.nodes[0]);
+      }});
+
+      network.on("dragEnd", function(params) {{
+        if (!params.nodes.length) return;
+        const nid = params.nodes[0];
+        const pos = network.getPositions([nid])[nid];
+        nodesData.update([{{ id:nid, x:pos.x, y:pos.y }}]);
+      }});
+
+      network.on("hoverNode", function() {{ container.style.cursor = "pointer"; }});
+      network.on("blurNode",  function() {{ container.style.cursor = "default";  }});
+
+      function searchNode() {{
+        const q = document.getElementById("searchBox").value.toLowerCase();
+        if (!q) {{ resetView(); return; }}
+        const match = nodesData.get().find(n => n.label && n.label.toLowerCase().includes(q));
+        if (match) {{
+          network.selectNodes([match.id]);
+          network.focus(match.id, {{ scale:1.5, animation:{{ duration:700 }} }});
+          renderDetails(match.id);
+        }}
+      }}
+
+      function resetView() {{
+        document.getElementById("searchBox").value = "";
+        network.unselectAll();
+        network.fit({{ animation:{{ duration:600 }} }});
         document.getElementById("detailPanel").innerHTML =
-          '<div style="font-size:0.85rem;color:#65706d;text-align:center;margin-top:40px;">Click any node to see its details</div>';
+          '<div style="padding:18px 18px 10px;border-bottom:1px solid #eadde4;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#6f626a;font-weight:700;">Node properties</div><div style="font-size:15px;color:#20181d;font-weight:750;margin-top:4px;">Nothing selected</div></div><div style="font-size:.85rem;color:#6f626a;text-align:center;padding:34px 18px;">Click any node to inspect its typed graph properties.</div>';
       }}
     </script>
     """
@@ -2692,18 +4049,28 @@ steps:
 """
 
 
-def run_sandbox_from_ui(flow_yaml: str, mode: str) -> dict[str, Any]:
+def run_sandbox_from_ui(
+    flow_yaml: str,
+    mode: str = "cloudrun",
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    effective_mode = mode
+    # Use a properly prefixed snapshot ID so simulate_flow's app-scoping logic
+    # activates. Falls back to the full graph when no Company nodes match project_id.
+    snapshot_id = f"snapshot_{project_id}" if project_id else "snapshot_default"
     old_mock = os.environ.get("SANDBOX_MOCK")
     old_mode = os.environ.get("SANDBOX_MODE")
     os.environ["SANDBOX_MOCK"] = "false"
-    os.environ["SANDBOX_MODE"] = mode
+    os.environ["SANDBOX_MODE"] = effective_mode
     try:
         result = simulate_flow.invoke(
             {
                 "flow_yaml": flow_yaml,
-                "dataset_snapshot_id": "ui_sandbox_snapshot",
+                "dataset_snapshot_id": snapshot_id,
             }
         )
+        result.setdefault("execution_mode", effective_mode)
+        result.setdefault("requested_mode", mode)
     finally:
         if old_mock is None:
             os.environ.pop("SANDBOX_MOCK", None)
@@ -2718,10 +4085,10 @@ def run_sandbox_from_ui(flow_yaml: str, mode: str) -> dict[str, Any]:
 
 @st.cache_data(ttl=20)
 def load_project_database_assets(project_id: str) -> pd.DataFrame:
-    rows = run_read(
-        f"""
+    rows = _run_read_cypher(
+        """
         MATCH (n)
-        WHERE n.project_id = {json.dumps(project_id)}
+        WHERE n.project_id = $project_id
           AND any(label IN labels(n) WHERE label IN ['DataStore','DatabaseModel','DatabaseTable'])
         WITH coalesce(n.storage_type, labels(n)[0]) AS storage_type,
              coalesce(n.name, n.display_name, n.id, labels(n)[0]) AS raw_name,
@@ -2746,7 +4113,8 @@ def load_project_database_assets(project_id: str) -> pd.DataFrame:
                source_paths,
                confidence
         ORDER BY evidence_count DESC, name
-        """
+        """,
+        {"project_id": project_id},
     )
     assets = df(rows)
     if assets.empty:
@@ -3054,7 +4422,7 @@ if not neo4j_error and page not in ("Chat", "Retry Inspector"):
                                     _config = _json_notif.loads(_flow_yaml_rows[0]["yaml_config"])
                                     _yaml = _config.get("yaml", "")
                                     if _yaml:
-                                        _sandbox_result = run_sandbox_from_ui(_yaml, "local")
+                                        _sandbox_result = run_sandbox_from_ui(_yaml, "cloudrun")
                                         st.session_state["flow_result"] = {
                                             "proposal_id": _np["id"],
                                             "proposal_name": _np.get("name") or _np["id"],
@@ -3237,9 +4605,9 @@ if page == "Project Review":
                     st.info("No business flows detected yet. Re-run analysis after adding route/function/action names.")
                 else:
                     preview = add_business_flow_display_columns(business_flows)
-                    st.caption(f"Showing all {len(preview)} extracted BusinessFlow chains for this project.")
+                    st.caption(f"Showing all {len(preview)} extracted primary transaction journeys for this project.")
                     display_table(
-                        preview[["business_flow", "entrypoint", "source_hint", "ordered_chain", "confidence"]],
+                        preview[["transaction_journey", "business_flow", "entrypoint", "source_hint", "ordered_chain", "confidence"]],
                         height=min(760, max(380, 92 + len(preview) * 30)),
                     )
             with c2:
@@ -3261,9 +4629,14 @@ if page == "Project Review":
                     key="business_flow_source",
                 )
                 selected_row = business_flows[business_flows["flow_display"] == selected_flow].iloc[0]
-                st.markdown("### Ordered Business-Logic Chain")
-                st.caption("This is a deterministic static-analysis chain with confidence scoring; exact runtime tracing comes later.")
-                st.code(business_flow_sentence(selected_row, limit=20), language="text")
+                journey_label, _ = transaction_journey_kind(selected_row)
+                st.markdown("### Primary Transaction Journey")
+                st.caption(
+                    f"Static-analysis map for a detected {journey_label}. "
+                    "Use it as reviewable evidence, not a guaranteed live runtime trace."
+                )
+                st.info(business_flow_description(selected_row))
+                render_business_flow_chain(selected_row, limit=16)
                 c1, c2, c3 = st.columns(3)
                 c1.markdown(f"**Entrypoint**\n\n{selected_row.get('entrypoint') or 'None'}")
                 c2.markdown(f"**Storage / Integrations**\n\n{compact_list(selected_row['datastores'], 8)}\n\n{compact_list(selected_row['integrations'], 5)}")
@@ -3271,7 +4644,7 @@ if page == "Project Review":
                 with st.expander("All business logic flows", expanded=True):
                     rows = business_flows.copy()
                     display_table(
-                        rows[["business_flow", "entrypoint", "source_hint", "ordered_chain", "datastores", "integrations", "risks", "confidence"]],
+                        rows[["transaction_journey", "business_flow", "entrypoint", "source_hint", "ordered_chain", "datastores", "integrations", "risks", "confidence"]],
                         height=min(820, max(520, 92 + len(rows) * 30)),
                     )
             with st.expander("File-level architecture evidence"):
@@ -3288,27 +4661,61 @@ if page == "Project Review":
             else:
                 nodes = nodes.copy()
                 nodes["label"] = nodes["display_name"].fillna(nodes["type"] + ": " + nodes["name"])
-                selected_label = st.selectbox("Primitive", nodes["label"].tolist(), key="primitive_detail")
-                primitive = nodes[nodes["label"] == selected_label].iloc[0]
-                st.markdown(f"### {primitive['display_name']}")
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Type", primitive["type"])
-                c2.metric("Confidence", round(float(primitive.get("confidence") or 0), 2))
-                c3.metric("Source", Path(str(primitive["source_path"])).name)
-                c1, c2 = st.columns(2)
-                with c1:
-                    if st.button("Technical Description", key="tech_primitive_desc"):
-                        st.session_state["primitive_desc_mode"] = "technical"
-                with c2:
-                    if st.button("Stakeholder Description", key="stakeholder_primitive_desc"):
-                        st.session_state["primitive_desc_mode"] = "stakeholder"
-                mode = st.session_state.get("primitive_desc_mode", "stakeholder")
-                if mode == "technical":
-                    st.info(primitive.get("technical_description") or "Technical description is not available yet.")
+                st.caption(
+                    "Use this to inspect why a primitive exists, where it came from, and what graph relationships make it useful."
+                )
+                type_options = ["All"] + sorted(nodes["type"].dropna().unique().tolist())
+                c_filter, c_search = st.columns([0.7, 1.3])
+                with c_filter:
+                    primitive_type = st.selectbox("Type", type_options, key="primitive_type_filter")
+                with c_search:
+                    primitive_query = st.text_input("Search primitives", key="primitive_search", placeholder="route, file, storage, risk...")
+                filtered = nodes
+                if primitive_type != "All":
+                    filtered = filtered[filtered["type"] == primitive_type]
+                if primitive_query:
+                    q = primitive_query.lower()
+                    filtered = filtered[
+                        filtered["label"].astype(str).str.lower().str.contains(q, regex=False)
+                        | filtered["source_path"].astype(str).str.lower().str.contains(q, regex=False)
+                        | filtered["id"].astype(str).str.lower().str.contains(q, regex=False)
+                    ]
+                if filtered.empty:
+                    st.info("No primitives match those filters.")
                 else:
-                    st.success(primitive.get("stakeholder_description") or "Stakeholder description is not available yet.")
-                st.markdown(f"**Source path:** `{primitive['source_path']}`")
-                st.markdown(f"**Graph ID:** `{primitive['id']}`")
+                    selected_label = st.selectbox("Primitive", filtered["label"].tolist(), key="primitive_detail")
+                    primitive = filtered[filtered["label"] == selected_label].iloc[0]
+                    st.markdown(f"### {primitive['display_name']}")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Type", primitive["type"])
+                    c2.metric("Confidence", round(float(primitive.get("confidence") or 0), 2))
+                    c3.metric("Source", Path(str(primitive["source_path"])).name)
+                    c4.metric("Relationships", len(load_primitive_relationship_rows(project["project_id"], primitive["id"])))
+
+                    tabs = st.tabs(["Summary", "Graph Links", "Raw"])
+                    with tabs[0]:
+                        stakeholder = primitive.get("stakeholder_description") or "Stakeholder description is not available yet."
+                        technical = primitive.get("technical_description") or "Technical description is not available yet."
+                        st.success(stakeholder)
+                        st.info(technical)
+                        st.markdown(f"**Source path:** `{primitive['source_path']}`")
+                    with tabs[1]:
+                        rels = load_primitive_relationship_rows(project["project_id"], primitive["id"])
+                        if rels.empty:
+                            st.info("No incoming or outgoing relationships were found for this primitive.")
+                        else:
+                            display_table(rels, height=min(440, max(180, 92 + len(rels) * 30)))
+                    with tabs[2]:
+                        st.json(
+                            {
+                                "id": primitive["id"],
+                                "type": primitive["type"],
+                                "name": primitive.get("name"),
+                                "source_path": primitive.get("source_path"),
+                                "project_id": primitive.get("project_id"),
+                                "scan_id": primitive.get("scan_id"),
+                            }
+                        )
         elif project_review_section == "Storage":
             storage = load_storage_summary(project["project_id"])
             st.markdown("### Detected Data Storage")
@@ -3341,96 +4748,6 @@ if page == "Project Review":
                 "Human approves or rejects",
             ])
 
-elif page == "Database Review":
-    st.subheader("Current Database Review")
-    st.caption("Live Neo4j inventory, connected applications, isolation health, and recent historical evidence.")
-
-    cols = st.columns(6)
-    cols[0].metric("Companies", overview.get("companies", 0))
-    cols[1].metric("Mentors", overview.get("mentors", 0))
-    cols[2].metric("Flows", overview.get("flows", 0))
-    cols[3].metric("Servers", overview.get("servers", 0))
-    cols[4].metric("Avg Score", overview.get("avg_match_score", 0))
-    cols[5].metric("Pending", overview.get("proposed", 0))
-
-    tab_overview, tab_apps, tab_isolation, tab_history = st.tabs(
-        ["Overview", "Connected Apps", "Isolation", "History"]
-    )
-    with tab_overview:
-        left, right = st.columns([1.15, 1])
-        with left:
-            st.markdown("### Node Types")
-            display_table(load_label_counts(), height=320)
-        with right:
-            st.markdown("### Relationship Types")
-            display_table(load_relationship_counts(), height=320)
-        st.markdown("### Flow Portfolio")
-        flows = load_flows()
-        if flows.empty:
-            st.info("No flows yet.")
-        else:
-            display_table(flows[["id", "status", "avg_score", "connector", "server", "skills"]], height=300)
-
-    with tab_apps:
-        profiles = load_app_profiles()
-        if profiles.empty:
-            st.info("No connected apps yet. Use the Web & Database Flows page to ingest a website/codebase.")
-        else:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Connected Apps", len(profiles))
-            m2.metric("Total Pages Indexed", int(profiles["pages"].sum()))
-            m3.metric("Total Entities Extracted", int(profiles["entities"].sum()))
-            display_table(
-                profiles[["app_id", "source_type", "base_url", "pages", "entities", "last_indexed_at"]],
-                height=260,
-            )
-            selected_app_id = st.selectbox("Inspect app", profiles["app_id"].tolist(), key="db_app")
-            if selected_app_id:
-                row = profiles[profiles["app_id"] == selected_app_id].iloc[0]
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown(f"**Source type:** {row.get('source_type', '—')}")
-                    st.markdown(f"**Base URL:** {row.get('base_url', '—')}")
-                    st.markdown(f"**Source path:** {row.get('source_path', '—') or '—'}")
-                    st.markdown(f"**Last indexed:** {row.get('last_indexed_at', '—')}")
-                with c2:
-                    st.markdown("**Entity breakdown**")
-                    display_table(df(load_app_entity_counts(selected_app_id)), height=180)
-
-    with tab_isolation:
-        iso = load_isolation_status()
-        status_label = "ISOLATED" if iso["fully_isolated"] else (
-            "PARTIAL" if (iso["page_scoped"] > 0 or iso["entity_scoped"] > 0) else "NOT SCOPED"
-        )
-        status_class = (
-            "status-good" if iso["fully_isolated"]
-            else "status-warn" if status_label == "PARTIAL"
-            else "status-bad"
-        )
-        st.markdown(
-            f"<h3>Isolation policy: <span class='status-pill {status_class}'>{status_label}</span></h3>",
-            unsafe_allow_html=True,
-        )
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pages", iso["page_total"])
-        c2.metric("Stamped Pages", iso["page_scoped"])
-        c3.metric("Entities", iso["entity_total"])
-        c4.metric("Stamped Entities", iso["entity_scoped"])
-        st.markdown("### Per-app isolation breakdown")
-        display_table(load_per_app_isolation(), height=280)
-        st.markdown("### Snapshot Policy")
-        st.markdown(
-            "- Secret-looking fields are stripped before sandbox execution.\n"
-            "- App-scoped snapshots are selected by `app_id` when available.\n"
-            "- Local sandbox execution runs out-of-process."
-        )
-
-    with tab_history:
-        h1, h2 = st.tabs(["Lowest Matches", "Execution Traces"])
-        with h1:
-            display_table(load_matches(), height=500)
-        with h2:
-            display_table(load_traces(), height=500)
 
 elif page == "Graph Display":
     st.subheader("Project Analysis Graph")
@@ -3512,9 +4829,9 @@ elif page == "Graph Display":
                     expanded=(len(_opt_flows) == 1),
                 ):
                     _oc1, _oc2, _oc3 = st.columns(3)
-                    _oc1.markdown(f"**Replaces flow:** `{_of.get('replaces') or '—'}`")
-                    _oc2.markdown(f"**Connector:** `{_of.get('connector') or 'none'}`")
-                    _oc3.markdown(f"**Server:** `{_of.get('server') or 'none'}`")
+                    _oc1.markdown(f"**Replaces flow:** `{ui_value(_of.get('replaces'), 'Not attached')}`")
+                    _oc2.markdown(f"**Connector:** `{ui_value(_of.get('connector'))}`")
+                    _oc3.markdown(f"**Server:** `{ui_value(_of.get('server'))}`")
                     if _of.get("skills"):
                         _skills = [s for s in _of["skills"] if s]
                         if _skills:
@@ -3557,28 +4874,6 @@ elif page == "Real-Time Agents":
             scrolling=False,
         )
 
-elif page == "Live Agent Comms":
-    st.subheader("Live Agent Communications")
-    status = ensure_realtime_server()
-    if status["connected"]:
-        st.success(f"Realtime server connected. Active WebSocket clients: {status.get('clients', 0)}")
-    else:
-        st.warning("Realtime server disconnected. I tried to start it automatically; run `uvicorn src.realtime.server:app --host 127.0.0.1 --port 8765 --reload` if it stays offline.")
-
-    recent_events = read_events(limit=200)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Stored Events", len(recent_events))
-    c2.metric("Realtime", "Connected" if status["connected"] else "Offline")
-    c3.metric("Event Server", "8765")
-    components.html(
-        live_comms_html(
-            initial_events=recent_events,
-            api_base=REALTIME_API_BASE,
-            ws_url=REALTIME_WS_URL,
-        ),
-        height=950,
-        scrolling=False,
-    )
 
 elif page == "Flows":
     st.subheader("Flows")
@@ -3637,22 +4932,22 @@ elif page == "Flows":
             score_val = float(row.get("score") or 0)
             if score_val <= 0:
                 score_display = "N/A"
-                score_color = "#65706d"
+                score_color = "#6f626a"
             elif score_val < 5:
                 score_display = f"{score_val:.1f} — low"
-                score_color = "#a73737"
+                score_color = "#b4234a"
             elif score_val < 7:
                 score_display = f"{score_val:.1f} — ok"
-                score_color = "#a55b19"
+                score_color = "#9a5b13"
             else:
                 score_display = f"{score_val:.1f} — good"
-                score_color = "#167447"
+                score_color = "#3f6f5b"
 
             is_sel = selected_idx == i
-            border = "2px solid #19211f" if is_sel else "1px solid #d8d1c2"
-            bg = "#19211f" if is_sel else "#fffaf0"
-            txt = "#f7f1e4" if is_sel else "#19211f"
-            sub = "#a8a49e" if is_sel else "#65706d"
+            border = "2px solid #9d174d" if is_sel else "1px solid #eadde4"
+            bg = "#fff3f8" if is_sel else "#ffffff"
+            txt = "#9d174d" if is_sel else "#20181d"
+            sub = "#7d7078" if is_sel else "#6f626a"
 
             with cols[i % len(cols)]:
                 st.markdown(f"""
@@ -3688,32 +4983,35 @@ elif page == "Flows":
         sel_chain = sel_row.get("ordered_chain") or "No ordered chain available."
 
         st.markdown(f"""
-        <div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:10px;
+        <div style="background:#ffffff;border:1px solid #eadde4;border-radius:10px;
                     padding:12px 16px;margin:8px 0 12px;display:flex;gap:24px;
                     flex-wrap:wrap;align-items:center;">
             <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Selected flow</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_name}</div>
+                <div style="font-size:.7rem;color:#6f626a;font-weight:500;">Selected flow</div>
+                <div style="font-size:.88rem;font-weight:600;color:#20181d;">{sel_name}</div>
             </div>
             <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Current score</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
+                <div style="font-size:.7rem;color:#6f626a;font-weight:500;">Current score</div>
+                <div style="font-size:.88rem;font-weight:600;color:#20181d;">{f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
             </div>
             <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Connector</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_conn}</div>
+                <div style="font-size:.7rem;color:#6f626a;font-weight:500;">Connector</div>
+                <div style="font-size:.88rem;font-weight:600;color:#20181d;">{sel_conn}</div>
             </div>
             <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Status</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{sel_status}</div>
+                <div style="font-size:.7rem;color:#6f626a;font-weight:500;">Status</div>
+                <div style="font-size:.88rem;font-weight:600;color:#20181d;">{sel_status}</div>
             </div>
             <div>
-                <div style="font-size:.7rem;color:#65706d;font-weight:500;">Skills</div>
-                <div style="font-size:.88rem;font-weight:600;color:#19211f;">{len(sel_skills) if isinstance(sel_skills, list) else 0} steps</div>
+                <div style="font-size:.7rem;color:#6f626a;font-weight:500;">Skills</div>
+                <div style="font-size:.88rem;font-weight:600;color:#20181d;">{len(sel_skills) if isinstance(sel_skills, list) else 0} steps</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
         st.caption(sel_chain)
+        with st.expander("What this flow is doing", expanded=True):
+            st.write(business_flow_description(sel_row))
+            render_business_flow_chain(sel_row, limit=10)
         can_optimize, optimization_reason = flow_needs_optimization(sel_row)
         if can_optimize:
             st.info(optimization_reason)
@@ -3737,10 +5035,10 @@ elif page == "Flows":
             }
             active, msg = phases_map.get(phase, phases_map["idle"])
             agents = [
-                ("Planner",   "Reads flow + history", "#3267a8", "#dcecff"),
-                ("Generator", "Calls Gemini AI",       "#167447", "#d7efe5"),
-                ("Critic",    "Validates proposal",    "#a55b19", "#fff0c2"),
-                ("Simulator", "Tests in sandbox",      "#5f4bb6", "#e7e0ff"),
+                ("Planner",   "Reads flow + history", "#4f6f8f", "#eef3fb"),
+                ("Generator", "Calls Gemini AI",       "#3f6f5b", "#eaf4ef"),
+                ("Critic",    "Validates proposal",    "#9a5b13", "#fff6d9"),
+                ("Simulator", "Tests in sandbox",      "#7a4f93", "#f3effb"),
                 ("Evaluator", "Compares score",        "#7b4eb3", "#eee4ff"),
                 ("Approval",  "Awaits admin",          "#b04a72", "#ffe3ef"),
             ]
@@ -3749,34 +5047,34 @@ elif page == "Flows":
                 is_a = active == i
                 is_d = active > i and active >= 0
                 op = "1" if (is_a or is_d) else "0.55"
-                bd = f"2px solid {color}" if is_a else "1px solid #d8d1c2"
-                cbg = bg if is_a else "#fffaf0"
+                bd = f"2px solid {color}" if is_a else "1px solid #eadde4"
+                cbg = bg if is_a else "#ffffff"
                 pulse = "animation:pulse-card 1.4s ease-in-out infinite;" if is_a else ""
                 shimmer = '<div style="position:absolute;top:0;left:-100%;width:60%;height:100%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:shimmer 1.3s infinite;pointer-events:none;"></div>' if is_a else ""
                 if is_a:
                     dot = f'<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{color};animation:blink .9s infinite;margin-right:5px;flex-shrink:0;"></span>'
                 elif is_d:
-                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#167447;margin-right:5px;flex-shrink:0;"></span>'
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#3f6f5b;margin-right:5px;flex-shrink:0;"></span>'
                 else:
-                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#d8d1c2;margin-right:5px;flex-shrink:0;"></span>'
-                cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#65706d;line-height:1.3;">{role}</div></div>'
+                    dot = '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#eadde4;margin-right:5px;flex-shrink:0;"></span>'
+                cards += f'<div style="background:{cbg};border:{bd};border-radius:10px;padding:12px 10px;opacity:{op};transition:all .45s;{pulse}position:relative;overflow:hidden;">{shimmer}<div style="display:flex;align-items:center;margin-bottom:5px;">{dot}<span style="font-size:.8rem;font-weight:600;color:{color};">{name}</span></div><div style="font-size:.68rem;color:#6f626a;line-height:1.3;">{role}</div></div>'
                 if i < len(agents) - 1:
-                    ac = color if (is_a or is_d) else "#d8d1c2"
+                    ac = color if (is_a or is_d) else "#eadde4"
                     cards += f'<div style="display:flex;align-items:center;justify-content:center;color:{ac};font-size:16px;">&rarr;</div>'
             pct = max(0, int(active / 6 * 100)) if active >= 0 else 0
-            if phase == "done":   sb,sbd,sc = "#f0faf5","#167447","#167447"
-            elif phase == "error":sb,sbd,sc = "#fdf0f0","#a73737","#a73737"
-            elif phase == "idle": sb,sbd,sc = "#f5f2eb","#d8d1c2","#65706d"
-            else:                 sb,sbd,sc = "#edf5ff","#3267a8","#3267a8"
+            if phase == "done":   sb,sbd,sc = "#f0faf5","#3f6f5b","#3f6f5b"
+            elif phase == "error":sb,sbd,sc = "#fdf0f0","#b4234a","#b4234a"
+            elif phase == "idle": sb,sbd,sc = "#fcfafb","#eadde4","#6f626a"
+            else:                 sb,sbd,sc = "#edf5ff","#4f6f8f","#4f6f8f"
             return f"""<style>
 @keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.2}}}}
 @keyframes pulse-card{{0%,100%{{box-shadow:0 0 0 0 rgba(50,103,168,.18)}}50%{{box-shadow:0 0 0 5px rgba(50,103,168,.06)}}}}
 @keyframes shimmer{{to{{left:140%}}}}
 </style>
-<div style="background:#fffaf0;border:1px solid #d8d1c2;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
+<div style="background:#ffffff;border:1px solid #eadde4;border-radius:12px;padding:16px 16px 14px;margin-bottom:10px;">
 <div style="display:grid;grid-template-columns:1fr 20px 1fr 20px 1fr 20px 1fr 20px 1fr 20px 1fr;align-items:center;gap:3px;margin-bottom:12px;">{cards}</div>
 <div style="background:#ede8df;border-radius:999px;height:2px;margin-bottom:9px;overflow:hidden;">
-<div style="background:#0f7b63;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
+<div style="background:#9d174d;height:2px;width:{pct}%;border-radius:999px;transition:width .7s ease;"></div></div>
 <div style="background:{sb};border:1px solid {sbd};border-radius:7px;padding:8px 12px;font-size:.76rem;color:{sc};font-weight:500;">{msg}</div>
 </div>"""
 
@@ -3784,20 +5082,20 @@ elif page == "Flows":
 
         if opt_phase == "done":
             st.markdown(f"""
-            <div style="background:#f0faf5;border:1px solid #167447;border-radius:10px;
+            <div style="background:#f0faf5;border:1px solid #3f6f5b;border-radius:10px;
                         padding:14px 16px;margin-bottom:10px;">
-                <div style="font-size:.8rem;font-weight:600;color:#167447;margin-bottom:8px;">What the agent improved</div>
+                <div style="font-size:.8rem;font-weight:600;color:#3f6f5b;margin-bottom:8px;">What the agent improved</div>
                 <div style="display:flex;gap:32px;flex-wrap:wrap;">
                     <div>
-                        <div style="font-size:.68rem;color:#65706d;">Before</div>
-                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">{sel_name}</div>
-                        <div style="font-size:.72rem;color:#a73737;">Score: {f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
+                        <div style="font-size:.68rem;color:#6f626a;">Before</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#20181d;">{sel_name}</div>
+                        <div style="font-size:.72rem;color:#b4234a;">Score: {f"{sel_score_f:.1f}" if sel_score_f else "N/A"}</div>
                     </div>
-                    <div style="font-size:18px;color:#d8d1c2;align-self:center;">&rarr;</div>
+                    <div style="font-size:18px;color:#eadde4;align-self:center;">&rarr;</div>
                     <div>
-                        <div style="font-size:.68rem;color:#65706d;">Proposed</div>
-                        <div style="font-size:.82rem;font-weight:600;color:#19211f;">Human-review proposal only</div>
-                        <div style="font-size:.72rem;color:#167447;">No code changed</div>
+                        <div style="font-size:.68rem;color:#6f626a;">Proposed</div>
+                        <div style="font-size:.82rem;font-weight:600;color:#20181d;">Human-review proposal only</div>
+                        <div style="font-size:.72rem;color:#3f6f5b;">No code changed</div>
                     </div>
                 </div>
             </div>
@@ -3956,6 +5254,12 @@ elif page == "Flows":
             combined_output = stdout if not stderr else f"{stdout}\n\nDiagnostics:\n{stderr}"
             clear_data_cache()
 
+            try:
+                _gctx = load_graphrag_context(goal)
+                st.session_state["last_graphrag_context"] = _gctx
+            except Exception:
+                st.session_state.pop("last_graphrag_context", None)
+
             updated_flows = load_flows()
             after_proposal_ids = set()
             if not updated_flows.empty:
@@ -4017,6 +5321,12 @@ elif page == "Flows":
             else:
                 st.warning(result.get("failure_summary") or summarize_agent_failure(result.get("stdout", ""), result.get("exit_code")))
 
+            _gctx = st.session_state.get("last_graphrag_context")
+            if _gctx:
+                st.divider()
+                with st.expander("GraphRAG Evidence Used for This Optimization", expanded=True):
+                    render_graphrag_context_viz(_gctx, flow_name=result.get("flow") or "")
+
         st.divider()
         st.subheader("Pending Optimizations")
         flows = load_flows()
@@ -4025,6 +5335,19 @@ elif page == "Flows":
             st.info("No pending proposals.")
         for _, row in proposals.iterrows():
             st.markdown(f"### {row['id']}")
+            # Score comparison — baseline from stored payload, optimized from Flow node
+            _prs = row.get("avg_score")
+            if _prs is not None:
+                _prs_f = float(_prs)
+                _ppp = parse_proposal_payload(row.get("yaml_config"))
+                _prs_before = _ppp.get("before_summary", {}).get("baseline_score")
+                _prs_base = float(_prs_before) if _prs_before is not None else 2.8
+                _prs_delta = round(_prs_f - _prs_base, 2)
+                _prs_verdict = "Same or better ✓" if _prs_delta >= 0 else "Degraded ✗"
+                _pv1, _pv2, _pv3 = st.columns(3)
+                _pv1.metric("Optimized score", round(_prs_f, 2), delta=_prs_delta)
+                _pv2.metric("Baseline score",  round(_prs_base, 2))
+                _pv3.metric("Verdict", _prs_verdict)
             c1, c2, c3 = st.columns([1, 1, 4])
             with c1:
                 if st.button("Approve", key=f"flow_approve_{row['id']}", type="primary"):
@@ -4115,14 +5438,8 @@ elif page == "Flows":
                 else:
                     display_table(flows, height=360)
             with support_tabs[2]:
-                mode = st.segmented_control(
-                    "Sandbox target",
-                    options=["local", "cloudrun"],
-                    default=os.environ.get("SANDBOX_MODE", "local")
-                    if os.environ.get("SANDBOX_MODE", "local") in {"local", "cloudrun"}
-                    else "local",
-                    key="flow_sandbox_mode",
-                )
+                mode = "cloudrun"
+                st.info("Sandbox target: Cloud Run only. Local/mock execution is disabled for UI sandbox runs.")
                 flow_yaml = st.text_area("Sandbox flow YAML", value=default_sandbox_flow(), height=220, key="flow_sandbox_yaml")
                 if st.button("Create Sandbox Run", type="primary", key="flow_sandbox_run"):
                     result = run_sandbox_from_ui(flow_yaml, mode)
@@ -4134,6 +5451,43 @@ elif page == "Flows":
                 if "last_sandbox_result" in st.session_state:
                     render_sandbox_review(st.session_state["last_sandbox_result"])
             with support_tabs[3]:
+                websites = load_websites()
+                if websites.empty:
+                    st.info("No web evidence indexed yet. Ingest a running site or deployed URL below to attach UI/domain evidence to flow review.")
+                else:
+                    st.markdown("**Indexed web evidence**")
+                    selected_domain = st.selectbox(
+                        "Evidence source",
+                        websites["domain"].tolist(),
+                        key="flow_web_evidence_domain",
+                    )
+                    web_analysis = load_website_analysis(selected_domain)
+                    funding = web_analysis.get("funding", {})
+                    donations = web_analysis.get("donations", {})
+                    wc1, wc2, wc3, wc4 = st.columns(4)
+                    wc1.metric("Routes", web_analysis.get("routes", 0))
+                    wc2.metric("Campaigns", funding.get("campaigns", 0))
+                    wc3.metric("Donors", donations.get("donors", 0))
+                    wc4.metric("Contract Methods", web_analysis.get("contract_methods", 0))
+
+                    evidence_notes = []
+                    if web_analysis.get("routes", 0):
+                        evidence_notes.append(f"Route evidence is available for {web_analysis.get('routes', 0)} UI route(s).")
+                    if web_analysis.get("contract_methods", 0):
+                        evidence_notes.append(f"{web_analysis.get('contract_methods', 0)} contract/API method(s) can be compared against workflow steps.")
+                    if funding.get("campaigns", 0):
+                        evidence_notes.append(f"{funding.get('campaigns', 0)} campaign/funding entity node(s) were extracted.")
+                    if web_analysis.get("owner_gaps"):
+                        evidence_notes.append("Owner-link gaps remain: " + compact_list(web_analysis.get("owner_gaps"), 4))
+                    if not evidence_notes:
+                        evidence_notes.append("The site is indexed, but no strong route/entity evidence was extracted yet.")
+                    for note in evidence_notes:
+                        st.write(f"- {note}")
+
+                    with st.expander("Extracted web entities", expanded=False):
+                        display_table(load_web_entities(selected_domain), height=280)
+
+                st.divider()
                 default_source = str((ROOT.parent / "fundraising_app" / "Crowd-Funding-App").resolve())
                 url = st.text_input("Website URL", value="http://127.0.0.1:5173", key="flow_ingest_url")
                 source_path = st.text_input("Local source folder", value=default_source, key="flow_ingest_source")
@@ -4149,385 +5503,10 @@ elif page == "Flows":
                     st.success(f"Indexed {result['domain']}")
                     st.json(result)
 
-elif page == "Connected App":
-    st.subheader("Connected Application Profiles")
-    st.caption(
-        "Each indexed website or codebase creates an AppProfile node in Neo4j. "
-        "The agent planner uses this context to know which system it is optimizing."
-    )
 
-    profiles = load_app_profiles()
 
-    if profiles.empty:
-        st.info(
-            "No connected apps yet. Use **Website Ingest** to index your first application."
-        )
-    else:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Connected Apps", len(profiles))
-        m2.metric("Total Pages Indexed", int(profiles["pages"].sum()))
-        m3.metric("Total Entities Extracted", int(profiles["entities"].sum()))
 
-        st.markdown("### App Profiles")
-        display_table(
-            profiles[["app_id", "source_type", "base_url", "pages", "entities", "last_indexed_at"]],
-            height=220,
-        )
 
-        selected_app_id = st.selectbox(
-            "Inspect app",
-            profiles["app_id"].tolist(),
-            format_func=lambda x: x,
-        )
-
-        if selected_app_id:
-            row = profiles[profiles["app_id"] == selected_app_id].iloc[0]
-            st.markdown(f"### {selected_app_id}")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown(f"**Source type:** {row.get('source_type', '—')}")
-                st.markdown(f"**Base URL:** {row.get('base_url', '—')}")
-                st.markdown(f"**Source path:** {row.get('source_path', '—') or '—'}")
-                st.markdown(f"**Last indexed:** {row.get('last_indexed_at', '—')}")
-            with c2:
-                entity_counts = load_app_entity_counts(selected_app_id)
-                if entity_counts:
-                    st.markdown("**Entity breakdown**")
-                    display_table(df(entity_counts), height=200)
-                else:
-                    st.info("No entities extracted for this app yet.")
-
-            st.markdown("### Re-index")
-            st.caption("Re-run the crawler for this app with updated settings.")
-            ri_url = st.text_input(
-                "URL",
-                value=str(row.get("base_url", "") or ""),
-                key=f"ri_url_{selected_app_id}",
-            )
-            ri_path = st.text_input(
-                "Source path (optional)",
-                value=str(row.get("source_path", "") or ""),
-                key=f"ri_path_{selected_app_id}",
-            )
-            ri_c1, ri_c2, ri_c3 = st.columns(3)
-            ri_depth = ri_c1.number_input("Depth", min_value=0, max_value=3, value=1, key="ri_depth")
-            ri_pages = ri_c2.number_input("Max pages", min_value=1, max_value=100, value=30, key="ri_pages")
-            ri_clear = ri_c3.checkbox("Clear existing", value=True, key="ri_clear")
-
-            if st.button("Re-index App", type="primary"):
-                publish_event(
-                    source="indexer",
-                    event_type="started",
-                    title="Re-index started from Connected App",
-                    detail=ri_url,
-                    payload={"app_id": selected_app_id, "url": ri_url},
-                )
-                with st.spinner(f"Re-indexing {selected_app_id}..."):
-                    try:
-                        result = crawl_website(
-                            start_url=ri_url,
-                            max_depth=int(ri_depth),
-                            max_pages=int(ri_pages),
-                            clear_existing=ri_clear,
-                            source_path=ri_path or None,
-                        )
-                    except Exception as exc:
-                        publish_event(
-                            source="indexer",
-                            event_type="error",
-                            title="Re-index failed",
-                            detail=str(exc),
-                            payload={"app_id": selected_app_id},
-                        )
-                        st.error(f"Re-index failed: {exc}")
-                        st.stop()
-                publish_event(
-                    source="indexer",
-                    event_type="result",
-                    title="Re-index completed",
-                    detail=f"{result.get('entities_written', 0)} entities",
-                    payload=result,
-                )
-                clear_data_cache()
-                st.success(f"Re-indexed {selected_app_id}")
-                st.json(result)
-
-elif page == "Pipeline Explorer":
-    st.subheader("Pipeline Explorer")
-    st.caption(
-        "Pipelines are discovered automatically after each website ingest. "
-        "Each pipeline is a chain: Route → Feature → ContractMethod."
-    )
-
-    all_pipelines = load_pipelines()
-
-    if all_pipelines.empty:
-        st.info(
-            "No pipelines discovered yet. Run **Website Ingest** with a source path "
-            "containing App.tsx (routes) and .clar files (contract methods) to auto-discover pipelines."
-        )
-    else:
-        # Summary metrics
-        total = len(all_pipelines)
-        with_contract = int((all_pipelines["has_contract"] == True).sum())  # noqa: E712
-        apps_covered = all_pipelines["app_id"].nunique()
-
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Pipelines Discovered", total)
-        m2.metric("With Smart Contract", with_contract)
-        m3.metric("Apps Covered", apps_covered)
-
-        # App filter
-        app_ids = ["All"] + sorted(all_pipelines["app_id"].dropna().unique().tolist())
-        selected_app = st.selectbox("Filter by app", app_ids)
-        filtered = (
-            all_pipelines
-            if selected_app == "All"
-            else all_pipelines[all_pipelines["app_id"] == selected_app]
-        )
-
-        # Pipeline table — risk badge inline
-        def _risk(row: Any) -> str:
-            return "HIGH" if row["has_contract"] else "low"
-
-        display_df = filtered[["name", "app_id", "entrypoint", "steps", "entity_types", "has_contract"]].copy()
-        display_df["risk"] = display_df["has_contract"].map(lambda x: "HIGH" if x else "low")
-        display_table(display_df.drop(columns=["has_contract"]), height=280)
-
-        # Pipeline detail
-        st.markdown("### Pipeline Detail")
-        pipeline_options = filtered["id"].tolist()
-        pipeline_labels = dict(zip(filtered["id"], filtered["name"]))
-
-        if pipeline_options:
-            selected_pid = st.selectbox(
-                "Select pipeline",
-                pipeline_options,
-                format_func=lambda x: pipeline_labels.get(x, x),
-            )
-            p_row = filtered[filtered["id"] == selected_pid].iloc[0]
-            steps = load_pipeline_steps(selected_pid)
-
-            risk_color = "status-bad" if p_row.get("has_contract") else "status-good"
-            risk_label = "HIGH — involves smart contract" if p_row.get("has_contract") else "low"
-            st.markdown(
-                f"**Entrypoint:** `{p_row['entrypoint']}`  "
-                f"&nbsp;&nbsp;<span class='status-pill {risk_color}'>Risk: {risk_label}</span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"**Entity types:** {', '.join(p_row['entity_types'] or [])}")
-            st.markdown(f"**App:** {p_row['app_id']}")
-
-            if steps:
-                st.markdown("**Steps**")
-                steps_df = pd.DataFrame(steps)
-                display_table(steps_df, height=220)
-            else:
-                st.info("No step detail available for this pipeline.")
-
-elif page == "Data Isolation":
-    st.subheader("Data Isolation")
-    st.caption(
-        "Isolation status of indexed data. Every node written since Phase 4 carries "
-        "an app_id property, ensuring that data from different connected apps cannot "
-        "be mixed in sandbox snapshots or agent queries."
-    )
-
-    iso = load_isolation_status()
-    status_label = "ISOLATED" if iso["fully_isolated"] else (
-        "PARTIAL" if (iso["page_scoped"] > 0 or iso["entity_scoped"] > 0) else "NOT SCOPED"
-    )
-    status_class = (
-        "status-good" if iso["fully_isolated"]
-        else "status-warn" if status_label == "PARTIAL"
-        else "status-bad"
-    )
-
-    st.markdown(
-        f"<h3>Isolation policy: "
-        f"<span class='status-pill {status_class}'>{status_label}</span></h3>",
-        unsafe_allow_html=True,
-    )
-
-    if not iso["fully_isolated"] and iso["page_total"] > 0:
-        unscoped_pages = iso["page_total"] - iso["page_scoped"]
-        unscoped_entities = iso["entity_total"] - iso["entity_scoped"]
-        if unscoped_pages or unscoped_entities:
-            st.warning(
-                f"{unscoped_pages} WebPage node(s) and {unscoped_entities} WebEntity node(s) "
-                "are missing app_id. Re-index those apps to stamp them."
-            )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Pages (total)",          iso["page_total"])
-    c2.metric("Pages (app_id stamped)", iso["page_scoped"])
-    c3.metric("Entities (total)",          iso["entity_total"])
-    c4.metric("Entities (app_id stamped)", iso["entity_scoped"])
-
-    st.markdown("### Sandbox snapshot policy")
-    st.markdown(
-        "- **Secret fields excluded**: always — keys matching `password`, `secret`, "
-        "`token`, `credential`, `private`, `api_key` and variants are stripped before "
-        "any data is sent to the sandbox.\n"
-        "- **Scope**: when an `app_id` is supplied, only matching Company nodes are "
-        "included; falls back to the full EcoLink graph if no scoped nodes exist.\n"
-        "- **Sandbox isolation**: local mode runs `sandbox_task.py` as a subprocess "
-        "with no shared memory; Cloud Run mode uses isolated container execution."
-    )
-
-    st.markdown("### Per-app isolation breakdown")
-    per_app = load_per_app_isolation()
-    if per_app.empty:
-        st.info("No AppProfile nodes found. Run Website Ingest to create a profile.")
-    else:
-        display_table(per_app, height=260)
-
-elif page == "Website Ingest":
-    st.subheader("Website Entity Ingestion")
-    default_source = str((ROOT.parent / "fundraising_app" / "Crowd-Funding-App").resolve())
-    url = st.text_input("Website URL", value="http://127.0.0.1:5173")
-    source_path = st.text_input("Optional local source folder", value=default_source)
-    c1, c2, c3 = st.columns(3)
-    depth = c1.number_input("Crawl depth", min_value=0, max_value=3, value=1)
-    max_pages = c2.number_input("Max pages", min_value=1, max_value=100, value=30)
-    clear_existing = c3.checkbox("Clear existing domain first", value=True)
-
-    st.markdown("**Existing indexed websites**")
-    display_table(load_websites(), height=180)
-
-    if st.button("Ingest Website", type="primary"):
-        publish_event(
-            source="indexer",
-            event_type="started",
-            title="Website ingestion started",
-            detail=url,
-            payload={"url": url, "source_path": source_path},
-        )
-        with st.spinner("Crawling website and extracting identities..."):
-            try:
-                result = crawl_website(
-                    start_url=url,
-                    max_depth=int(depth),
-                    max_pages=int(max_pages),
-                    clear_existing=clear_existing,
-                    source_path=source_path or None,
-                )
-            except Exception as exc:
-                publish_event(
-                    source="indexer",
-                    event_type="error",
-                    title="Website ingestion failed",
-                    detail=str(exc),
-                    payload={"url": url},
-                )
-                raise
-            publish_event(
-                source="indexer",
-                event_type="result",
-                title="Website ingestion completed",
-                detail=f"Indexed {result['domain']}: {result.get('entities_written', 0)} entities",
-                payload=result,
-            )
-        clear_data_cache()
-        st.success(f"Indexed {result['domain']}")
-        st.json(result)
-
-    websites = load_websites()
-    if not websites.empty:
-        selected_domain = st.selectbox("Analyze domain", websites["domain"].tolist())
-        analysis = load_website_analysis(selected_domain)
-        funding = analysis["funding"]
-        donations = analysis["donations"]
-
-        st.markdown("### Agentic website analysis")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Campaigns", funding.get("campaigns", 0))
-        m2.metric("Donors", donations.get("donors", 0))
-        m3.metric("Donation Edges", donations.get("donation_edges", 0))
-        m4.metric("Routes", analysis.get("routes", 0))
-
-        recommendations = []
-        if funding.get("campaigns", 0):
-            recommendations.append(
-                f"Track funding progress across {funding.get('campaigns', 0)} campaigns "
-                f"with total target {funding.get('total_target', 0)}."
-            )
-        if analysis.get("contract_methods", 0):
-            recommendations.append(
-                f"Connect {analysis.get('contract_methods', 0)} detected contract methods to UI actions."
-            )
-        if analysis["owner_gaps"]:
-            recommendations.append(
-                "Resolve missing campaign owner links: " + ", ".join(analysis["owner_gaps"])
-            )
-        else:
-            recommendations.append("All detected campaigns have owner relationships.")
-        if donations.get("donation_edges", 0):
-            recommendations.append(
-                f"Use {donations.get('donation_edges', 0)} donor-to-campaign edges for supporter graph analysis."
-            )
-
-        for item in recommendations:
-            st.write(f"- {item}")
-
-        st.markdown("**Entity counts by type**")
-        display_table(df(analysis["counts"]), height=170)
-        st.markdown("### Extracted identities/entities")
-        display_table(load_web_entities(selected_domain), height=420)
-
-elif page == "Agent Run":
-    st.subheader("Run Optimization")
-    default_goal = "Improve match quality for Healthtech startups"
-    goal = st.text_input("Goal", value=default_goal)
-    if st.button("Run Agent", type="primary"):
-        publish_event(
-            source="ui",
-            target="planner",
-            event_type="started",
-            title="Agent run requested from Streamlit",
-            detail=goal,
-            payload={"goal": goal},
-        )
-        with st.spinner("Planner, generator, critic, simulator, evaluator..."):
-            try:
-                code, stdout, stderr, thread_id = run_agent(goal)
-            except subprocess.TimeoutExpired:
-                publish_event(
-                    source="ui",
-                    event_type="error",
-                    title="Agent run timed out",
-                    detail="Timeout after 240 seconds.",
-                    payload={"goal": goal},
-                )
-                st.error("Agent run timed out after 240 seconds.")
-            else:
-                clear_data_cache()
-                if thread_id:
-                    st.session_state["last_thread_id"] = thread_id
-                if code == 0:
-                    st.success("Agent run completed.")
-                else:
-                    st.warning("Agent run stopped before a clean exit.")
-                publish_event(
-                    thread_id=thread_id or "system",
-                    source="ui",
-                    event_type="result" if code == 0 else "error",
-                    title="Streamlit agent run finished",
-                    detail=f"Exit code: {code}",
-                    payload={"goal": goal, "thread_id": thread_id, "stdout_tail": stdout[-1200:]},
-                )
-                if thread_id:
-                    st.caption(f"Thread ID: {thread_id}")
-                st.markdown("**Output**")
-                st.code(stdout or "(no stdout)", language="text")
-                if stderr:
-                    st.markdown("**Diagnostics**")
-                    st.code(stderr, language="text")
-
-    st.subheader("Created Proposals")
-    proposals = load_flows()
-    proposals = proposals[proposals["status"].fillna("") == "proposed"]
-    display_table(proposals[["id", "name", "avg_score", "server", "connector"]], height=220)
 
 elif page == "Agentic Architecture":
     st.subheader("Full Agentic Architecture")
@@ -4586,12 +5565,25 @@ elif page == "Agentic Architecture":
         left, right = st.columns(2)
         with left:
             st.markdown("### Node Primitives")
+            st.caption("These are persisted graph object types. The indexer can only write labels that exist in the schema.")
             display_table(load_label_counts(), height=360)
         with right:
             st.markdown("### Relationship Primitives")
+            st.caption("These are the allowed connections the graph has actually observed or written.")
             display_table(load_relationship_counts(), height=360)
         st.markdown("### Runtime Primitives")
+        st.info(
+            "Runtime primitives are executable or operational resources, such as connectors, servers, and programmes. "
+            "They are useful when the agent needs to choose what can run a flow or read data. They are not the same as "
+            "source-code primitives like Route, Function, DataStore, or Risk."
+        )
         display_table(load_runtime_primitives(), height=260)
+        st.markdown("### New Node Type Policy")
+        st.warning(
+            "The agentic layer must not silently create unknown live node labels. If it needs a new graph object type, "
+            "it creates a SchemaChangeProposal for human review. After approval, the schema/indexer can be updated and "
+            "future scans can write that node type."
+        )
 
     with tab_sandbox_arch:
         st.markdown("### Proposed Sandbox Architecture")
@@ -4633,11 +5625,13 @@ elif page == "Agentic Architecture":
         display_table(
             pd.DataFrame(
                 [
-                    {"action_type": "modify_workflow", "target": "Workflow", "sandbox_effect": "simulate proposal"},
-                    {"action_type": "add_validation", "target": "Route or Function", "sandbox_effect": "recommend guardrail"},
-                    {"action_type": "add_observability", "target": "Runtime path", "sandbox_effect": "recommend tracing/metrics"},
-                    {"action_type": "flag_risk", "target": "Risk", "sandbox_effect": "surface issue for review"},
-                    {"action_type": "request_admin_approval", "target": "Unknown capability", "sandbox_effect": "block execution"},
+                    {"action_type": "modify_workflow", "target": "Workflow", "sandbox_effect": "simulate proposal in flow sandbox", "modes": "all"},
+                    {"action_type": "modify_code", "target": "Source file", "sandbox_effect": "apply patch in isolated code sandbox, run test suite", "modes": "source_path only"},
+                    {"action_type": "create_skill", "target": "New Skill node", "sandbox_effect": "writes SkillProposal; blocked in proposal-only mode", "modes": "non-proposal-only"},
+                    {"action_type": "add_validation", "target": "Route or Function", "sandbox_effect": "recommend guardrail", "modes": "all"},
+                    {"action_type": "add_observability", "target": "Runtime path", "sandbox_effect": "recommend tracing/metrics", "modes": "all"},
+                    {"action_type": "flag_risk", "target": "Risk", "sandbox_effect": "surface issue for review", "modes": "all"},
+                    {"action_type": "request_admin_approval", "target": "Unknown capability", "sandbox_effect": "block execution", "modes": "all"},
                 ]
             ),
             height=220,
@@ -4731,24 +5725,6 @@ elif page == "Agentic Architecture":
                     if stderr:
                         st.code(stderr, language="text")
 
-elif page == "Infrastructure":
-    st.subheader("Server Load")
-    servers = load_servers()
-    display_table(servers, height=280)
-    if not servers.empty:
-        chart_data = servers[["name", "load_percent"]].set_index("name")
-        st.bar_chart(chart_data)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Page: Skill Registry
-# ─────────────────────────────────────────────────────────────────────────────
-# (Skill Registry was removed as a separate page — skill proposals now appear
-#  inline on the Flows page and are manageable from the Chat page.)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Page: Retry Inspector
-# ─────────────────────────────────────────────────────────────────────────────
 elif page == "Retry Inspector":
     st.subheader("Retry Inspector")
     st.caption(
@@ -4757,419 +5733,489 @@ elif page == "Retry Inspector":
         "it was told to fix before regenerating."
     )
 
-    st.markdown("### Architecture Sandbox")
-    st.caption(
-        "Copy the project and optional database into an isolated sandbox, analyze the "
-        "data/connectors, test the copied project, then approve the tested architecture."
-    )
+    _ri_tab_retries, _ri_tab_arch = st.tabs(["Retry Events", "Architecture Sandbox"])
 
-    if project:
-        with st.expander("Create tested architecture proposal", expanded=True):
-            proposal_repo_path = str(project.get("repo_path") or "")
-            path_resolution = resolve_project_source_path(proposal_repo_path)
-            resolved_repo_path = path_resolution.get("resolved_path") or proposal_repo_path
-            project_source_ready = bool(path_resolution.get("exists"))
-            indexed_storage = load_exact_storage_sources(project["project_id"])
-            db_detection = discover_database_sources(resolved_repo_path) if project_source_ready else {
-                "selected_source": "",
-                "detected_sources": [],
-                "graph_credentials": discover_database_sources("__missing_project_source__").get("graph_credentials", []),
-            }
-            proposal_db_source = db_detection.get("selected_source", "")
+    with _ri_tab_arch:
+        st.caption(
+            "Copy the project and optional database into an isolated sandbox, analyze the "
+            "data/connectors, test the copied project, then approve the tested architecture."
+        )
+        if project:
+            with st.expander("Create tested architecture proposal", expanded=True):
+                proposal_repo_path = str(project.get("repo_path") or "")
+                path_resolution = resolve_project_source_path(proposal_repo_path)
+                resolved_repo_path = path_resolution.get("resolved_path") or proposal_repo_path
+                project_source_ready = bool(path_resolution.get("exists"))
+                indexed_storage = load_exact_storage_sources(project["project_id"])
+                db_detection = discover_database_sources(resolved_repo_path) if project_source_ready else {
+                    "selected_source": "",
+                    "detected_sources": [],
+                    "graph_credentials": discover_database_sources("__missing_project_source__").get("graph_credentials", []),
+                }
+                proposal_db_source = db_detection.get("selected_source", "")
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Project Source", "Ready" if project_source_ready else "Missing")
-            c2.metric("Database Sources", 0 if not project_source_ready else len(db_detection.get("detected_sources", [])) + len(indexed_storage))
-            c3.metric("Credential Refs", len(db_detection.get("graph_credentials", [])))
-            if project_source_ready:
-                st.caption("Using the repository path saved in Project Review.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Project Source", "Ready" if project_source_ready else "Missing")
+                c2.metric("Database Sources", 0 if not project_source_ready else len(db_detection.get("detected_sources", [])) + len(indexed_storage))
+                c3.metric("Credential Refs", len(db_detection.get("graph_credentials", [])))
+                if project_source_ready:
+                    st.caption("Using the repository path saved in Project Review.")
 
-            if not project_source_ready:
-                st.error(
-                    "Retry Inspector read the repository path saved in Project Review, but this "
-                    "machine cannot open that folder. The sandbox cannot copy the project until "
-                    "Project Review points to a local folder that exists here."
-                )
-                st.info(
-                    "Project Review may still show storage and flows because those are cached "
-                    "Neo4j facts from the last successful scan. Cached facts can explain the old "
-                    "architecture, but they cannot be copied or tested in a new sandbox."
-                )
-                with st.expander("Checked project path candidates"):
-                    checked_paths = pd.DataFrame(path_resolution.get("checked", []))
-                    if checked_paths.empty:
-                        st.caption("No path candidates were available.")
-                    else:
-                        display_table(checked_paths, height=180)
-                if not indexed_storage.empty:
-                    with st.expander("Last-scan database evidence (stale, not usable for sandbox)"):
-                        stale_rows = indexed_storage.copy()
-                        display_table(
-                            stale_rows[
-                                [
-                                    "database_or_storage",
-                                    "storage_type",
-                                    "evidence_file",
-                                    "linked_files",
-                                    "confidence",
-                                ]
-                            ],
-                            height=180,
-                        )
-            else:
-                graph_database_sources = []
-                if not indexed_storage.empty:
-                    graph_database_sources = [
-                        {
-                            "kind": "indexed_project_storage",
-                            "credential_ref": "project graph",
-                            "source": row.get("database_or_storage"),
-                            "value": row.get("storage_type") or "detected storage",
-                            "evidence_file": row.get("evidence_file"),
-                            "linked_files": row.get("linked_files"),
-                            "confidence": row.get("confidence"),
-                        }
-                        for _, row in indexed_storage.iterrows()
-                    ]
-                runtime_sources = db_detection.get("detected_sources", [])
-                visible_sources = [
-                    {
-                        "kind": item.get("kind"),
-                        "credential_ref": item.get("credential_ref") or "local file",
-                        "source": item.get("source"),
-                        "value": item.get("display_value"),
-                        "evidence_file": "runtime source",
-                        "linked_files": [],
-                        "confidence": None,
-                    }
-                    for item in runtime_sources
-                ] + graph_database_sources
-
-                st.markdown("**Detected database and storage evidence**")
-                if visible_sources:
-                    display_table(pd.DataFrame(visible_sources), height=180)
-                else:
+                if not project_source_ready:
+                    st.error(
+                        "Retry Inspector read the repository path saved in Project Review, but this "
+                        "machine cannot open that folder. The sandbox cannot copy the project until "
+                        "Project Review points to a local folder that exists here."
+                    )
                     st.info(
-                        "No runtime database credential, local database file, or indexed project storage "
-                        "was detected. The proposal will still analyze project connector boundaries."
+                        "Project Review may still show storage and flows because those are cached "
+                        "Neo4j facts from the last successful scan. Cached facts can explain the old "
+                        "architecture, but they cannot be copied or tested in a new sandbox."
                     )
-
-            graph_credentials = db_detection.get("graph_credentials", [])
-            if graph_credentials:
-                with st.expander("Graph credential references"):
-                    display_table(
-                        pd.DataFrame(
-                            [
-                                {
-                                    "credential_ref": item.get("credential_ref"),
-                                    "value": item.get("display_value"),
-                                }
-                                for item in graph_credentials
-                            ]
-                        ),
-                        height=140,
-                    )
-
-            external_db_source = ""
-            external_credential_ref = ""
-            with st.expander("External database credentials", expanded=not project_source_ready):
-                use_external_db = st.checkbox(
-                    "Use external database credentials for this sandbox run",
-                    value=not project_source_ready,
-                    key="retry_external_db_enabled",
-                )
-                if use_external_db:
-                    external_credential_ref = st.text_input(
-                        "Credential reference name",
-                        value=f"external_db_{str(project.get('name') or 'project').lower().replace(' ', '_')}",
-                        key="retry_external_db_ref",
-                    ).strip()
-                    input_mode = st.radio(
-                        "Connection input",
-                        ["Connection fields", "SQLAlchemy URL"],
-                        horizontal=True,
-                        key="retry_external_db_mode",
-                    )
-                    if input_mode == "SQLAlchemy URL":
-                        external_db_source = st.text_input(
-                            "SQLAlchemy database URL",
-                            value="",
-                            type="password",
-                            placeholder="postgresql+psycopg://user:password@host:5432/database",
-                            key="retry_external_db_url",
-                        ).strip()
-                    else:
-                        db_kind = st.selectbox(
-                            "Database type",
-                            ["postgresql+pg8000", "mysql+pymysql", "sqlite"],
-                            key="retry_external_db_kind",
-                        )
-                        if db_kind == "sqlite":
-                            sqlite_path = st.text_input(
-                                "SQLite file path",
-                                value="",
-                                key="retry_external_sqlite_path",
-                            ).strip()
-                            if sqlite_path:
-                                external_db_source = sqlite_path
+                    with st.expander("Checked project path candidates"):
+                        checked_paths = pd.DataFrame(path_resolution.get("checked", []))
+                        if checked_paths.empty:
+                            st.caption("No path candidates were available.")
                         else:
-                            default_port = "5432" if db_kind.startswith("postgresql") else "3306"
-                            host = st.text_input("Host", value="", key="retry_external_db_host").strip()
-                            port = st.text_input("Port", value=default_port, key="retry_external_db_port").strip()
-                            database_name = st.text_input("Database name", value="", key="retry_external_db_name").strip()
-                            username = st.text_input("Username", value="", key="retry_external_db_user").strip()
-                            password = st.text_input("Password", value="", type="password", key="retry_external_db_password")
-                            if host and port and database_name and username:
-                                external_db_source = (
-                                    f"{db_kind}://{quote_plus(username)}:{quote_plus(password)}"
-                                    f"@{host}:{port}/{quote_plus(database_name)}"
-                                )
-                    st.caption(
-                        "The password is used only for this sandbox run. The proposal stores "
-                        "the credential reference name, not the secret value."
+                            display_table(checked_paths, height=180)
+                    if not indexed_storage.empty:
+                        with st.expander("Last-scan database evidence (stale, not usable for sandbox)"):
+                            stale_rows = indexed_storage.copy()
+                            display_table(
+                                stale_rows[
+                                    [
+                                        "database_or_storage",
+                                        "storage_type",
+                                        "evidence_file",
+                                        "linked_files",
+                                        "confidence",
+                                    ]
+                                ],
+                                height=180,
+                            )
+                else:
+                    graph_database_sources = []
+                    if not indexed_storage.empty:
+                        graph_database_sources = [
+                            {
+                                "kind": "indexed_project_storage",
+                                "credential_ref": "project graph",
+                                "source": row.get("database_or_storage"),
+                                "value": row.get("storage_type") or "detected storage",
+                                "evidence_file": row.get("evidence_file"),
+                                "linked_files": row.get("linked_files"),
+                                "confidence": row.get("confidence"),
+                            }
+                            for _, row in indexed_storage.iterrows()
+                        ]
+                    runtime_sources = db_detection.get("detected_sources", [])
+                    visible_sources = [
+                        {
+                            "kind": item.get("kind"),
+                            "credential_ref": item.get("credential_ref") or "local file",
+                            "source": item.get("source"),
+                            "value": item.get("display_value"),
+                            "evidence_file": "runtime source",
+                            "linked_files": [],
+                            "confidence": None,
+                        }
+                        for item in runtime_sources
+                    ] + graph_database_sources
+
+                    st.markdown("**Detected database and storage evidence**")
+                    if visible_sources:
+                        display_table(pd.DataFrame(visible_sources), height=180)
+                    else:
+                        st.info(
+                            "No runtime database credential, local database file, or indexed project storage "
+                            "was detected. The proposal will still analyze project connector boundaries."
+                        )
+
+                graph_credentials = db_detection.get("graph_credentials", [])
+                if graph_credentials:
+                    with st.expander("Graph credential references"):
+                        display_table(
+                            pd.DataFrame(
+                                [
+                                    {
+                                        "credential_ref": item.get("credential_ref"),
+                                        "value": item.get("display_value"),
+                                    }
+                                    for item in graph_credentials
+                                ]
+                            ),
+                            height=140,
+                        )
+
+                external_db_source = ""
+                external_credential_ref = ""
+                with st.expander("External database credentials", expanded=not project_source_ready):
+                    use_external_db = st.checkbox(
+                        "Use external database credentials for this sandbox run",
+                        value=not project_source_ready,
+                        key="retry_external_db_enabled",
                     )
+                    if use_external_db:
+                        external_credential_ref = st.text_input(
+                            "Credential reference name",
+                            value=f"external_db_{str(project.get('name') or 'project').lower().replace(' ', '_')}",
+                            key="retry_external_db_ref",
+                        ).strip()
+                        input_mode = st.radio(
+                            "Connection input",
+                            ["Connection fields", "SQLAlchemy URL"],
+                            horizontal=True,
+                            key="retry_external_db_mode",
+                        )
+                        if input_mode == "SQLAlchemy URL":
+                            external_db_source = st.text_input(
+                                "SQLAlchemy database URL",
+                                value="",
+                                type="password",
+                                placeholder="postgresql+psycopg://user:password@host:5432/database",
+                                key="retry_external_db_url",
+                            ).strip()
+                        else:
+                            db_kind = st.selectbox(
+                                "Database type",
+                                ["postgresql+pg8000", "mysql+pymysql", "sqlite"],
+                                key="retry_external_db_kind",
+                            )
+                            if db_kind == "sqlite":
+                                sqlite_path = st.text_input(
+                                    "SQLite file path",
+                                    value="",
+                                    key="retry_external_sqlite_path",
+                                ).strip()
+                                if sqlite_path:
+                                    external_db_source = sqlite_path
+                            else:
+                                default_port = "5432" if db_kind.startswith("postgresql") else "3306"
+                                host = st.text_input("Host", value="", key="retry_external_db_host").strip()
+                                port = st.text_input("Port", value=default_port, key="retry_external_db_port").strip()
+                                database_name = st.text_input("Database name", value="", key="retry_external_db_name").strip()
+                                username = st.text_input("Username", value="", key="retry_external_db_user").strip()
+                                password = st.text_input("Password", value="", type="password", key="retry_external_db_password")
+                                if host and port and database_name and username:
+                                    external_db_source = (
+                                        f"{db_kind}://{quote_plus(username)}:{quote_plus(password)}"
+                                        f"@{host}:{port}/{quote_plus(database_name)}"
+                                    )
+                        st.caption(
+                            "The password is used only for this sandbox run. The proposal stores "
+                            "the credential reference name, not the secret value."
+                        )
 
-            replacement_mode = st.radio(
-                "Apply mode after approval",
-                ["merge", "replace"],
-                horizontal=True,
-                key="retry_arch_replacement_mode",
-            )
+                replacement_mode = st.radio(
+                    "Apply mode after approval",
+                    ["merge", "replace"],
+                    horizontal=True,
+                    key="retry_arch_replacement_mode",
+                )
 
-            effective_db_source = external_db_source or proposal_db_source
-            credential_refs = [external_credential_ref] if external_db_source and external_credential_ref else []
-            can_run_architecture_sandbox = project_source_ready or bool(external_db_source)
-            if external_db_source:
-                st.caption("Database connection will be tested before any architecture proposal is saved.")
-            button_label = (
-                "Copy, Analyze & Test In Sandbox"
-                if project_source_ready
-                else "Analyze External Database In Sandbox"
-            )
-            if st.button(
-                button_label,
-                type="primary",
-                key="retry_arch_run",
-                disabled=not can_run_architecture_sandbox,
-            ):
-                with st.spinner("Creating sandbox copy, analyzing project/database, and running validation..."):
-                    try:
-                        if effective_db_source:
-                            db_probe = probe_database_source(effective_db_source)
-                            if not db_probe.get("ok"):
-                                st.error(db_probe.get("hint") or db_probe.get("error") or "Database connection failed.")
-                                with st.expander("Database connection details"):
-                                    st.json(db_probe, expanded=True)
+                effective_db_source = external_db_source or proposal_db_source
+                credential_refs = [external_credential_ref] if external_db_source and external_credential_ref else []
+                can_run_architecture_sandbox = project_source_ready or bool(external_db_source)
+                if external_db_source:
+                    st.caption("Database connection will be tested before any architecture proposal is saved.")
+                button_label = (
+                    "Copy, Analyze & Test In Sandbox"
+                    if project_source_ready
+                    else "Analyze External Database In Sandbox"
+                )
+                if st.button(
+                    button_label,
+                    type="primary",
+                    key="retry_arch_run",
+                    disabled=not can_run_architecture_sandbox,
+                ):
+                    with st.spinner("Creating sandbox copy, analyzing project/database, and running validation..."):
+                        try:
+                            _db_probe_ok = True
+                            if effective_db_source:
+                                db_probe = probe_database_source(effective_db_source)
+                                if not db_probe.get("ok"):
+                                    _db_probe_ok = False
+                                    st.error(db_probe.get("hint") or db_probe.get("error") or "Database connection failed.")
+                                    with st.expander("Database connection details"):
+                                        st.json(db_probe, expanded=True)
+                                    publish_event(
+                                        source="ui",
+                                        target="sandbox",
+                                        event_type="error",
+                                        title="Database connection failed",
+                                        detail=db_probe.get("hint") or db_probe.get("error") or "Database connection failed.",
+                                        payload={"project_id": project["project_id"], "database_probe": db_probe},
+                                    )
+                            if _db_probe_ok:
+                                if project_source_ready:
+                                    payload = build_architecture_proposal(
+                                        source_path=resolved_repo_path,
+                                        project_id=project["project_id"],
+                                        project_name=str(project.get("name") or "Project"),
+                                        sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
+                                        database_source=effective_db_source,
+                                        validation_command=None,
+                                        replacement_mode=replacement_mode,
+                                        credential_refs=credential_refs,
+                                    )
+                                else:
+                                    payload = build_database_only_architecture_proposal(
+                                        project_id=project["project_id"],
+                                        project_name=str(project.get("name") or "Project"),
+                                        sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
+                                        database_source=effective_db_source,
+                                        replacement_mode=replacement_mode,
+                                        credential_refs=credential_refs,
+                                    )
+                                proposal_id = create_architecture_proposal(payload)
                                 publish_event(
                                     source="ui",
                                     target="sandbox",
-                                    event_type="error",
-                                    title="Database connection failed",
-                                    detail=db_probe.get("hint") or db_probe.get("error") or "Database connection failed.",
-                                    payload={"project_id": project["project_id"], "database_probe": db_probe},
+                                    event_type="result",
+                                    title="Architecture sandbox proposal tested",
+                                    detail=f"{proposal_id}: {payload['validation']['status']}",
+                                    payload={
+                                        "proposal_id": proposal_id,
+                                        "project_id": project["project_id"],
+                                        "test_status": payload["validation"]["status"],
+                                        "replacement_mode": replacement_mode,
+                                    },
                                 )
-                                st.stop()
-                        if project_source_ready:
-                            payload = build_architecture_proposal(
-                                source_path=resolved_repo_path,
-                                project_id=project["project_id"],
-                                project_name=str(project.get("name") or "Project"),
-                                sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
-                                database_source=effective_db_source,
-                                validation_command=None,
-                                replacement_mode=replacement_mode,
-                                credential_refs=credential_refs,
+                                clear_data_cache()
+                                if payload["validation"]["status"] == "success":
+                                    st.success("Architecture proposal tested successfully and is ready for approval.")
+                                else:
+                                    st.warning("Architecture proposal was created, but validation did not pass yet.")
+                                render_architecture_proposal(payload)
+                        except Exception as exc:
+                            publish_event(
+                                source="ui",
+                                target="sandbox",
+                                event_type="error",
+                                title="Architecture sandbox proposal failed",
+                                detail=str(exc),
+                                payload={"project_id": project["project_id"], "repo_path": proposal_repo_path},
                             )
-                        else:
-                            payload = build_database_only_architecture_proposal(
-                                project_id=project["project_id"],
-                                project_name=str(project.get("name") or "Project"),
-                                sandbox_home=str(ROOT / ".agent_architecture_sandbox"),
-                                database_source=effective_db_source,
-                                replacement_mode=replacement_mode,
-                                credential_refs=credential_refs,
-                            )
-                        proposal_id = create_architecture_proposal(payload)
-                        publish_event(
-                            source="ui",
-                            target="sandbox",
-                            event_type="result",
-                            title="Architecture sandbox proposal tested",
-                            detail=f"{proposal_id}: {payload['validation']['status']}",
-                            payload={
-                                "proposal_id": proposal_id,
-                                "project_id": project["project_id"],
-                                "test_status": payload["validation"]["status"],
-                                "replacement_mode": replacement_mode,
-                            },
-                        )
-                        clear_data_cache()
-                        if payload["validation"]["status"] == "success":
-                            st.success("Architecture proposal tested successfully and is ready for approval.")
-                        else:
-                            st.warning("Architecture proposal was created, but validation did not pass yet.")
-                        render_architecture_proposal(payload)
-                    except Exception as exc:
-                        publish_event(
-                            source="ui",
-                            target="sandbox",
-                            event_type="error",
-                            title="Architecture sandbox proposal failed",
-                            detail=str(exc),
-                            payload={"project_id": project["project_id"], "repo_path": proposal_repo_path},
-                        )
-                        st.error(str(exc))
+                            st.error(str(exc))
 
-        proposals_df = load_architecture_proposals(project["project_id"])
-        st.markdown("### Tested Architecture Approvals")
-        if proposals_df.empty:
-            st.info("No architecture proposals yet. Create one above after the project analysis is complete.")
-        else:
-            for _, row in proposals_df.iterrows():
-                title = f"{row['id']} - {str(row.get('status') or 'unknown').upper()}"
-                with st.expander(title, expanded=row.get("status") == "proposed"):
+            proposals_df = load_architecture_proposals(project["project_id"])
+            st.markdown("### Tested Architecture Approvals")
+            if proposals_df.empty:
+                st.info("No architecture proposals yet. Create one above after the project analysis is complete.")
+            else:
+                for _, row in proposals_df.iterrows():
+                    title = f"{row['id']} - {str(row.get('status') or 'unknown').upper()}"
+                    with st.expander(title, expanded=row.get("status") == "proposed"):
+                        try:
+                            payload = json.loads(row.get("payload_json") or "{}")
+                        except json.JSONDecodeError:
+                            payload = {}
+                        st.caption(
+                            f"Mode: {row.get('replacement_mode')} | "
+                            f"Test: {row.get('test_status')} | "
+                            f"Created: {row.get('created_at')}"
+                        )
+                        if payload:
+                            render_architecture_proposal(payload)
+                        if row.get("status") == "proposed":
+                            if row.get("tested"):
+                                st.success("Changes are tested. Admin can approve this architecture.")
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    if st.button("Approve Tested Architecture", type="primary", key=f"arch_approve_{row['id']}"):
+                                        approve_architecture_proposal(row["id"])
+                                        publish_event(
+                                            source="ui",
+                                            target="graph",
+                                            event_type="approved",
+                                            title="Tested architecture approved",
+                                            detail=row["id"],
+                                            payload={"proposal_id": row["id"], "project_id": project["project_id"]},
+                                        )
+                                        clear_data_cache()
+                                        st.rerun()
+                                with c2:
+                                    if st.button("Reject", key=f"arch_reject_{row['id']}"):
+                                        reject_architecture_proposal(row["id"], "Rejected in Retry Inspector")
+                                        clear_data_cache()
+                                        st.rerun()
+                            else:
+                                st.warning("Approval is blocked until sandbox validation succeeds.")
+
+    with _ri_tab_retries:
+
+        # Scan the full event file for retry events — don't tail-slice so old
+        # threads are never truncated on busy systems. Filter at read time.
+        from src.realtime.event_bus import EVENT_FILE as _RI_EVENT_FILE  # noqa: PLC0415
+        _ri_raw_events: list[dict] = []
+        if _RI_EVENT_FILE.exists():
+            import json as _json  # noqa: PLC0415
+            with _RI_EVENT_FILE.open("r", encoding="utf-8") as _fh:
+                for _line in _fh:
+                    if not _line.strip():
+                        continue
                     try:
-                        payload = json.loads(row.get("payload_json") or "{}")
-                    except json.JSONDecodeError:
-                        payload = {}
-                    st.caption(
-                        f"Mode: {row.get('replacement_mode')} | "
-                        f"Test: {row.get('test_status')} | "
-                        f"Created: {row.get('created_at')}"
-                    )
-                    if payload:
-                        render_architecture_proposal(payload)
-                    if row.get("status") == "proposed":
-                        if row.get("tested"):
-                            st.success("Changes are tested. Admin can approve this architecture.")
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                if st.button("Approve Tested Architecture", type="primary", key=f"arch_approve_{row['id']}"):
-                                    approve_architecture_proposal(row["id"])
-                                    publish_event(
-                                        source="ui",
-                                        target="graph",
-                                        event_type="approved",
-                                        title="Tested architecture approved",
-                                        detail=row["id"],
-                                        payload={"proposal_id": row["id"], "project_id": project["project_id"]},
-                                    )
-                                    clear_data_cache()
-                                    st.rerun()
-                            with c2:
-                                if st.button("Reject", key=f"arch_reject_{row['id']}"):
-                                    reject_architecture_proposal(row["id"], "Rejected in Retry Inspector")
-                                    clear_data_cache()
-                                    st.rerun()
+                        _ev = _json.loads(_line)
+                    except Exception:
+                        continue
+                    if _ev.get("source") in ("critic", "evaluator") and _ev.get("event_type") == "decision":
+                        _ri_raw_events.append(_ev)
+
+        # A rejection event is any critic/evaluator decision that either:
+        #   (a) carries retry_count (deterministic + LLM-path critic, evaluator)
+        #   (b) carries failed_metric or issues (evaluator / deterministic critic)
+        #   (c) has critic_passed=False (LLM-path critic before nodes.py fix)
+        retry_events = [
+            e for e in _ri_raw_events
+            if (
+                e.get("payload", {}).get("retry_count") is not None
+                or e.get("payload", {}).get("failed_metric")
+                or e.get("payload", {}).get("issues")
+                or e.get("payload", {}).get("critic_passed") is False
+            )
+        ]
+
+        if not retry_events:
+            st.info(
+                "No retry events found. Run an agent optimization — retries will appear here "
+                "whenever the Critic rejects a flow or the Evaluator finds the simulation score "
+                "insufficient."
+            )
+        else:
+            # Group by thread_id, most-recent thread first
+            by_thread: dict = {}
+            for e in retry_events:
+                tid = e.get("thread_id", "unknown")
+                by_thread.setdefault(tid, []).append(e)
+
+            threads_sorted = sorted(
+                by_thread.keys(),
+                key=lambda t: by_thread[t][-1].get("created_at", ""),
+                reverse=True,
+            )
+
+            # Date filter — derive earliest date across all threads
+            import datetime as _dt  # noqa: PLC0415
+            _all_dates = sorted({
+                e.get("created_at", "")[:10]
+                for e in retry_events
+                if e.get("created_at", "")[:10]
+            })
+            _date_opts = ["All dates"] + _all_dates
+            _fi_col, col_sel, col_stat = st.columns([2, 3, 1])
+            with _fi_col:
+                _date_filter = st.selectbox("Date", _date_opts, key="ri_date_filter")
+
+            # Apply date filter to visible threads
+            if _date_filter != "All dates":
+                threads_sorted = [
+                    t for t in threads_sorted
+                    if any(e.get("created_at", "").startswith(_date_filter) for e in by_thread[t])
+                ]
+
+            if not threads_sorted:
+                st.info(f"No retry events on {_date_filter}.")
+                st.stop()
+
+            with col_sel:
+                selected_thread = st.selectbox(
+                    "Thread",
+                    threads_sorted,
+                    format_func=lambda t: (
+                        f"{t}  ({len(by_thread[t])} rejection(s))  "
+                        f"— {by_thread[t][-1].get('created_at','')[:10]}"
+                    ),
+                )
+            with col_stat:
+                st.metric("Total retries", len(by_thread[selected_thread]))
+
+            st.divider()
+
+            for idx, event in enumerate(by_thread[selected_thread], 1):
+                source = event.get("source", "")
+                payload = event.get("payload", {})
+                ts = event.get("created_at", "")[:19].replace("T", " ")
+                retry_no = payload.get("retry_count", idx)
+
+                # Header pill
+                src_color = "#e07845" if source == "critic" else "#9a70cc"
+                src_icon = "🔍" if source == "critic" else "📊"
+                st.markdown(
+                    f"<span style='background:{src_color}22;border:1px solid {src_color};"
+                    f"border-radius:6px;padding:4px 10px;font-size:13px;font-weight:700'>"
+                    f"{src_icon} {source.title()} — retry #{retry_no}</span>"
+                    f"<span style='color:#6f626a;font-size:11px;margin-left:10px'>{ts}</span>",
+                    unsafe_allow_html=True,
+                )
+
+                if source == "critic":
+                    _critic_path = payload.get("critic_path", "llm")
+                    issues = payload.get("issues", [])
+                    evidence = payload.get("evidence_node_ids", [])
+                    suggestions = payload.get("suggestions", "")
+                    invalid_skills = payload.get("invalid_skills", [])
+                    invalid_connectors = payload.get("invalid_connectors", [])
+
+                    if issues:
+                        label = "Issues found (deterministic checks):" if _critic_path == "deterministic" else "Issues found (LLM validation):"
+                        st.markdown(f"**{label}**")
+                        for issue in issues:
+                            st.error(issue, icon="⛔")
+
+                    if invalid_skills or invalid_connectors:
+                        _bad = []
+                        if invalid_skills:
+                            _bad.append(f"Unknown skills: `{'`, `'.join(invalid_skills)}`")
+                        if invalid_connectors:
+                            _bad.append(f"Unknown connectors: `{'`, `'.join(invalid_connectors)}`")
+                        st.warning("  \n".join(_bad), icon="⚠️")
+
+                    if suggestions:
+                        st.info(f"**What to fix:** {suggestions}", icon="💡")
+
+                    # Only show evidence grounding info on the LLM path —
+                    # deterministic rejections never reach evidence validation.
+                    if _critic_path == "llm":
+                        if evidence:
+                            st.success(
+                                f"Graph-grounded evidence accepted: {', '.join(str(e) for e in evidence[:6])}"
+                                + (" …" if len(evidence) > 6 else ""),
+                                icon="✅",
+                            )
                         else:
-                            st.warning("Approval is blocked until sandbox validation succeeds.")
+                            st.warning("No evidence_node_ids were provided — flow had no graph grounding.", icon="⚠️")
 
-    all_events = read_events(limit=500)
+                    detail = event.get("detail", "")
+                    if detail and _critic_path != "deterministic":
+                        st.caption(f"Detail: {detail}")
 
-    # Collect all critic/evaluator rejection events that carry retry data
-    retry_events = [
-        e for e in all_events
-        if e.get("source") in ("critic", "evaluator")
-        and e.get("event_type") == "decision"
-        and (
-            e.get("payload", {}).get("retry_count") is not None
-            or e.get("payload", {}).get("failed_metric")
-            or e.get("payload", {}).get("issues")
-        )
-    ]
+                elif source == "evaluator":
+                    fm = payload.get("failed_metric", {})
+                    if fm:
+                        c1, c2, c3 = st.columns(3)
+                        score = fm.get("match_score", 0.0)
+                        threshold = fm.get("threshold", 0.0)
+                        delta = round(score - threshold, 2) if isinstance(score, (int, float)) else None
+                        c1.metric("Simulation score", score)
+                        c2.metric("Required threshold", threshold)
+                        c3.metric("Gap", delta, delta_color="inverse")
+                        st.caption(f"Sim status: {fm.get('sim_status', '?')}")
 
-    if not retry_events:
-        st.info(
-            "No retry events found. Run an agent optimization — retries will appear here "
-            "whenever the Critic rejects a flow or the Evaluator finds the simulation score "
-            "insufficient."
-        )
-    else:
-        # Group by thread_id, most-recent thread first
-        by_thread: dict = {}
-        for e in retry_events:
-            tid = e.get("thread_id", "unknown")
-            by_thread.setdefault(tid, []).append(e)
+                    llm_reason = payload.get("llm_reason", "")
+                    if llm_reason:
+                        st.info(f"**LLM reasoning:** {llm_reason}", icon="💬")
 
-        threads_sorted = sorted(
-            by_thread.keys(),
-            key=lambda t: by_thread[t][-1].get("created_at", ""),
-            reverse=True,
-        )
+                    updated_hypothesis = payload.get("updated_hypothesis", "")
+                    if updated_hypothesis:
+                        st.info(f"**Revised hypothesis for next attempt:** {updated_hypothesis}", icon="🔄")
 
-        col_sel, col_stat = st.columns([3, 1])
-        with col_sel:
-            selected_thread = st.selectbox(
-                "Thread",
-                threads_sorted,
-                format_func=lambda t: f"{t}  ({len(by_thread[t])} rejection(s))",
-            )
-        with col_stat:
-            st.metric("Total retries", len(by_thread[selected_thread]))
-
-        st.divider()
-
-        for idx, event in enumerate(by_thread[selected_thread], 1):
-            source   = event.get("source", "")
-            payload  = event.get("payload", {})
-            ts       = event.get("created_at", "")[:19].replace("T", " ")
-            retry_no = payload.get("retry_count", idx)
-
-            # Header pill
-            src_color = "#e07845" if source == "critic" else "#9a70cc"
-            src_icon  = "🔍" if source == "critic" else "📊"
-            st.markdown(
-                f"<span style='background:{src_color}22;border:1px solid {src_color};"
-                f"border-radius:6px;padding:4px 10px;font-size:13px;font-weight:700'>"
-                f"{src_icon} {source.title()} — retry #{retry_no}</span>"
-                f"<span style='color:#b8b09c;font-size:11px;margin-left:10px'>{ts}</span>",
-                unsafe_allow_html=True,
-            )
-
-            if source == "critic":
-                issues   = payload.get("issues", [])
-                evidence = payload.get("evidence_node_ids", [])
-
-                if issues:
-                    st.markdown("**Issues found (deterministic checks):**")
-                    for issue in issues:
-                        st.error(issue, icon="⛔")
-
-                if evidence:
-                    st.success(
-                        f"Graph-grounded evidence accepted: {', '.join(str(e) for e in evidence[:6])}"
-                        + (" …" if len(evidence) > 6 else ""),
-                        icon="✅",
-                    )
-                else:
-                    st.warning("No evidence_node_ids were accepted — flow had no graph grounding.", icon="⚠️")
-
-                detail = event.get("detail", "")
-                if detail:
-                    st.caption(f"Detail: {detail}")
-
-            elif source == "evaluator":
-                fm = payload.get("failed_metric", {})
-                if fm:
-                    c1, c2, c3 = st.columns(3)
-                    score     = fm.get("match_score", 0.0)
-                    threshold = fm.get("threshold", 0.0)
-                    delta     = round(score - threshold, 2) if isinstance(score, (int, float)) else None
-                    c1.metric("Simulation score",    score)
-                    c2.metric("Required threshold",  threshold)
-                    c3.metric("Gap",                 delta, delta_color="inverse")
-                    st.caption(f"Sim status: {fm.get('sim_status', '?')}")
-
-                llm_reason = payload.get("llm_reason", "")
-                if llm_reason:
-                    st.info(f"**LLM reasoning:** {llm_reason}", icon="💬")
-
-            st.markdown("")  # spacing between retries
+                st.markdown("")  # spacing between retries
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Page: History
-# ─────────────────────────────────────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Page: History
+        # ─────────────────────────────────────────────────────────────────────────────
 elif page == "History":
     st.subheader("Optimization History")
     st.caption(
@@ -5245,13 +6291,13 @@ elif page == "History":
         eff_df = eff_df.rename(columns={"score_f": "Flow score", "baseline_f": "Random baseline"})
         st.markdown(
             "**Efficiency over agent runs** "
-            "<span style='font-size:12px;color:#b8b09c;font-weight:400'>"
+            "<span style='font-size:12px;color:#6f626a;font-weight:400'>"
             "— each point is one completed run; upward slope = system improving</span>",
             unsafe_allow_html=True,
         )
         st.line_chart(
             eff_df[["Flow score", "Random baseline"]],
-            color=["#44c29a", "#70a9ff"],
+            color=["#9d174d", "#4f6f8f"],
             height=220,
         )
     else:
@@ -5265,14 +6311,14 @@ elif page == "History":
     with c_left:
         st.markdown(
             "**Score change per run** "
-            "<span style='font-size:11px;color:#b8b09c;font-weight:400'>"
+            "<span style='font-size:11px;color:#6f626a;font-weight:400'>"
             "vs previous run of the same flow — positive = update helped</span>",
             unsafe_allow_html=True,
         )
         delta_df = traces[["timestamp", "score_delta"]].dropna(subset=["score_delta"]).tail(20).copy()
         if not delta_df.empty:
             delta_df["run"] = delta_df["timestamp"].astype("string").str[5:16]
-            st.bar_chart(delta_df.set_index("run")[["score_delta"]], color=["#44c29a"], height=200)
+            st.bar_chart(delta_df.set_index("run")[["score_delta"]], color=["#9d174d"], height=200)
         else:
             st.caption("Need at least 2 runs of the same flow to compute deltas.")
 
@@ -5280,7 +6326,7 @@ elif page == "History":
     with c_right:
         st.markdown(
             "**Active flows by performance** "
-            "<span style='font-size:11px;color:#b8b09c;font-weight:400'>"
+            "<span style='font-size:11px;color:#6f626a;font-weight:400'>"
             "— flows currently live in the system, ranked by avg outcome score</span>",
             unsafe_allow_html=True,
         )
@@ -5299,13 +6345,13 @@ elif page == "History":
                 sc = _safe_float(fl.get("score"))
                 label = fl.get("name") or fl.get("id", "?")
                 bar_pct = min(100, int((sc / 10) * 100)) if sc else 0
-                bar_col = "#44c29a" if (sc or 0) >= 7 else "#d8a83f" if (sc or 0) >= 5 else "#dc6666"
+                bar_col = "#9d174d" if (sc or 0) >= 7 else "#d8a83f" if (sc or 0) >= 5 else "#b4234a"
                 sc_str  = f"{sc:.1f}" if sc is not None else "—"
                 st.markdown(
                     f"<div style='margin:6px 0'>"
-                    f"<div style='font-size:11px;color:#b8b09c;margin-bottom:3px'>{label}</div>"
+                    f"<div style='font-size:11px;color:#6f626a;margin-bottom:3px'>{label}</div>"
                     f"<div style='display:flex;align-items:center;gap:8px'>"
-                    f"<div style='flex:1;height:8px;background:#2a2a22;border-radius:4px'>"
+                    f"<div style='flex:1;height:8px;background:#f1e6ec;border-radius:4px'>"
                     f"<div style='width:{bar_pct}%;height:100%;background:{bar_col};border-radius:4px'></div>"
                     f"</div>"
                     f"<span style='font-size:12px;font-weight:700;color:{bar_col};min-width:36px'>{sc_str}</span>"
@@ -5638,7 +6684,8 @@ elif page == "Flow Results":
         st.markdown("**Run simulation again**")
         col_run, col_mode = st.columns([2, 1])
         with col_mode:
-            _mode = st.selectbox("Mode", ["mock", "local"], key="fr_sandbox_mode")
+            _mode = "cloudrun"
+            st.metric("Mode", "Cloud Run")
         with col_run:
             if st.button("▶ Run Sandbox", type="primary", key="fr_run_sandbox", use_container_width=True):
                 if not _yaml_str:
@@ -5679,7 +6726,7 @@ elif page == "System Map":
         st.markdown(f"### {icon} {title}" if icon else f"### {title}")
 
     def _sm_badge(label: str, value: str, ok: bool | None = None) -> str:
-        color = ("#44c29a" if ok else "#dc6666") if ok is not None else "#b8b09c"
+        color = ("#9d174d" if ok else "#b4234a") if ok is not None else "#6f626a"
         bg    = ("rgba(68,194,154,.12)" if ok else "rgba(220,102,102,.12)") if ok is not None else "rgba(255,255,255,.06)"
         return (
             f"<span style='display:inline-block;background:{bg};border:1px solid {color};"
@@ -5825,7 +6872,7 @@ elif page == "System Map":
             st.info("No active flows in Graph B. Approve an optimization to activate one.")
         else:
             for _af in _active_flows:
-                _skill_str = " → ".join(s for s in (_af.get("skill_names") or []) if s) or "none"
+                _skill_str = " -> ".join(s for s in (_af.get("skill_names") or []) if s) or "No skills linked"
                 _srv_load  = _af.get("server_load")
                 _srv_err   = _af.get("server_error_rate")
                 _srv_ok    = (_srv_load or 0) < 80 and (_srv_err or 0) < 0.03
@@ -5837,12 +6884,15 @@ elif page == "System Map":
                     _fc1, _fc2 = st.columns(2)
                     with _fc1:
                         st.markdown(f"**Flow ID:** `{_af['flow_id']}`")
-                        st.markdown(f"**Skill pipeline:** {_skill_str or 'none'}")
-                        st.markdown(f"**Connector:** `{_af.get('connector_id') or 'none'}` ({_af.get('connector_type') or '—'})")
+                        st.markdown(f"**Skill pipeline:** {ui_value(_skill_str, 'No skills linked')}")
+                        st.markdown(
+                            f"**Connector:** `{ui_value(_af.get('connector_id'))}` "
+                            f"({ui_value(_af.get('connector_type'), 'type unknown')})"
+                        )
                     with _fc2:
                         st.markdown(
-                            f"**Server:** `{_af.get('server_id') or 'none'}`  "
-                            + ("✅" if _srv_ok else "⚠️")
+                            f"**Server:** `{ui_value(_af.get('server_id'))}`  "
+                            + ("OK" if _srv_ok else "Review")
                         )
                         if _srv_load is not None:
                             st.progress(min(int(_srv_load),100), text=f"Load {_srv_load}%")
@@ -5877,6 +6927,9 @@ elif page == "System Map":
                 "name":"Integration","type":"Type","source_path":"Detected in file","confidence":"Confidence"
             })
             _int_df = _int_df[["Integration","Type","Detected in file","Confidence"]].copy()
+            for _col in ["Integration", "Type", "Detected in file"]:
+                _int_df[_col] = _int_df[_col].apply(lambda v: ui_value(v, "Detected, details unavailable"))
+            _int_df["Confidence"] = _pd_sm.to_numeric(_int_df["Confidence"], errors="coerce").fillna(0.0)
             st.dataframe(
                 _int_df,
                 hide_index=True,
@@ -6156,47 +7209,17 @@ elif page == "Sandbox":
         # ── Section 3: Neo4j → Sandbox Snapshot ──────────────────────────────
         st.markdown("**Neo4j → Sandbox Snapshot**")
         st.caption(
-            "Preview the exact data the sandbox receives from Neo4j before triggering a run. "
-            "Secrets are stripped automatically. Download to inspect or archive."
+            "Builds the exact payload that Cloud Run receives — same field selection, "
+            "same limits, and secrets stripped via the same sanitizer used at runtime."
         )
 
         if st.button("Build Snapshot from Neo4j", key="sb_neo4j_snapshot_build"):
             try:
-                _companies = run_read(
-                    "MATCH (c:Company) "
-                    "RETURN c.id AS id, c.name AS name, c.industry AS industry, "
-                    "       c.description AS description, c.pain_points AS pain_points "
-                    "LIMIT 20"
-                )
-                _mentors = run_read(
-                    "MATCH (m:Mentor) "
-                    "RETURN m.id AS id, m.name AS name, m.expertise_tags AS expertise, "
-                    "       m.description AS description "
-                    "LIMIT 15"
-                )
-                _flows = run_read(
-                    "MATCH (f:Flow) WHERE f.status IN ['active','approved'] "
-                    "RETURN f.id AS id, f.name AS name, f.status AS status, "
-                    "       f.avg_outcome_score AS avg_score "
-                    "LIMIT 10"
-                )
-                _traces = run_read(
-                    "MATCH (et:ExecutionTrace)-[:RAN_FLOW]->(f:Flow) "
-                    "OPTIONAL MATCH (et)-[:RESULTED_IN]->(o:Outcome) "
-                    "RETURN f.name AS flow, et.status AS status, o.score AS score, "
-                    "       toString(et.timestamp) AS ts "
-                    "ORDER BY ts DESC LIMIT 10"
-                )
-                _snap = {
-                    "companies": _companies or [],
-                    "mentors":   _mentors   or [],
-                    "active_flows": _flows  or [],
-                    "recent_traces": _traces or [],
-                    "_meta": {
-                        "source": "neo4j-live",
-                        "project": _gcp_proj,
-                        "built_at": str(pd.Timestamp.utcnow()),
-                    },
+                _snap = _build_snapshot()
+                _snap["_meta"] = {
+                    "source": "neo4j-live",
+                    "project": _gcp_proj,
+                    "built_at": str(pd.Timestamp.utcnow()),
                 }
                 st.session_state["sb_neo4j_snapshot"] = _snap
             except Exception as _snap_err:
@@ -6204,11 +7227,9 @@ elif page == "Sandbox":
 
         _snap_data = st.session_state.get("sb_neo4j_snapshot")
         if _snap_data:
-            sn1, sn2, sn3, sn4 = st.columns(4)
+            sn1, sn2 = st.columns(2)
             sn1.metric("Companies", len(_snap_data.get("companies", [])))
             sn2.metric("Mentors",   len(_snap_data.get("mentors", [])))
-            sn3.metric("Active flows", len(_snap_data.get("active_flows", [])))
-            sn4.metric("Recent traces", len(_snap_data.get("recent_traces", [])))
 
             _snap_json = json.dumps(_snap_data, indent=2, default=str)
             st.download_button(
@@ -6238,12 +7259,19 @@ elif page == "Sandbox":
         if flows.empty:
             st.info("No approved or active flows found. Run the agent and approve a proposal first.")
         else:
-            _mode = st.selectbox(
-                "Sandbox mode",
-                ["mock", "local", "cloudrun"],
-                key="sb_flow_test_mode",
-                help="mock = fast deterministic, local = real subprocess, cloudrun = GCP Cloud Run job",
-            )
+            _merge_flash = st.session_state.pop("sb_merge_registry_flash", None)
+            if _merge_flash:
+                render_merge_success_panel(_merge_flash)
+
+            _mode = "cloudrun"
+            _gcp_configured = bool(_gcp_proj and _sb_job)
+            if _gcp_configured:
+                st.info("Sandbox mode: Cloud Run. Tests are executed in the configured GCP Cloud Run job.")
+            else:
+                st.warning(
+                    "Cloud Run is not configured — set GOOGLE_CLOUD_PROJECT and SANDBOX_JOB_NAME "
+                    "in .env to enable sandbox tests."
+                )
 
             # Helper badges derived from session_state so the summary table stays live
             def _test_badge(fid: str) -> str:
@@ -6282,12 +7310,20 @@ elif page == "Sandbox":
                 patches = code_patches_from_config(flow.get("yaml_config"))
                 test_key = f"sb_flow_test_result_{flow_id}"
                 deploy_key = f"sb_flow_deploy_result_{flow_id}"
+                active_test_key = "sb_active_flow_test_id"
+                running_key = f"sb_flow_test_running_{flow_id}"
                 test_badge = _test_badge(flow_id)
                 deploy_badge = _deploy_badge(flow_id)
+                result = st.session_state.get(test_key)
+                expanded = (
+                    st.session_state.get(active_test_key) == flow_id
+                    or result is not None
+                    or test_badge != "Not tested"
+                )
 
                 with st.expander(
                     f"{flow_name}  ·  {flow.get('status')}  ·  Test: {test_badge}  ·  {len(patches)} patch(es)",
-                    expanded=False,
+                    expanded=expanded,
                 ):
                     fc1, fc2, fc3, fc4 = st.columns(4)
                     fc1.metric("Score", flow.get("avg_score") or "—")
@@ -6305,28 +7341,189 @@ elif page == "Sandbox":
 
                     # ── Test ──────────────────────────────────────────────────
                     st.markdown("**Test in sandbox**")
+                    render_sandbox_run_monitor(
+                        flow_id=flow_id,
+                        flow_name=flow_name,
+                        result=result,
+                        running=bool(st.session_state.get(running_key)),
+                    )
                     if st.button(
                         "Run sandbox test",
                         key=f"sb_test_{flow_id}",
-                        disabled=not bool(flow_yaml),
+                        disabled=not bool(flow_yaml) or not _gcp_configured,
                         type="primary",
                     ):
-                        with st.spinner("Running sandbox..."):
-                            st.session_state[test_key] = run_sandbox_from_ui(flow_yaml, _mode)
+                        st.session_state[active_test_key] = flow_id
+                        st.session_state[running_key] = True
+                        _thread_id = f"sandbox-{uuid.uuid4().hex[:8]}"
+                        publish_event(
+                            thread_id=_thread_id,
+                            source="ui",
+                            target="simulator",
+                            event_type="started",
+                            title="Approved flow sandbox requested",
+                            detail=flow_name,
+                            payload={"flow_id": flow_id, "mode": _mode},
+                        )
+                        status_box = st.status(
+                            f"Running Cloud Run sandbox for {flow_name}",
+                            expanded=True,
+                            state="running",
+                        )
+                        with status_box:
+                            _sb_project_id = str(flow.get("project_id") or "")
+                            _job_url = cloud_run_job_url()
+                            st.write("1. Preparing flow YAML and scoped sandbox snapshot.")
+                            st.write("2. Minting capability token for this sandbox run.")
+                            st.write("3. Uploading source bundle and starting the Cloud Run Job.")
+                            cfg1, cfg2, cfg3 = st.columns(3)
+                            cfg1.metric("GCP project", _gcp_proj or "not set")
+                            cfg2.metric("Region", _sb_region)
+                            cfg3.metric("Job", _sb_job or "not set")
+                            if _job_url:
+                                st.link_button(
+                                    "Open Cloud Run job while this runs",
+                                    _job_url,
+                                    use_container_width=True,
+                                )
+                            started_at = time.time()
+                            try:
+                                _result = run_sandbox_from_ui(
+                                    flow_yaml, _mode, project_id=_sb_project_id or None
+                                )
+                            except Exception as exc:
+                                _result = {
+                                    "status": "fail",
+                                    "metrics": {},
+                                    "error_log": str(exc),
+                                    "run": {
+                                        "execution_mode": _mode,
+                                        "project_id": _sb_project_id,
+                                        "stage": "ui_exception",
+                                    },
+                                }
+                            _result.setdefault("ui", {})
+                            _result["ui"].update(
+                                {
+                                    "flow_id": flow_id,
+                                    "flow_name": flow_name,
+                                    "started_at": started_at,
+                                    "finished_at": time.time(),
+                                    "duration_ms": round((time.time() - started_at) * 1000),
+                                }
+                            )
+                            _run_meta = _result.get("run") if isinstance(_result.get("run"), dict) else {}
+                            render_cloud_run_console_links(_run_meta)
+                            st.write("4. Cloud Run finished; parsing Cloud Logging for sandbox traces.")
+                            if _result.get("status") == "success":
+                                _m = _result.get("metrics") or {}
+                                s1, s2, s3 = st.columns(3)
+                                s1.metric("Match score", _m.get("match_score", "n/a"))
+                                s2.metric("Baseline", _m.get("sandbox_baseline_score", "n/a"))
+                                s3.metric("Latency", f"{_m.get('latency_ms', 'n/a')} ms")
+                            else:
+                                st.error(_result.get("error_log") or "Sandbox failed before metrics were returned.")
+                                if _result.get("infra_error"):
+                                    st.json(_result["infra_error"])
+                            st.session_state[test_key] = _result
+                            st.session_state[running_key] = False
+                            if _result.get("status") == "success":
+                                status_box.update(label="Sandbox completed", state="complete", expanded=True)
+                                publish_event(
+                                    thread_id=_thread_id,
+                                    source="simulator",
+                                    target="evaluator",
+                                    event_type="result",
+                                    title="Approved flow sandbox completed",
+                                    detail=flow_name,
+                                    payload={
+                                        "flow_id": flow_id,
+                                        "metrics": _result.get("metrics", {}),
+                                        "run": _result.get("run", {}),
+                                    },
+                                )
+                            else:
+                                status_box.update(label="Sandbox failed", state="error", expanded=True)
+                                publish_event(
+                                    thread_id=_thread_id,
+                                    source="simulator",
+                                    event_type="error",
+                                    title="Approved flow sandbox failed",
+                                    detail=_result.get("error_log") or flow_name,
+                                    payload={
+                                        "flow_id": flow_id,
+                                        "run": _result.get("run", {}),
+                                        "infra_error": _result.get("infra_error"),
+                                    },
+                                )
                         st.rerun()
 
                     result = st.session_state.get(test_key)
                     passed = bool(result and result.get("status") == "success")
                     if result:
                         metrics = result.get("metrics") or {}
-                        if passed:
-                            st.success("Sandbox test passed.")
-                        else:
-                            st.error(result.get("error_log") or "Sandbox test failed.")
-                        rc1, rc2, rc3 = st.columns(3)
-                        rc1.metric("Score", metrics.get("match_score", "—"))
-                        rc2.metric("Baseline", metrics.get("sandbox_baseline_score", "—"))
-                        rc3.metric("Sample size", metrics.get("sample_size", len(result.get("traces") or [])))
+
+                        # Delta + verdict row
+                        _sb_opt = metrics.get("match_score")
+                        _sb_base = metrics.get("sandbox_baseline_score")
+                        if _sb_opt is not None and _sb_base is not None:
+                            _sb_delta = round(float(_sb_opt) - float(_sb_base), 2)
+                            _sb_verdict = "Same or better ✓" if _sb_delta >= 0 else "Degraded ✗"
+                            rd1, rd2 = st.columns(2)
+                            rd1.metric("Improvement over baseline", _sb_delta, delta=_sb_delta)
+                            rd2.metric("Verdict", _sb_verdict)
+                            if _sb_delta >= 0:
+                                st.success(
+                                    f"Optimized flow scores **{_sb_opt}** vs random baseline **{_sb_base}** "
+                                    f"(+{_sb_delta}). Meets the same-or-better requirement."
+                                )
+                            else:
+                                st.warning(
+                                    f"Optimized flow scores **{_sb_opt}** vs random baseline **{_sb_base}** "
+                                    f"({_sb_delta}). Consider reviewing the flow steps."
+                                )
+
+                        # Merge to Registry — promotes the tested flow to active in Neo4j
+                        st.divider()
+                        st.markdown("**Merge to Registry**")
+                        st.caption(
+                            "Marks this flow as active in the Neo4j registry so it becomes "
+                            "the canonical live flow for its business context."
+                        )
+                        if st.button(
+                            "Merge to Registry (set active)",
+                            key=f"sb_merge_{flow_id}",
+                            type="primary",
+                            disabled=not passed,
+                        ):
+                            activated = activate_proposal(
+                                flow_id,
+                                merged_by="sandbox_ui",
+                                merge_source="approved_flow_sandbox",
+                            )
+                            if not activated:
+                                st.error(
+                                    f"Flow `{flow_id}` was not found in Neo4j, so nothing was merged."
+                                )
+                                st.stop()
+                            publish_event(
+                                source="human_approval",
+                                event_type="merged",
+                                title="Flow merged to registry",
+                                detail=flow_id,
+                                payload={
+                                    "flow_id": flow_id,
+                                    "flow_name": activated.get("name") or flow_name,
+                                    "status": activated.get("status"),
+                                },
+                            )
+                            load_flows.clear()
+                            st.session_state["sb_merge_registry_flash"] = {
+                                **activated,
+                                "flow_id": flow_id,
+                                "flow_name": activated.get("name") or flow_name,
+                            }
+                            st.rerun()
 
                     # ── Deploy ────────────────────────────────────────────────
                     st.markdown("**Deploy to real code**")

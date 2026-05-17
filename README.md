@@ -1,41 +1,66 @@
-# EcoLink NeuroCore Agentic System
+# EcoLink NeuroCore
 
-EcoLink NeuroCore is a local agentic platform for analyzing, optimizing, and visualizing a mentor-startup matching system. It combines:
+EcoLink NeuroCore is an agentic analysis layer for an existing software project. It connects to a local codebase, indexes the real architecture into Neo4j, retrieves graph evidence with GraphRAG, proposes workflow improvements, tests approved flows in an isolated sandbox, and keeps a human operator in control through Streamlit.
 
-- **Neo4j graph memory** for historical matches, flows, infrastructure, website entities, and proposals.
-- **LangGraph agent pipeline** for Planner -> Generator -> Critic -> Simulator -> Evaluator -> Human Approval.
-- **Secure sandbox simulation** for testing proposed flows before approval.
-- **Streamlit dashboard** for the operator UI.
-- **FastAPI WebSocket sidecar** for realtime agent communication visualization.
-- **Website ingestion** for extracting identities/entities from an existing app and storing them in Neo4j.
+The project is no longer just a mentor-matching demo. It is a project-aware operating layer for inspecting software systems, understanding business workflows, and safely promoting tested recommendations into a graph registry.
 
-## Project Structure
+## What It Does
+
+- **Connects to a real project**: the operator approves a local repository path before analysis starts.
+- **Builds a software graph**: files, routes, functions, services, datastores, integrations, business flows, flow steps, risks, skills, proposals, and runtime objects are written to Neo4j.
+- **Retrieves grounded context**: GraphRAG reads the current graph before the agent plans or critiques a change.
+- **Runs an agent pipeline**: Planner -> Generator -> Critic -> Simulator -> Evaluator -> Human Approval.
+- **Tests before promotion**: sandbox runs execute through Google Cloud Run Jobs and parse Cloud Logging traces.
+- **Records approvals**: merging to the registry sets a Flow active and writes `RegistryMergeEvent` audit metadata in Neo4j.
+- **Shows operator views**: Streamlit pages expose project review, graph display, flows, sandbox runs, system map, agent architecture, retry inspection, and results.
+
+## Architecture
 
 ```text
-.
-├── main.py                    # CLI entrypoint for agent runs and approval
-├── streamlit_app.py           # Main Streamlit dashboard
-├── requirements.txt           # Python dependencies
-├── test_integration.py        # Neo4j + agent-tool integration checks
-├── test_sandbox.py            # Sandbox simulation checks
-├── test_realtime.py           # Realtime event server checks
-├── src/
-│   ├── agents/                # LangGraph state, graph, nodes, and tools
-│   ├── indexer/               # System and website indexers
-│   ├── realtime/              # Event bus, FastAPI server, realtime UI HTML
-│   └── config/                # Graph schema metadata
-├── ecolink-graph/             # Neo4j query helpers and graph utilities
-└── sandbox-system/            # Local/cloud sandbox executor
+Local project
+  -> Project Review approval
+  -> Codebase analyzer
+  -> Neo4j project graph
+  -> GraphRAG retrieval
+  -> LangGraph agent pipeline
+  -> Sandbox validation
+  -> Human merge to registry
+  -> Active Flow + RegistryMergeEvent
 ```
+
+Main subsystems:
+
+- `streamlit_app.py` — operator dashboard and approval UI.
+- `main.py` — CLI entrypoint for agent runs.
+- `src/indexer/` — codebase, website, database, OpenAPI, and graph-writing pipeline.
+- `src/agents/` — LangGraph state, nodes, graph, tools, sandbox dispatch, and Neo4j write helpers.
+- `src/graphrag/` — graph retrieval and prompt-context assembly.
+- `src/realtime/` — FastAPI event server and WebSocket UI feed.
+- `sandbox-system/` — Cloud Run/local sandbox entrypoints.
+- `ecolink-graph/` — graph data/helpers retained from the earlier graph package.
+
+## Core Pages
+
+- **Project Review**: approve a repository path, run analysis, inspect extracted workflows, storage, primitives, and risks.
+- **Graph Display**: inspect project graph scopes, including software architecture, workflow pipeline, storage/risk, and agentic layer links.
+- **Real-Time Agents**: view LangGraph agent activity and live event logs.
+- **Flows**: review detected business flows and pending optimization proposals.
+- **Sandbox**: configure Cloud Run sandbox, build Neo4j snapshots, run approved flows, and merge passing flows to the registry.
+- **Agentic Architecture**: inspect skills, artifacts, primitives, sandbox architecture, GraphRAG evidence, and agent run controls.
+- **System Map**: inspect Neo4j counts, external service configuration, active flow topology, integrations, and agent-tool wiring.
+- **Retry Inspector**: create and approve tested architecture sandbox proposals.
+- **Flow Results**: inspect latest sandbox results from approval actions.
+- **Chat**: issue approval/rejection commands and inspect agent context.
 
 ## Prerequisites
 
 - Python 3.11+
-- Neo4j AuraDB or local Neo4j instance
-- Google Gemini API key for full agent runs
-- Node.js/npm only if you want to run the sibling fundraising sample app
+- Neo4j AuraDB or local Neo4j
+- Google Gemini API key for LLM agent runs
+- Google Cloud project for Cloud Run sandbox execution
+- `gcloud` authenticated locally if using Cloud Run from the dashboard
 
-> Note: if Gemini returns `429 RESOURCE_EXHAUSTED`, your Google AI Studio project has hit its spending cap. Non-LLM UI, sandbox, realtime, and website-ingestion flows can still work.
+The Streamlit UI and graph inspection can still run when Gemini quota is unavailable. Full agent planning needs a valid `GOOGLE_API_KEY`.
 
 ## Setup
 
@@ -49,121 +74,150 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and set at least:
+Set the required Neo4j and Google values in `.env`:
 
 ```text
-NEO4J_URI=...
+NEO4J_URI=neo4j+s://xxxxxxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=...
 NEO4J_DATABASE=neo4j
+
 GOOGLE_API_KEY=...
+
+GOOGLE_CLOUD_PROJECT=...
+GOOGLE_CLOUD_LOCATION=us-central1
+SANDBOX_MOCK=false
+SANDBOX_MODE=cloudrun
+SANDBOX_GCP_REGION=us-central1
+SANDBOX_JOB_NAME=ecolink-sandbox-executor
+SANDBOX_INVOKER_SERVICE_ACCOUNT=sandbox-job-invoker@<project>.iam.gserviceaccount.com
+SANDBOX_SOURCE_BUCKET=...
+SANDBOX_SOURCE_PATH=/absolute/path/to/project
 ```
 
-For local sandbox execution:
+Capability tokens for production Cloud Run sandbox runs use RS256 signing through Cloud KMS:
 
 ```text
-SANDBOX_MOCK=false
-SANDBOX_MODE=local
+CAPABILITY_TOKEN_AUDIENCE=ecolink-sandbox-job
+CAPABILITY_TOKEN_TTL_SECONDS=600
+CAPABILITY_KMS_KEY_VERSION=projects/<project>/locations/us-central1/keyRings/ecolink-sandbox/cryptoKeys/capability-jwt/cryptoKeyVersions/1
+CAPABILITY_JWT_PUBLIC_KEY_PATH=/absolute/path/to/capability-jwt-public.pem
 ```
 
-## Run The App
+See [docs/cloud_sandbox_hardening.md](docs/cloud_sandbox_hardening.md) for Cloud Run IAM, KMS, and deployment details.
 
-Start the realtime event server in one terminal:
+## Run
+
+Start the realtime event server:
 
 ```bash
-cd /Users/mariaivanova/Desktop/Agentic_System
-source .venv/bin/activate
 uvicorn src.realtime.server:app --host 127.0.0.1 --port 8765 --reload
 ```
 
-Start the Streamlit dashboard in another terminal:
+Start the Streamlit dashboard:
 
 ```bash
-cd /Users/mariaivanova/Desktop/Agentic_System
-source .venv/bin/activate
-SANDBOX_MOCK=false SANDBOX_MODE=local STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-streamlit run streamlit_app.py --server.port 8501 --server.address 127.0.0.1 --server.headless true
+streamlit run streamlit_app.py \
+  --server.port 8501 \
+  --server.address 127.0.0.1 \
+  --server.headless true
 ```
 
 Open:
 
 - Dashboard: http://127.0.0.1:8501
-- Realtime health check: http://127.0.0.1:8765/health
+- Realtime health: http://127.0.0.1:8765/health
 
-## Dashboard Pages
+## Typical Operator Workflow
 
-- **Command Center**: high-level counts, flow portfolio, traces, low-scoring matches.
-- **Graph View**: interactive graph for history, infrastructure, website data, and execution traces.
-- **Agent Map**: static visualization of agent communication topology.
-- **Live Agent Comms**: realtime WebSocket feed of agent/UI/sandbox/indexer events.
-- **Website Ingest**: crawl a website and extract source-code identities/entities into Neo4j.
-- **Agent Run**: run the LangGraph optimizer from the UI.
-- **GraphRAG Context**: inspect the live graph evidence used by Planner and Critic.
-- **Sandbox**: create local/cloud sandbox runs from YAML.
-- **Flows**: inspect active/proposed flows.
-- **Proposals**: approve or reject proposed changes.
-- **Infrastructure**: inspect server load/error-rate status.
-- **History**: inspect historical matches and execution traces.
+1. Open **Project Review**.
+2. Enter a local repository path and approve analysis.
+3. Inspect generated business flows, storage signals, risks, and primitives.
+4. Open **Graph Display** to inspect architecture and workflow scopes.
+5. Run an optimization from **Flows** or **Agent Run**.
+6. Review proposed changes and sandbox evidence.
+7. Open **Sandbox** -> **Approved Flows + Test + Deploy**.
+8. Run the Cloud Run sandbox test for an approved flow.
+9. If it passes, click **Merge to Registry (set active)**.
+10. Confirm the merge panel shows the stored registry event.
 
-## Run Agent From CLI
+Merge events are persisted as:
 
-```bash
-python main.py --goal "Improve match quality for Healthtech startups"
+```text
+(RegistryMergeEvent)-[:MERGED_FLOW]->(Flow)
 ```
 
-If the graph pauses for approval, it prints a thread id:
+The active Flow also receives:
+
+```text
+status = "active"
+activated_at
+last_registry_merge_at
+last_registry_merge_by
+last_registry_merge_source
+registry_merge_count
+```
+
+## CLI Agent Run
+
+```bash
+python main.py --goal "Improve the selected project workflow"
+```
+
+If the graph pauses for approval:
 
 ```bash
 python main.py --thread-id <THREAD_ID> --approve
 python main.py --thread-id <THREAD_ID> --reject --reason "Too risky"
 ```
 
-Agent run records are stored locally in `.agent_runs/`.
+Local run records are written to `.agent_runs/`.
 
 ## GraphRAG
 
-The integrated GraphRAG package lives in:
+GraphRAG lives in `src/graphrag/` and retrieves live Neo4j context:
 
-```text
-src/graphrag/
-```
-
-It retrieves live Neo4j context for the agent:
-
-- industry performance
-- failed match subgraphs
-- successful match subgraphs
+- selected project software nodes
+- business flows and flow steps
 - active flows
-- available skills/connectors
-- infrastructure status
-- website/code entities
-- learning events
+- skills and connectors
+- failure/success patterns
+- infrastructure state
+- execution and learning events
 
-Run the context retriever:
+Run it directly:
 
 ```bash
 python -m src.graphrag.main_graphrag \
-  --goal "Improve match quality for Healthtech startups" \
-  --industry Healthtech
+  --goal "Improve the selected project workflow" \
+  --industry Auto
 ```
 
-Run the GraphRAG test:
+GraphRAG intentionally does not fall back to fake data. If Neo4j is unavailable, retrieval fails.
 
-```bash
-python test_graphrag.py
-```
+## Sandbox
 
-GraphRAG intentionally does **not** fall back to synthetic data. If Neo4j is unreachable, it fails so the agent does not optimize from fake context.
+The dashboard sandbox path is Cloud Run-first:
+
+- the UI prepares flow YAML and a sanitized Neo4j snapshot
+- a capability JWT scopes the run
+- Cloud Run executes `sandbox-system/sandbox_task.py`
+- Cloud Logging is polled for `DATA_STREAM_START` / `DATA_STREAM_END`
+- Streamlit shows score, baseline, trace rows, execution URL, logs URL, and job URL
+
+Useful sandbox files:
+
+- `src/agents/tools.py` — `_cloud_run_sandbox`, `_local_sandbox`, `_build_snapshot`, capability token handling
+- `sandbox-system/sandbox_task.py` — Cloud Run flow sandbox entrypoint
+- `sandbox-system/code_sandbox_task.py` — isolated code-patch sandbox entrypoint
+- `scripts/deploy_sandbox.sh` — Cloud Run job deployment helper
+- `scripts/setup_cloud_sandbox_iam.sh` — IAM setup helper
 
 ## Realtime Events
 
-Realtime events are written to:
+Events are written to `.agent_events/events.jsonl` and served by `src/realtime/server.py`.
 
-```text
-.agent_events/events.jsonl
-```
-
-The event server exposes:
+Endpoints:
 
 ```text
 GET  /health
@@ -183,114 +237,47 @@ curl -X POST http://127.0.0.1:8765/events \
     "target": "generator",
     "event_type": "message",
     "title": "Manual realtime test",
-    "detail": "This should appear in Live Agent Comms."
+    "detail": "This should appear in Real-Time Agents."
   }'
 ```
 
-## Website Ingestion
+## Tests
 
-To test with the sibling fundraising app:
-
-```bash
-cd /Users/mariaivanova/Desktop/fundraising_app/Crowd-Funding-App/client
-npm run dev -- --host 127.0.0.1 --port 5173
-```
-
-Then from this repo:
+Focused checks:
 
 ```bash
-python -m src.indexer.runner \
-  --type web \
-  --source http://127.0.0.1:5173 \
-  --source-path ../fundraising_app/Crowd-Funding-App \
-  --depth 1 \
-  --max-pages 30 \
-  --clear
-```
-
-Expected sample extraction:
-
-```text
-Campaign: 3
-Person: 8
-Route: 4
-ContractMethod: 7
-```
-
-You can also use the **Website Ingest** page in Streamlit.
-
-## Sandbox
-
-Run sandbox tests:
-
-```bash
-python test_sandbox.py
-```
-
-Run a sandbox from the UI:
-
-1. Open **Sandbox**.
-2. Keep target as `local`.
-3. Use the default flow YAML.
-4. Click **Create Sandbox Run**.
-
-Successful runs log execution traces and publish realtime events.
-
-## Tests And Validation
-
-Run the main checks:
-
-```bash
-python -m py_compile streamlit_app.py main.py src/agents/nodes.py src/agents/state.py src/realtime/event_bus.py src/realtime/server.py src/realtime/ui.py test_realtime.py
+python -m py_compile streamlit_app.py main.py src/agents/tools.py src/agents/nodes.py
+pytest -q test_cloud_run_urls.py test_activate_proposal.py
 python test_realtime.py
 python test_sandbox.py
-python test_integration.py
+python test_graphrag.py
+python test_skill_registry.py
 ```
 
-Useful browser/manual checks:
+Integration checks requiring configured services:
 
-1. Open **Agent Map** and confirm all nodes/edges render.
-2. Open **Live Agent Comms** and confirm realtime status is connected.
-3. POST a manual realtime event and confirm it appears without refresh.
-4. Run a sandbox and confirm started/result events appear.
-5. Ingest the fundraising website and confirm indexer events appear.
-6. Approve/reject a proposal and confirm the approval event appears.
-
-## Current Known Issues
-
-- Full agent runs require a working Gemini API key and available billing/spend cap.
-- If Gemini quota is exhausted, the run fails during Planner.
-- Failed LLM runs currently publish the start event but may not publish a final terminal error event.
-- Sandbox realtime payloads can be verbose because they include trace data.
-- Neo4j may warn about `LearningEvent` label/properties until learning events are created.
+```bash
+python test_integration.py
+python test_sandbox_capability.py
+python test_capability_token_signing.py
+```
 
 ## Troubleshooting
 
-### Streamlit is not reachable
+### Streamlit port is busy
 
 ```bash
 lsof -ti tcp:8501
+for pid in $(lsof -ti tcp:8501); do kill "$pid"; done
 ```
 
-Kill old processes if needed:
+Or run on another port:
 
 ```bash
-for pid in $(lsof -ti tcp:8501); do kill $pid; done
+streamlit run streamlit_app.py --server.port 8502
 ```
 
-### Realtime server is not connected
-
-```bash
-curl http://127.0.0.1:8765/health
-```
-
-If it fails, restart:
-
-```bash
-uvicorn src.realtime.server:app --host 127.0.0.1 --port 8765 --reload
-```
-
-### Neo4j connectivity fails
+### Neo4j connection fails
 
 Check `.env`:
 
@@ -301,18 +288,24 @@ NEO4J_PASSWORD
 NEO4J_DATABASE
 ```
 
-Then run:
+Then use **Project Review** or **System Map** to confirm the UI can read graph counts.
 
-```bash
-python test_integration.py
-```
+### Cloud Run sandbox link or logs fail
 
-### Gemini quota fails
-
-If you see:
+Check:
 
 ```text
-429 RESOURCE_EXHAUSTED
+GOOGLE_CLOUD_PROJECT
+SANDBOX_GCP_REGION
+SANDBOX_JOB_NAME
+SANDBOX_INVOKER_SERVICE_ACCOUNT
+SANDBOX_SOURCE_BUCKET
+CAPABILITY_KMS_KEY_VERSION
+CAPABILITY_JWT_PUBLIC_KEY_PATH
 ```
 
-Increase the Google AI Studio spend cap or use a project/key with available quota.
+The UI should show separate buttons for Cloud Run execution, Cloud Run logs, and Cloud Run job after a run has metadata.
+
+### Gemini quota is exhausted
+
+If Gemini returns `429 RESOURCE_EXHAUSTED`, agent planning stops. Project review, graph display, sandbox inspection, realtime event display, and existing flow review can still work.

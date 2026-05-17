@@ -1,0 +1,64 @@
+# Cloud Build pipeline for the EcoLink sandbox container.
+# Triggered on push to main (configure the trigger in GCP Console or via gcloud).
+#
+# Steps:
+#   1. Build the sandbox Docker image and tag it with the commit SHA.
+#   2. Push the image to Artifact Registry (or Container Registry).
+#   3. Update the Cloud Run Job to use the new image.
+#
+# Required substitutions (set on the trigger in GCP Console):
+#   _SANDBOX_JOB_NAME   — Cloud Run Job name (default: ecolink-sandbox-executor)
+#   _SANDBOX_GCP_REGION — Cloud Run region   (default: us-central1)
+#   _IMAGE_REPO         — Image repo prefix   (default: gcr.io/$PROJECT_ID)
+
+steps:
+  # ── 1. Build ────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build
+    args:
+      - build
+      - -t
+      - '${_IMAGE_REPO}/ecolink-sandbox:$COMMIT_SHA'
+      - -t
+      - '${_IMAGE_REPO}/ecolink-sandbox:latest'
+      - 'sandbox-system/'
+
+  # ── 2. Push ─────────────────────────────────────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push
+    waitFor: ['build']
+    args:
+      - push
+      - '--all-tags'
+      - '${_IMAGE_REPO}/ecolink-sandbox'
+
+  # ── 3. Update Cloud Run Job image ───────────────────────────────────────────
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: update-job
+    waitFor: ['push']
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - update
+      - '$_SANDBOX_JOB_NAME'
+      - --image
+      - '${_IMAGE_REPO}/ecolink-sandbox:$COMMIT_SHA'
+      - --region
+      - '$_SANDBOX_GCP_REGION'
+      - --project
+      - '$PROJECT_ID'
+
+substitutions:
+  _SANDBOX_JOB_NAME: ecolink-sandbox-executor
+  _SANDBOX_GCP_REGION: us-central1
+  _IMAGE_REPO: gcr.io/$PROJECT_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # Pin substitution behaviour so missing keys fail loudly
+  substitution_option: MUST_MATCH
+
+images:
+  - '${_IMAGE_REPO}/ecolink-sandbox:$COMMIT_SHA'
+  - '${_IMAGE_REPO}/ecolink-sandbox:latest'

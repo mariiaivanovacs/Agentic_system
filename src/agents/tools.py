@@ -17,9 +17,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import uuid
+import base64
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -206,23 +209,98 @@ def query_graph(cypher_query: str) -> List[Dict]:
 # Tool 2 — simulate_flow                                                       #
 # --------------------------------------------------------------------------- #
 
-def _capability_token(flow_id: str, allowed_skills: Optional[List[str]] = None) -> str:
-    """Mint a JWT capability token scoped to the skills actually in the flow."""
-    secret = os.environ.get("CAPABILITY_TOKEN_SECRET", "dev-secret-do-not-use")
-    skills = allowed_skills or [
-        "filter_by_industry_exact",
-        "random_shuffle",
-        "semantic_similarity",
-        "fuzzy_industry_match",
-    ]
+_DEFAULT_ALLOWED_CONNECTORS = ["sql_connector_v1", "csv_connector_v1", "json_connector_v1"]
+_DEFAULT_ALLOWED_SKILLS = [
+    "filter_by_industry_exact",
+    "random_shuffle",
+    "semantic_similarity",
+    "fuzzy_industry_match",
+]
+_CAPABILITY_SKILL_ALIASES = {
+    "skill_semantic_similarity": "semantic_similarity",
+    "skill_filter_by_industry_exact": "filter_by_industry_exact",
+    "skill_fuzzy_industry_match": "fuzzy_industry_match",
+    "skill_random_shuffle": "random_shuffle",
+    "skill_score_by_expertise_depth": "score_by_expertise_depth",
+    "skill_pain_point_match": "pain_point_match",
+    "skill_score_calculator": "score_by_expertise_depth",
+    "score_calculator": "score_by_expertise_depth",
+}
+
+
+def _canonical_skill_id(skill_id: str) -> str:
+    canonical = _CAPABILITY_SKILL_ALIASES.get(skill_id, skill_id)
+    if canonical.startswith("skill_"):
+        canonical = canonical.removeprefix("skill_")
+    return canonical
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _kms_sign_rs256(signing_input: bytes, key_version: str) -> bytes:
+    """Sign JWT bytes with Cloud KMS asymmetric RSASSA_PKCS1_SHA256."""
+    from google.cloud import kms_v1  # noqa: PLC0415
+
+    digest = hashlib.sha256(signing_input).digest()
+    client = kms_v1.KeyManagementServiceClient(credentials=_impersonated_credentials())
+    response = client.asymmetric_sign(
+        request={
+            "name": key_version,
+            "digest": kms_v1.Digest(sha256=digest),
+        }
+    )
+    return response.signature
+
+
+def _sign_capability_payload(payload: dict) -> str:
+    """Sign a JWT payload with Cloud KMS, falling back to a dev RS256 key for tests."""
+    header = {"alg": "RS256", "typ": "JWT"}
+    signing_input = ".".join(
+        [
+            _b64url(json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")),
+            _b64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")),
+        ]
+    ).encode("ascii")
+
+    key_version = os.environ.get("CAPABILITY_KMS_KEY_VERSION", "").strip()
+    if key_version:
+        signature = _kms_sign_rs256(signing_input, key_version)
+        return f"{signing_input.decode('ascii')}.{_b64url(signature)}"
+
+    dev_private_key = os.environ.get("CAPABILITY_JWT_PRIVATE_KEY", "").strip()
+    if dev_private_key:
+        return jwt.encode(payload, dev_private_key.replace("\\n", "\n"), algorithm="RS256")
+
+    raise RuntimeError(
+        "Capability token signing is not configured. Set CAPABILITY_KMS_KEY_VERSION "
+        "for Cloud KMS signing, or CAPABILITY_JWT_PRIVATE_KEY for local tests."
+    )
+
+
+def _capability_token(
+    flow_id: str,
+    allowed_skills: Optional[List[str]] = None,
+    allowed_connectors: Optional[List[str]] = None,
+    project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> str:
+    """Mint an RS256 JWT capability token scoped to one sandbox run."""
+    skills = sorted({_canonical_skill_id(s) for s in (allowed_skills or _DEFAULT_ALLOWED_SKILLS)})
+    connectors = sorted(set(allowed_connectors or _DEFAULT_ALLOWED_CONNECTORS))
+    now = int(time.time())
     payload = {
+        "aud": os.environ.get("CAPABILITY_TOKEN_AUDIENCE", "ecolink-sandbox-job"),
         "flow_id": flow_id,
-        "allowed_connectors": ["sql_connector_v1", "csv_connector_v1", "json_connector_v1"],
+        "project_id": project_id or os.environ.get("GOOGLE_CLOUD_PROJECT", "local-dev"),
+        "run_id": run_id or f"run_{uuid.uuid4().hex[:12]}",
+        "allowed_connectors": connectors,
         "allowed_skills": skills,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 600,
+        "iat": now,
+        "exp": now + int(os.environ.get("CAPABILITY_TOKEN_TTL_SECONDS", "600")),
     }
-    return jwt.encode(payload, secret, algorithm="HS256")
+    return _sign_capability_payload(payload)
 
 
 def _build_snapshot(
@@ -436,7 +514,13 @@ def _mock_sandbox(flow_yaml: str) -> Dict:
     }
 
 
-def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
+def _local_sandbox(
+    flow_yaml: str,
+    snapshot: dict,
+    token: str,
+    project_id: str,
+    run_id: str,
+) -> Dict:
     """Run sandbox_task.py as a local subprocess."""
     sandbox_script = (
         Path(__file__).resolve().parent.parent.parent
@@ -466,6 +550,9 @@ def _local_sandbox(flow_yaml: str, snapshot: dict) -> Dict:
     env["SNAPSHOT_DATA"]       = json.dumps(snapshot)
     env["PROPOSED_FLOW"]       = str(flow_name)
     env["PROPOSED_FLOW_YAML"]  = flow_yaml          # full YAML for real skill execution
+    env["CAPABILITY_TOKEN"]    = token
+    env["PROJECT_ID"]          = project_id
+    env["RUN_ID"]              = run_id
 
     t0 = time.time()
     try:
@@ -543,19 +630,24 @@ def _poll_cloud_logging_with_gcloud(
     )
     deadline = time.time() + max_wait_s
     while time.time() < deadline:
+        cmd = [
+            gcloud,
+            "logging",
+            "read",
+            log_filter,
+            "--project",
+            project,
+            "--limit",
+            "200",
+            "--format",
+            "json",
+        ]
+        invoker = os.environ.get("SANDBOX_INVOKER_SERVICE_ACCOUNT", "").strip()
+        if invoker:
+            cmd.append(f"--impersonate-service-account={invoker}")
+
         proc = subprocess.run(
-            [
-                gcloud,
-                "logging",
-                "read",
-                log_filter,
-                "--project",
-                project,
-                "--limit",
-                "200",
-                "--format",
-                "json",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=30,
@@ -588,7 +680,8 @@ def _poll_cloud_logging_for_traces(
         logger.info("google-cloud-logging is not installed; falling back to gcloud logging read.")
         return _poll_cloud_logging_with_gcloud(project, region, job, execution_id, max_wait_s=60)
 
-    log_client = gcp_logging.Client(project=project)
+    credentials = _impersonated_credentials()
+    log_client = gcp_logging.Client(project=project, credentials=credentials)
     log_filter = (
         f'resource.type="cloud_run_job" '
         f'resource.labels.job_name="{job}" '
@@ -664,7 +757,204 @@ def _classify_cloud_error(exc: Exception) -> dict:
     }
 
 
-def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
+_SOURCE_BUNDLE_EXCLUDES = {
+    ".git",
+    ".env",
+    ".env.local",
+    ".env.production",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".agent_events",
+    ".agent_runs",
+    ".agent_architecture_sandbox",
+}
+
+
+def _source_path_for_bundle() -> Optional[Path]:
+    configured = os.environ.get("SANDBOX_SOURCE_PATH", "").strip()
+    if not configured:
+        return Path(__file__).resolve().parent.parent.parent
+    source_path = Path(configured).expanduser().resolve()
+    return source_path if source_path.exists() else None
+
+
+def _include_in_source_bundle(tarinfo: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+    parts = Path(tarinfo.name).parts
+    if any(part in _SOURCE_BUNDLE_EXCLUDES for part in parts):
+        return None
+    if any(part.endswith((".pyc", ".pyo")) for part in parts):
+        return None
+    return tarinfo
+
+
+def _upload_source_bundle(run_id: str) -> Optional[str]:
+    """Create and upload a sanitized source bundle for cloud sandbox runs."""
+    bucket_name = os.environ.get("SANDBOX_SOURCE_BUCKET", "").strip()
+    if not bucket_name:
+        return None
+
+    source_root = _source_path_for_bundle()
+    if source_root is None:
+        raise RuntimeError("SANDBOX_SOURCE_PATH is set but does not exist.")
+
+    from google.cloud import storage  # noqa: PLC0415
+
+    tmp_path = Path(tempfile.mkdtemp(prefix="sandbox_source_bundle_")) / "source.tar.gz"
+    try:
+        with tarfile.open(tmp_path, "w:gz") as tar:
+            tar.add(source_root, arcname="source", filter=_include_in_source_bundle)
+
+        blob_name = f"sandbox-runs/{run_id}/source.tar.gz"
+        client = storage.Client(
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT"),
+            credentials=_impersonated_credentials(),
+        )
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(str(tmp_path))
+        return f"gs://{bucket_name}/{blob_name}"
+    finally:
+        shutil.rmtree(str(tmp_path.parent), ignore_errors=True)
+
+
+def _impersonated_credentials():
+    invoker = os.environ.get("SANDBOX_INVOKER_SERVICE_ACCOUNT", "").strip()
+    if not invoker:
+        return None
+
+    try:
+        import google.auth  # noqa: PLC0415
+        from google.auth import impersonated_credentials  # noqa: PLC0415
+    except ImportError:
+        logger.warning("google-auth impersonation imports unavailable; using default credentials")
+        return None
+
+    source_credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    return impersonated_credentials.Credentials(
+        source_credentials=source_credentials,
+        target_principal=invoker,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        lifetime=900,
+    )
+
+
+def _run_jobs_client():
+    from google.cloud import run_v2  # noqa: PLC0415
+
+    credentials = _impersonated_credentials()
+    if credentials is None:
+        return run_v2.JobsClient()
+    return run_v2.JobsClient(credentials=credentials)
+
+
+def _discover_gcp_config() -> dict:
+    """Resolve GCP project, region, and sandbox job without requiring manual env config.
+
+    Resolution order:
+      project: env GOOGLE_CLOUD_PROJECT → gcloud config → metadata server → google.auth.default()
+      region:  env SANDBOX_GCP_REGION / GOOGLE_CLOUD_LOCATION → gcloud config → us-central1
+      job:     env SANDBOX_JOB_NAME → Cloud Run jobs list (name contains 'sandbox')
+    """
+    result: dict = {}
+
+    # ── Project ──────────────────────────────────────────────────────────────
+    project = (
+        os.environ.get("GOOGLE_CLOUD_PROJECT") or
+        os.environ.get("GCLOUD_PROJECT") or
+        os.environ.get("GCP_PROJECT") or ""
+    ).strip()
+
+    if not project:
+        try:
+            proc = subprocess.run(
+                ["gcloud", "config", "get-value", "project"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            candidate = proc.stdout.strip()
+            if proc.returncode == 0 and candidate and candidate != "(unset)":
+                project = candidate
+        except Exception:
+            pass
+
+    if not project:
+        try:
+            import urllib.request as _urlreq  # noqa: PLC0415
+            req = _urlreq.Request(
+                "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                headers={"Metadata-Flavor": "Google"},
+            )
+            with _urlreq.urlopen(req, timeout=1) as resp:
+                project = resp.read().decode().strip()
+        except Exception:
+            pass
+
+    if not project:
+        try:
+            import google.auth  # noqa: PLC0415
+            _, detected = google.auth.default()
+            project = (detected or "").strip()
+        except Exception:
+            pass
+
+    if project:
+        result["project"] = project
+
+    # ── Region ───────────────────────────────────────────────────────────────
+    region = (
+        os.environ.get("SANDBOX_GCP_REGION") or
+        os.environ.get("GOOGLE_CLOUD_LOCATION") or ""
+    ).strip()
+
+    if not region:
+        try:
+            proc = subprocess.run(
+                ["gcloud", "config", "get-value", "run/region"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            candidate = proc.stdout.strip()
+            if proc.returncode == 0 and candidate and candidate != "(unset)":
+                region = candidate
+        except Exception:
+            pass
+
+    result["region"] = region or "us-central1"
+
+    # ── Job name ─────────────────────────────────────────────────────────────
+    job = os.environ.get("SANDBOX_JOB_NAME", "").strip()
+
+    if not job and project:
+        try:
+            from google.cloud import run_v2  # noqa: PLC0415
+            client = _run_jobs_client()
+            parent = f"projects/{project}/locations/{result['region']}"
+            all_jobs = list(client.list_jobs(parent=parent))
+            sandbox_jobs = [j for j in all_jobs if "sandbox" in j.name.lower()]
+            if sandbox_jobs:
+                job = sandbox_jobs[0].name.split("/")[-1]
+                logger.info("Auto-discovered Cloud Run sandbox job: %s", job)
+        except Exception as exc:
+            logger.debug("Cloud Run job auto-discovery failed: %s", exc)
+
+    if job:
+        result["job"] = job
+
+    return result
+
+
+def _cloud_run_sandbox(
+    flow_yaml: str,
+    snapshot: dict,
+    token: str,
+    project_id: str,
+    run_id: str,
+) -> Dict:
     """Trigger sandbox_task.py via a Google Cloud Run Job."""
     from google.cloud import run_v2  # noqa: PLC0415
 
@@ -678,15 +968,47 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
     except yaml.YAMLError:
         flow_name = "proposed_flow"
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    _gcp = _discover_gcp_config()
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT") or _gcp.get("project", "")
     if not project:
-        return {"status": "fail", "metrics": {}, "error_log": "GOOGLE_CLOUD_PROJECT env var is not set."}
-    job = os.environ.get("SANDBOX_JOB_NAME")
+        return {
+            "status": "fail", "metrics": {}, "error_log": (
+                "Could not determine GCP project. Set GOOGLE_CLOUD_PROJECT, "
+                "run 'gcloud auth application-default login', or ensure "
+                "the process runs on a GCP VM with a metadata server."
+            ),
+        }
+    region = os.environ.get("SANDBOX_GCP_REGION") or _gcp.get("region", "us-central1")
+    job = os.environ.get("SANDBOX_JOB_NAME") or _gcp.get("job", "")
     if not job:
-        return {"status": "fail", "metrics": {}, "error_log": "SANDBOX_JOB_NAME env var is not set."}
-    region = os.environ.get("SANDBOX_GCP_REGION", "us-central1")
+        return {
+            "status": "fail", "metrics": {}, "error_log": (
+                f"Could not find a Cloud Run sandbox job in project '{project}' "
+                f"(region: {region}). Set SANDBOX_JOB_NAME or deploy the job with "
+                "scripts/deploy_sandbox.sh."
+            ),
+        }
 
-    client = run_v2.JobsClient()
+    try:
+        source_bundle_uri = _upload_source_bundle(run_id)
+    except Exception as exc:
+        logger.error("Could not upload sandbox source bundle: %s", exc)
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": f"Could not upload sandbox source bundle: {exc}",
+            "run": {
+                "execution_mode": "cloudrun",
+                "run_id": run_id,
+                "project_id": project_id,
+                "gcp_project": project,
+                "region": region,
+                "job": job,
+                "stage": "source_bundle_upload",
+            },
+        }
+
+    client = _run_jobs_client()
     request = run_v2.RunJobRequest(
         name=f"projects/{project}/locations/{region}/jobs/{job}",
         overrides=run_v2.RunJobRequest.Overrides(
@@ -697,6 +1019,9 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
                         run_v2.EnvVar(name="PROPOSED_FLOW",      value=flow_name),
                         run_v2.EnvVar(name="PROPOSED_FLOW_YAML", value=flow_yaml),
                         run_v2.EnvVar(name="CAPABILITY_TOKEN",   value=token),
+                        run_v2.EnvVar(name="PROJECT_ID",         value=project_id),
+                        run_v2.EnvVar(name="RUN_ID",             value=run_id),
+                        run_v2.EnvVar(name="SOURCE_BUNDLE_GCS_URI", value=source_bundle_uri or ""),
                     ]
                 )
             ]
@@ -715,6 +1040,16 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
             "metrics": {},
             "error_log": classified["human_action"],
             "infra_error": classified,
+            "run": {
+                "execution_mode": "cloudrun",
+                "run_id": run_id,
+                "project_id": project_id,
+                "gcp_project": project,
+                "region": region,
+                "job": job,
+                "source_bundle_gcs_uri": source_bundle_uri,
+                "stage": "cloud_run_execution",
+            },
         }
 
     latency_ms = round((time.time() - t0) * 1000)
@@ -730,6 +1065,18 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
                 f"Cloud Run execution '{execution_id}' finished but no DATA_STREAM_START/END "
                 "markers were found in Cloud Logging within 60s."
             ),
+            "run": {
+                "execution_mode": "cloudrun",
+                "run_id": run_id,
+                "project_id": project_id,
+                "gcp_project": project,
+                "region": region,
+                "job": job,
+                "execution_id": execution_id,
+                "source_bundle_gcs_uri": source_bundle_uri,
+                "latency_ms": latency_ms,
+                "stage": "cloud_logging_parse",
+            },
         }
 
     traces, sandbox_baseline = parsed
@@ -738,6 +1085,18 @@ def _cloud_run_sandbox(flow_yaml: str, snapshot: dict, token: str) -> Dict:
         "metrics": _traces_to_metrics(traces, latency_ms, sandbox_baseline),
         "error_log": None,
         "traces": traces,
+        "run": {
+            "execution_mode": "cloudrun",
+            "run_id": run_id,
+            "project_id": project_id,
+            "gcp_project": project,
+            "region": region,
+            "job": job,
+            "execution_id": execution_id,
+            "source_bundle_gcs_uri": source_bundle_uri,
+            "latency_ms": latency_ms,
+            "stage": "complete",
+        },
     }
 
 
@@ -957,11 +1316,7 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
     normalised = _normalise_flow_def(flow_def) if flow_def else {}
     flow_id = normalised.get("flow_id", f"flow_{uuid.uuid4().hex[:8]}")
 
-    # Build dynamic capability token from the actual skills in the YAML
-    flow_skills = list(_extract_flow_references(normalised)[0]) if normalised else []
-    token = _capability_token(flow_id, allowed_skills=flow_skills or None)
-
-    use_mock = os.environ.get("SANDBOX_MOCK", "true").lower() == "true"
+    use_mock = os.environ.get("SANDBOX_MOCK", "false").lower() == "true"
     if use_mock:
         logger.info("Sandbox running in MOCK mode.")
         return _mock_sandbox(flow_yaml)
@@ -975,7 +1330,28 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
     ):
         _snap_app_id = dataset_snapshot_id.removeprefix("snapshot_")
 
-    sandbox_mode = os.environ.get("SANDBOX_MODE", "local").lower()
+    sandbox_mode = os.environ.get("SANDBOX_MODE", "cloudrun").lower()
+    project_id = _snap_app_id or os.environ.get("GOOGLE_CLOUD_PROJECT", "local-dev")
+    run_id = f"run_{uuid.uuid4().hex[:12]}"
+
+    # Build dynamic capability token from the actual skills/connectors in the YAML.
+    flow_skills, flow_connectors = _extract_flow_references(normalised) if normalised else (set(), set())
+    try:
+        token = _capability_token(
+            flow_id,
+            allowed_skills=list(flow_skills) or None,
+            allowed_connectors=list(flow_connectors) or None,
+            project_id=project_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        logger.error("Could not mint capability token: %s", exc)
+        return {
+            "status": "fail",
+            "metrics": {},
+            "error_log": f"Could not mint capability token: {exc}",
+        }
+
     snapshot = _build_snapshot(app_id=_snap_app_id)
     logger.info(
         "Sandbox snapshot (app_id=%s): %d companies, %d mentors — mode: %s",
@@ -986,8 +1362,8 @@ def simulate_flow(flow_yaml: str, dataset_snapshot_id: str) -> Dict:
     )
 
     if sandbox_mode == "cloudrun":
-        return _cloud_run_sandbox(flow_yaml, snapshot, token)
-    return _local_sandbox(flow_yaml, snapshot)
+        return _cloud_run_sandbox(flow_yaml, snapshot, token, project_id, run_id)
+    return _local_sandbox(flow_yaml, snapshot, token, project_id, run_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1025,13 +1401,13 @@ def propose_change(change_type: str, details: Dict) -> str:
     """Persist a proposed change to Neo4j as a node with status='proposed'.
 
     Args:
-        change_type: One of 'new_flow', 'update_connector', 'deprecate_skill'.
+        change_type: One of 'new_flow', 'update_connector', 'deprecate_skill', 'schema_extension'.
         details: Dict containing the YAML or JSON content of the proposed change.
 
     Returns:
         The ID of the created proposal node.
     """
-    allowed = {"new_flow", "update_connector", "deprecate_skill"}
+    allowed = {"new_flow", "update_connector", "deprecate_skill", "schema_extension"}
     if change_type not in allowed:
         raise ValueError(f"change_type must be one of {allowed}, got '{change_type}'")
 
@@ -1046,6 +1422,46 @@ def propose_change(change_type: str, details: Dict) -> str:
         source_name = flow_context.get("business_flow") or ""
     proposal_name = f"Optimized {source_name}" if source_name else proposal_id
     justification = details.get("justification", "")
+
+    if change_type == "schema_extension":
+        label = str(details.get("label") or details.get("node_label") or "").strip()
+        if not label:
+            raise ValueError("schema_extension requires details.label or details.node_label")
+        required_fields = details.get("required_fields") or ["id", "name"]
+        optional_fields = details.get("optional_fields") or []
+        relationship_examples = details.get("relationship_examples") or []
+        reason = details.get("reason") or justification or "Agent requested a new graph primitive type."
+        _run_write_cypher(
+            """
+            CREATE (:SchemaChangeProposal {
+                id: $id,
+                label: $label,
+                name: $name,
+                status: 'proposed',
+                proposed_by: 'agent',
+                reason: $reason,
+                required_fields: $required_fields,
+                optional_fields: $optional_fields,
+                relationship_examples: $relationship_examples,
+                project_id: $project_id,
+                details_json: $details,
+                created_at: datetime()
+            })
+            """,
+            {
+                "id": proposal_id,
+                "label": label,
+                "name": f"Schema extension: {label}",
+                "reason": reason,
+                "required_fields": required_fields,
+                "optional_fields": optional_fields,
+                "relationship_examples": relationship_examples,
+                "project_id": project_id,
+                "details": details_json,
+            },
+        )
+        logger.info("SchemaChangeProposal %s created in Neo4j.", proposal_id)
+        return proposal_id
 
     _run_write_cypher(
         """
@@ -1135,13 +1551,79 @@ def log_execution_trace(
         )
 
 
-def activate_proposal(proposal_id: str) -> None:
+def activate_proposal(
+    proposal_id: str,
+    *,
+    merged_by: str = "streamlit_ui",
+    merge_source: str = "human_approval",
+) -> Optional[Dict]:
     """Mark a previously proposed Flow node as 'active'. Called by HumanApproval."""
-    _run_write_cypher(
-        "MATCH (f:Flow {id: $id}) SET f.status = 'active'",
+    existing = _run_read_cypher(
+        """
+        MATCH (f:Flow {id: $id})
+        OPTIONAL MATCH (evt:RegistryMergeEvent)-[:MERGED_FLOW]->(f)
+        WITH f, evt
+        ORDER BY evt.timestamp DESC
+        RETURN f.id AS id,
+               coalesce(f.name, f.id) AS name,
+               f.status AS status,
+               f.project_id AS project_id,
+               f.business_flow_id AS business_flow_id,
+               toString(f.last_registry_merge_at) AS last_registry_merge_at,
+               f.last_registry_merge_by AS last_registry_merge_by,
+               f.last_registry_merge_source AS last_registry_merge_source,
+               f.registry_merge_count AS registry_merge_count,
+               evt.id AS merge_event_id
+        LIMIT 1
+        """,
         {"id": proposal_id},
     )
+    if not existing:
+        logger.warning("Proposal %s was not found; no Flow was activated.", proposal_id)
+        return None
+    if existing[0].get("status") == "active" and existing[0].get("last_registry_merge_at"):
+        logger.info("Proposal %s already active; returning existing merge metadata.", proposal_id)
+        return existing[0]
+
+    rows = _run_write_cypher(
+        """
+        MATCH (f:Flow {id: $id})
+        SET f.status = 'active',
+            f.activated_at = coalesce(f.activated_at, datetime()),
+            f.last_registry_merge_at = datetime(),
+            f.last_registry_merge_by = $merged_by,
+            f.last_registry_merge_source = $merge_source,
+            f.registry_merge_count = coalesce(f.registry_merge_count, 0) + 1
+        CREATE (evt:RegistryMergeEvent {
+            id: $event_id,
+            flow_id: $id,
+            flow_name: coalesce(f.name, f.id),
+            status: 'success',
+            merged_by: $merged_by,
+            source: $merge_source,
+            timestamp: datetime()
+        })
+        CREATE (evt)-[:MERGED_FLOW]->(f)
+        RETURN f.id AS id,
+               coalesce(f.name, f.id) AS name,
+               f.status AS status,
+               f.project_id AS project_id,
+               f.business_flow_id AS business_flow_id,
+               toString(f.last_registry_merge_at) AS last_registry_merge_at,
+               f.last_registry_merge_by AS last_registry_merge_by,
+               f.last_registry_merge_source AS last_registry_merge_source,
+               f.registry_merge_count AS registry_merge_count,
+               evt.id AS merge_event_id
+        """,
+        {
+            "id": proposal_id,
+            "event_id": f"registry_merge_{uuid.uuid4().hex[:10]}",
+            "merged_by": merged_by,
+            "merge_source": merge_source,
+        },
+    )
     logger.info("Proposal %s activated.", proposal_id)
+    return rows[0]
 
 
 def reject_proposal(proposal_id: str, reason: str) -> None:

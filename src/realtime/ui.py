@@ -5,20 +5,22 @@ import json
 
 AGENTS = [
     {"id": "planner",        "label": "Planner",        "x": -260, "y": -30,  "role": "Finds graph evidence & forms hypothesis"},
-    {"id": "generator",      "label": "Generator",      "x": -110, "y": -165, "role": "Drafts candidate flow YAML"},
+    {"id": "generator",      "label": "Generator",      "x": -110, "y": -165, "role": "Proposes actions: modify_workflow, modify_code, add_validation, flag_risk"},
     {"id": "critic",         "label": "Critic",         "x":   55, "y": -165, "role": "Validates skills, connectors & infra"},
-    {"id": "simulator",      "label": "Simulator",      "x":  210, "y": -165, "role": "Runs sandbox test & records metrics"},
+    {"id": "simulator",      "label": "Simulator",      "x":  210, "y": -165, "role": "Dispatches to flow sandbox, code sandbox, or graph-review (proposal-only)"},
     {"id": "evaluator",      "label": "Evaluator",      "x":  210, "y":  110, "role": "Compares simulation score to baseline"},
     {"id": "human_approval", "label": "Human Approval", "x":   55, "y":  110, "role": "Admin approves or rejects proposal"},
+    {"id": "end",            "label": "End",            "x": -110, "y":  110, "role": "Run stops after approval, rejection, or retry exhaustion"},
 ]
 
 AGENT_COLORS = {
-    "planner":        {"background": "#1c2d3a", "border": "#70a9ff"},
-    "generator":      {"background": "#2e2410", "border": "#d8a83f"},
-    "critic":         {"background": "#2e1810", "border": "#e07845"},
-    "simulator":      {"background": "#0f2820", "border": "#44c29a"},
-    "evaluator":      {"background": "#221535", "border": "#9a70cc"},
-    "human_approval": {"background": "#2a1822", "border": "#c06888"},
+    "planner":        {"background": "#eef3fb", "border": "#4f6f8f"},
+    "generator":      {"background": "#fff4df", "border": "#9a5b13"},
+    "critic":         {"background": "#fff0e8", "border": "#9f5b39"},
+    "simulator":      {"background": "#edf8f3", "border": "#357960"},
+    "evaluator":      {"background": "#f3effb", "border": "#7660a8"},
+    "human_approval": {"background": "#f9dce8", "border": "#9d174d"},
+    "end":            {"background": "#f4f0f2", "border": "#756b70"},
 }
 
 # Agent icons shown on event cards and the thinking overlay
@@ -29,6 +31,7 @@ AGENT_ICONS = {
     "simulator":      "⚗️",
     "evaluator":      "📊",
     "human_approval": "👤",
+    "end":            "■",
     "ui":             "🖥️",
     "agent":          "🤖",
     "indexer":        "📂",
@@ -51,12 +54,15 @@ EVENT_TYPE_ICONS = {
 
 EDGES = [
     {"from": "planner",   "to": "generator",      "label": "hypothesis", "smooth": {"enabled": False},                        "retry": False},
-    {"from": "generator", "to": "critic",          "label": "flow yaml",  "smooth": {"type": "curvedCW",  "roundness": 0.12},  "retry": False},
+    {"from": "generator", "to": "critic",          "label": "actions",    "smooth": {"type": "curvedCW",  "roundness": 0.12},  "retry": False},
     {"from": "critic",    "to": "simulator",       "label": "pass",       "smooth": {"enabled": False},                        "retry": False},
     {"from": "critic",    "to": "generator",       "label": "retry",      "smooth": {"type": "curvedCW",  "roundness": 0.50},  "retry": True},
     {"from": "simulator", "to": "evaluator",       "label": "metrics",    "smooth": {"enabled": False},                        "retry": False},
     {"from": "evaluator", "to": "human_approval",  "label": "proposal",   "smooth": {"enabled": False},                        "retry": False},
     {"from": "evaluator", "to": "generator",       "label": "retry",      "smooth": {"type": "curvedCCW", "roundness": 0.48},  "retry": True},
+    {"from": "critic",    "to": "end",             "label": "max retry",  "smooth": {"type": "curvedCCW", "roundness": 0.35},  "retry": False},
+    {"from": "evaluator", "to": "end",             "label": "max retry",  "smooth": {"type": "curvedCW",  "roundness": 0.35},  "retry": False},
+    {"from": "human_approval", "to": "end",         "label": "done",       "smooth": {"enabled": False},                        "retry": False},
 ]
 
 
@@ -80,8 +86,8 @@ def _build_vis_nodes() -> list[dict]:
             "physics": False,
             "color": {
                 **AGENT_COLORS[ag["id"]],
-                "highlight": {"background": AGENT_COLORS[ag["id"]]["background"], "border": "#44c29a"},
-                "hover":     {"background": AGENT_COLORS[ag["id"]]["background"], "border": "#44c29a"},
+                "highlight": {"background": AGENT_COLORS[ag["id"]]["background"], "border": "#9d174d"},
+                "hover":     {"background": AGENT_COLORS[ag["id"]]["background"], "border": "#9d174d"},
             },
         }
         for ag in AGENTS
@@ -94,11 +100,33 @@ def _build_vis_edges() -> list[dict]:
         edge: dict = {"id": f"{e['from']}-{e['to']}", "from": e["from"], "to": e["to"], "label": e["label"], "smooth": e["smooth"]}
         if e["retry"]:
             edge["dashes"] = True
-            edge["color"]  = {"color": "rgba(184,176,156,.32)", "highlight": "#d8a83f", "hover": "#d8a83f"}
+            edge["color"]  = {"color": "rgba(157,23,77,.24)", "highlight": "#9a5b13", "hover": "#9a5b13"}
         else:
-            edge["color"]  = {"color": "rgba(184,176,156,.50)", "highlight": "#44c29a", "hover": "#44c29a"}
+            edge["color"]  = {"color": "rgba(217,196,207,.78)", "highlight": "#9d174d", "hover": "#9d174d"}
         rows.append(edge)
     return rows
+
+
+def event_visual_transition(event: dict) -> dict:
+    """Return the node/edge transition the live UI should show for an event."""
+    source = event.get("source") or ""
+    target = event.get("target") or ""
+    event_type = event.get("event_type") or "message"
+    terminal = event_type in {"approved", "rejected"} or (event_type == "decision" and not target)
+    active_node = "end" if terminal and source else source
+    active_edge = None
+    if source and target:
+        active_edge = f"{source}-{target}"
+    elif terminal and source:
+        active_edge = f"{source}-end"
+    retry_edges = {f"{edge['from']}-{edge['to']}" for edge in EDGES if edge.get("retry")}
+    return {
+        "active_node": active_node,
+        "active_edge": active_edge,
+        "is_retry": active_edge in retry_edges if active_edge else False,
+        "is_error": event_type in {"error", "rejected"},
+        "is_terminal": terminal,
+    }
 
 
 def _shell_html(
@@ -120,29 +148,26 @@ def _shell_html(
 <meta charset="utf-8" />
 <style>
   :root {{
-    --bg: #141511; --line: #4b4a3d; --text: #f7f1e4; --muted: #b8b09c;
-    --accent: #44c29a; --gold: #d8a83f; --bad: #dc6666; --blue: #70a9ff;
-    --purple: #9a70cc; --orange: #e07845;
+    --bg: #fcfafb; --panel: #ffffff; --line: #eadde4; --text: #20181d; --muted: #6f626a;
+    --accent: #9d174d; --gold: #9a5b13; --bad: #b4234a; --blue: #4f6f8f;
+    --purple: #7660a8; --orange: #9f5b39;
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ background: var(--bg); color: var(--text);
-    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    font-family: "Avenir Next", "Helvetica Neue", Helvetica, sans-serif; }}
 
   /* ── layout ── */
   .wrap {{
     padding: 16px;
-    background: linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px),
-      linear-gradient(180deg, rgba(255,255,255,.025) 1px, transparent 1px),
-      radial-gradient(circle at 14% 14%, rgba(68,194,154,.14), transparent 30%), #141511;
-    background-size: 28px 28px, 28px 28px, auto, auto;
+    background: var(--bg);
   }}
   .topbar {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }}
-  .title  {{ font-family: Georgia, "Times New Roman", serif; font-size: 24px; flex: 1; }}
+  .title  {{ font-size: 24px; font-weight: 720; flex: 1; }}
   .grid   {{ display: grid; grid-template-columns: minmax(420px, 1.15fr) minmax(320px, .85fr); gap: 12px; }}
   .mapOnly {{ grid-template-columns: 1fr; }}
   .panel  {{ border: 1px solid var(--line); border-radius: 8px;
-    background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.022));
-    box-shadow: 0 16px 40px rgba(0,0,0,.28); overflow: hidden; position: relative; }}
+    background: var(--panel);
+    box-shadow: 0 16px 36px rgba(71,31,51,.07); overflow: hidden; position: relative; }}
   .panelHead {{ display: flex; align-items: center; justify-content: space-between;
     gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }}
   .networkStage {{ height: 520px; background: transparent; position: relative; }}
@@ -152,26 +177,26 @@ def _shell_html(
 
   /* ── pills & buttons ── */
   .pill {{ border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px;
-    color: var(--muted); background: rgba(255,255,255,.04); font-size: 12px; white-space: nowrap; }}
-  .pill.ok  {{ color: var(--accent); border-color: rgba(68,194,154,.45); }}
-  .pill.bad {{ color: var(--bad);    border-color: rgba(220,102,102,.45); }}
+    color: var(--muted); background: #fff7fa; font-size: 12px; white-space: nowrap; }}
+  .pill.ok  {{ color: var(--accent); border-color: rgba(157,23,77,.35); }}
+  .pill.bad {{ color: var(--bad);    border-color: rgba(180,35,74,.35); }}
   .feedControls {{ display: grid; grid-template-columns: 1fr auto; gap: 8px;
     padding: 10px 12px; border-bottom: 1px solid var(--line); }}
-  input {{ border: 1px solid var(--line); background: rgba(0,0,0,.18); color: var(--text);
+  input {{ border: 1px solid var(--line); background: #ffffff; color: var(--text);
     border-radius: 7px; padding: 8px 10px; outline: none; width: 100%; }}
-  button {{ border: 1px solid rgba(68,194,154,.45); background: rgba(68,194,154,.1);
+  button {{ border: 1px solid rgba(157,23,77,.35); background: rgba(157,23,77,.07);
     color: var(--accent); border-radius: 7px; padding: 7px 11px; cursor: pointer; }}
   .feed {{ height: 450px; overflow: auto; padding: 10px 12px 12px; }}
   .logsPanel {{ grid-column: 1 / -1; }}
   .logFeed {{
     height: 190px; overflow: auto; padding: 10px 12px 12px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    background: rgba(0,0,0,.22);
+    background: #fff7fa;
   }}
   .logLine {{
     display: grid; grid-template-columns: 72px 112px 1fr; gap: 10px;
-    padding: 5px 0; border-bottom: 1px solid rgba(75,74,61,.35);
-    color: #ded6c4; font-size: 11px; line-height: 1.35;
+    padding: 5px 0; border-bottom: 1px solid rgba(234,221,228,.8);
+    color: #45333d; font-size: 11px; line-height: 1.35;
   }}
   .logLine:last-child {{ border-bottom: none; }}
   .logTime {{ color: var(--muted); }}
@@ -180,19 +205,19 @@ def _shell_html(
 
   /* ── vis.js tooltip ── */
   .vis-tooltip {{
-    background: #1e201a !important; border: 1px solid #4b4a3d !important;
-    color: #f7f1e4 !important; font-size: 12px !important;
+    background: #ffffff !important; border: 1px solid #eadde4 !important;
+    color: #20181d !important; font-size: 12px !important;
     border-radius: 6px !important; padding: 6px 10px !important;
   }}
 
   /* ── thinking overlay (floats over canvas, shows near active node) ── */
   #think-overlay {{
     position: absolute; display: none;
-    background: rgba(20,21,17,.88); border: 1px solid var(--accent);
+    background: rgba(255,247,250,.96); border: 1px solid var(--accent);
     border-radius: 20px; padding: 5px 12px;
     font-size: 12px; color: var(--accent); white-space: nowrap;
     pointer-events: none; z-index: 10;
-    box-shadow: 0 0 12px rgba(68,194,154,.4);
+    box-shadow: 0 10px 24px rgba(157,23,77,.16);
     transition: opacity .15s;
   }}
   #think-overlay .think-icon {{ margin-right: 5px; font-size: 14px; }}
@@ -214,15 +239,15 @@ def _shell_html(
     animation: activity-ring 1s infinite;
   }}
   @keyframes activity-ring {{
-    0%   {{ box-shadow: 0 0 0 0 rgba(68,194,154,.7); }}
-    70%  {{ box-shadow: 0 0 0 8px rgba(68,194,154,0); }}
-    100% {{ box-shadow: 0 0 0 0 rgba(68,194,154,0); }}
+    0%   {{ box-shadow: 0 0 0 0 rgba(157,23,77,.45); }}
+    70%  {{ box-shadow: 0 0 0 8px rgba(157,23,77,0); }}
+    100% {{ box-shadow: 0 0 0 0 rgba(157,23,77,0); }}
   }}
 
   /* ── event cards ── */
   .event {{
     border-left: 3px solid var(--line); padding: 9px 9px 9px 11px;
-    margin: 0 0 8px; background: rgba(255,255,255,.04); border-radius: 0 6px 6px 0;
+    margin: 0 0 8px; background: #fff7fa; border-radius: 0 6px 6px 0;
     transition: border-left-color .2s;
   }}
   .event.result              {{ border-left-color: var(--accent); }}
@@ -238,8 +263,8 @@ def _shell_html(
   .event.log                 {{ border-left-color: var(--accent); }}
   .event.new {{ animation: card-flash .6s ease-out; }}
   @keyframes card-flash {{
-    0%   {{ background: rgba(68,194,154,.18); }}
-    100% {{ background: rgba(255,255,255,.04); }}
+    0%   {{ background: rgba(157,23,77,.12); }}
+    100% {{ background: #fff7fa; }}
   }}
   .eventTop {{ display: flex; justify-content: space-between; gap: 8px;
     color: var(--muted); font-size: 11px; margin-bottom: 4px; }}
@@ -247,7 +272,7 @@ def _shell_html(
   .agentIcon   {{ font-size: 13px; }}
   .typeIcon    {{ font-size: 11px; opacity: .7; }}
   .eventTitle  {{ font-weight: 700; margin-bottom: 4px; font-size: 13px; }}
-  .eventDetail {{ color: #ded6c4; font-size: 12px; line-height: 1.38; white-space: pre-wrap; }}
+  .eventDetail {{ color: #45333d; font-size: 12px; line-height: 1.38; white-space: pre-wrap; }}
 
   /* ── evidence section ── */
   .evDetails {{ margin-top: 7px; border-top: 1px solid rgba(75,74,61,.6); padding-top: 5px; }}
@@ -260,13 +285,13 @@ def _shell_html(
   .evBody  {{ margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }}
   .evRow   {{ display: flex; gap: 8px; font-size: 11px; align-items: baseline; }}
   .evRow span:first-child {{ color: var(--muted); min-width: 110px; flex-shrink: 0; }}
-  .evRow span:last-child  {{ color: #ded6c4; word-break: break-all; }}
+  .evRow span:last-child  {{ color: #45333d; word-break: break-all; }}
   .evRow code {{ font-family: ui-monospace, monospace; font-size: 10px;
-    background: rgba(255,255,255,.06); padding: 1px 4px; border-radius: 3px; color: var(--blue); }}
+    background: #f4f0f2; padding: 1px 4px; border-radius: 3px; color: var(--blue); }}
   .evTag {{ display: inline-block; padding: 1px 6px; border-radius: 3px;
     font-size: 10px; font-weight: 700; letter-spacing: .04em; }}
-  .evTag.ok  {{ background: rgba(68,194,154,.18); color: var(--accent); }}
-  .evTag.bad {{ background: rgba(220,102,102,.18); color: var(--bad);   }}
+  .evTag.ok  {{ background: rgba(157,23,77,.12); color: var(--accent); }}
+  .evTag.bad {{ background: rgba(180,35,74,.12); color: var(--bad);   }}
 
   @media (max-width: 820px) {{ .grid {{ grid-template-columns: 1fr; }} }}
 </style>
@@ -295,9 +320,9 @@ def _shell_html(
         </div>
       </div>
       <div class="legend">
-        <span style="border-color:rgba(68,194,154,.5);color:var(--accent)">&#9679; active</span>
+        <span style="border-color:rgba(157,23,77,.45);color:var(--accent)">&#9679; active</span>
         <span style="border-color:rgba(216,168,63,.5);color:var(--gold)">&#9679; retry</span>
-        <span style="border-color:rgba(220,102,102,.5);color:var(--bad)">&#9679; error</span>
+        <span style="border-color:rgba(180,35,74,.45);color:var(--bad)">&#9679; error</span>
         <span>&#8212; main flow</span>
         <span style="letter-spacing:2px">&#xB7;&#xB7;&#xB7; retry</span>
       </div>
@@ -326,14 +351,14 @@ const networkOptions = {{
   physics: false,
   nodes: {{
     shape: "dot", size: 20,
-    font: {{ face: "Georgia, 'Times New Roman', serif", size: 13, color: "#f7f1e4", strokeWidth: 2, strokeColor: "#141511" }},
+    font: {{ face: "Avenir Next, Helvetica Neue, Helvetica, sans-serif", size: 13, color: "#20181d", strokeWidth: 2, strokeColor: "#ffffff" }},
     borderWidth: 2,
-    shadow: {{ enabled: true, color: "rgba(0,0,0,.45)", size: 10, x: 2, y: 4 }},
+    shadow: {{ enabled: true, color: "rgba(71,31,51,.10)", size: 10, x: 2, y: 4 }},
   }},
   edges: {{
     arrows: {{ to: {{ enabled: true, scaleFactor: 0.65 }} }},
     width: 1.5, selectionWidth: 0,
-    font: {{ size: 10, color: "#b8b09c", align: "middle", strokeWidth: 2, strokeColor: "#141511" }},
+    font: {{ size: 10, color: "#6f626a", align: "middle", strokeWidth: 2, strokeColor: "#ffffff" }},
   }},
   interaction: {{ hover: true, tooltipDelay: 100, zoomView: false, dragView: false, dragNodes: false, multiselect: false, selectable: false }},
 }};
@@ -354,7 +379,7 @@ function _stopPulse() {{
     if (nc) visNodes.update({{
       id: pulseNodeId,
       borderWidth: 2,
-      shadow: {{ enabled: true, color: "rgba(0,0,0,.45)", size: 10, x: 2, y: 4 }},
+      shadow: {{ enabled: true, color: "rgba(71,31,51,.10)", size: 10, x: 2, y: 4 }},
     }});
   }}
   pulseNodeId = null;
@@ -401,7 +426,7 @@ function _showThinkingAt(nodeId, isError) {{
   overlay.style.borderColor = isError ? "var(--bad)" : "var(--accent)";
   overlay.style.color       = isError ? "var(--bad)" : "var(--accent)";
   overlay.style.boxShadow   = isError
-    ? "0 0 12px rgba(220,102,102,.4)" : "0 0 12px rgba(68,194,154,.4)";
+    ? "0 0 12px rgba(180,35,74,.28)" : "0 0 12px rgba(157,23,77,.24)";
   iconEl.textContent = agentIcons[nodeId] || "🤖";
   nameEl.textContent = nodeId.replace("_", " ");
   overlay.style.display = "block";
@@ -433,24 +458,24 @@ function resetNetwork() {{
     id,
     color: {{
       ...nodeColors[id],
-      highlight: {{ background: nodeColors[id]?.background ?? "#1e201a", border: "#44c29a" }},
-      hover:     {{ background: nodeColors[id]?.background ?? "#1e201a", border: "#44c29a" }},
+      highlight: {{ background: nodeColors[id]?.background ?? "#ffffff", border: "#9d174d" }},
+      hover:     {{ background: nodeColors[id]?.background ?? "#ffffff", border: "#9d174d" }},
     }},
     borderWidth: 2,
-    shadow: {{ enabled: true, color: "rgba(0,0,0,.45)", size: 10, x: 2, y: 4 }},
+    shadow: {{ enabled: true, color: "rgba(71,31,51,.10)", size: 10, x: 2, y: 4 }},
   }})));
   visEdges.update(visEdges.getIds().map(id => {{
     const e = visEdges.get(id);
     return {{ id, color: e.dashes
-      ? {{ color: "rgba(184,176,156,.32)", highlight: "#d8a83f", hover: "#d8a83f" }}
-      : {{ color: "rgba(184,176,156,.50)", highlight: "#44c29a", hover: "#44c29a" }},
+      ? {{ color: "rgba(157,23,77,.24)", highlight: "#9a5b13", hover: "#9a5b13" }}
+      : {{ color: "rgba(217,196,207,.78)", highlight: "#9d174d", hover: "#9d174d" }},
       width: 1.5 }};
   }}));
 }}
 
 function activateNode(nodeId, isError) {{
   if (!nodeColors[nodeId]) return;
-  const borderColor = isError ? "#dc6666" : nodeColors[nodeId].border ?? "#44c29a";
+  const borderColor = isError ? "#b4234a" : nodeColors[nodeId].border ?? "#9d174d";
   visNodes.update({{
     id: nodeId,
     color: {{
@@ -467,7 +492,7 @@ function activateEdge(fromId, toId, isRetry) {{
   const eid = `${{fromId}}-${{toId}}`;
   const e   = visEdges.get(eid);
   if (!e) return;
-  visEdges.update({{ id: eid, color: {{ color: isRetry ? "#d8a83f" : "#44c29a" }}, width: 3 }});
+  visEdges.update({{ id: eid, color: {{ color: isRetry ? "#9a5b13" : "#9d174d" }}, width: 3 }});
 }}
 
 function edgeIsRetry(fromId, toId) {{
@@ -528,17 +553,23 @@ function renderFeed() {{
   const feed = document.getElementById("feed");
   if (!feed) return;
   feed.innerHTML = visible.slice(-120).reverse().map(ev => {{
-    const srcIcon  = agentIcons[ev.source] || "";
-    const typeIcon = eventTypeIcons[ev.event_type] || "";
-    const arrow    = ev.target ? ` → ${{agentIcons[ev.target] || ""}} ${{ev.target}}` : "";
+    const srcIcon  = esc(agentIcons[ev.source] || "");
+    const typeIcon = esc(eventTypeIcons[ev.event_type] || "");
+    const source   = esc(ev.source || "");
+    const target   = esc(ev.target || "");
+    const threadId = esc(ev.thread_id || "");
+    const title    = esc(ev.title || "");
+    const detail   = esc(ev.detail || "");
+    const eventType = esc(ev.event_type || "");
+    const arrow    = ev.target ? ` → ${{esc(agentIcons[ev.target] || "")}} ${{target}}` : "";
     return (
-      `<article class="event ${{ev.event_type || ""}}">` +
+      `<article class="event ${{eventType}}">` +
         `<div class="eventTop">` +
-          `<span class="eventSource"><span class="agentIcon">${{srcIcon}}</span>${{ev.source || ""}}${{arrow}}</span>` +
-          `<span><span class="typeIcon">${{typeIcon}}</span> ${{eventTime(ev)}} · ${{ev.thread_id || ""}}</span>` +
+          `<span class="eventSource"><span class="agentIcon">${{srcIcon}}</span>${{source}}${{arrow}}</span>` +
+          `<span><span class="typeIcon">${{typeIcon}}</span> ${{eventTime(ev)}} · ${{threadId}}</span>` +
         `</div>` +
-        `<div class="eventTitle">${{ev.title || ""}}</div>` +
-        `<div class="eventDetail">${{ev.detail || ""}}</div>` +
+        `<div class="eventTitle">${{title}}</div>` +
+        `<div class="eventDetail">${{detail}}</div>` +
         buildEvidenceSection(ev) +
       `</article>`
     );
@@ -572,9 +603,15 @@ function addEvent(ev) {{
   state.events = state.events.slice(-500);
 
   const isError = ["error", "rejected"].includes(ev.event_type);
+  const terminal = ["approved", "rejected"].includes(ev.event_type)
+    || (ev.event_type === "decision" && ev.target === "");
   resetNetwork();
   if (ev.source) activateNode(ev.source, isError);
   if (ev.source && ev.target) activateEdge(ev.source, ev.target, edgeIsRetry(ev.source, ev.target));
+  if (terminal && ev.source) {{
+    activateEdge(ev.source, "end", false);
+    activateNode("end", isError);
+  }}
 
   const lastSeen = document.getElementById("lastSeen");
   if (lastSeen) {{
@@ -618,14 +655,23 @@ async function loadInitial() {{
   }} catch (_) {{}}
 }}
 
+let wsRetryMs = 1200;
 function connect() {{
   if (!live) return;
   const status = document.getElementById("status");
   try {{
     const ws = new WebSocket(wsUrl);
-    ws.onopen    = () => {{ if (status) {{ status.textContent = "Realtime connected"; status.className = "pill ok"; }} }};
+    ws.onopen    = () => {{
+      wsRetryMs = 1200;
+      if (status) {{ status.textContent = "Realtime connected"; status.className = "pill ok"; }}
+    }};
     ws.onmessage = (msg) => addEvent(JSON.parse(msg.data));
-    ws.onclose   = () => {{ if (status) {{ status.textContent = "Realtime disconnected"; status.className = "pill bad"; }} setTimeout(connect, 2500); }};
+    ws.onclose   = () => {{
+      if (status) {{ status.textContent = `Realtime disconnected · retrying in ${{Math.round(wsRetryMs / 1000)}}s`; status.className = "pill bad"; }}
+      const wait = wsRetryMs;
+      wsRetryMs = Math.min(wsRetryMs * 1.8, 12000);
+      setTimeout(connect, wait);
+    }};
     ws.onerror   = () => {{ if (status) {{ status.textContent = "Realtime disconnected"; status.className = "pill bad"; }} ws.close(); }};
   }} catch (_) {{
     if (status) {{ status.textContent = "Realtime disconnected"; status.className = "pill bad"; }}

@@ -17,9 +17,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import jwt
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 load_dotenv()
 
@@ -51,6 +55,52 @@ SAMPLE_SNAPSHOT = {
     ],
 }
 
+_PRIVATE_KEY: str | None = None
+_PUBLIC_KEY: str | None = None
+
+
+def _test_keys() -> tuple[str, str]:
+    global _PRIVATE_KEY, _PUBLIC_KEY
+    if _PRIVATE_KEY and _PUBLIC_KEY:
+        return _PRIVATE_KEY, _PUBLIC_KEY
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    _PRIVATE_KEY = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("utf-8")
+    _PUBLIC_KEY = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    return _PRIVATE_KEY, _PUBLIC_KEY
+
+
+def _capability_env(flow_id: str, skills: list[str], project_id: str = "test-project", run_id: str = "run_test") -> dict:
+    private_key, public_key = _test_keys()
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "aud": "ecolink-sandbox-job",
+            "flow_id": flow_id,
+            "project_id": project_id,
+            "run_id": run_id,
+            "allowed_skills": skills,
+            "allowed_connectors": ["sql_connector_v1", "csv_connector_v1", "json_connector_v1"],
+            "iat": now,
+            "exp": now + 600,
+        },
+        private_key,
+        algorithm="RS256",
+    )
+    return {
+        "CAPABILITY_TOKEN": token,
+        "CAPABILITY_JWT_PUBLIC_KEY": public_key,
+        "CAPABILITY_TOKEN_AUDIENCE": "ecolink-sandbox-job",
+        "PROJECT_ID": project_id,
+        "RUN_ID": run_id,
+    }
+
 
 def separator(title: str) -> None:
     print(f"\n{'─' * 4} {title} {'─' * max(0, 56 - len(title))}")
@@ -63,6 +113,7 @@ def test_1_sandbox_task_standalone():
     env = os.environ.copy()
     env["SNAPSHOT_DATA"] = json.dumps(SAMPLE_SNAPSHOT)
     env["PROPOSED_FLOW"] = "semantic_similarity_v2"
+    env.update(_capability_env("semantic_similarity_v2", []))
 
     result = subprocess.run(
         [sys.executable, str(SANDBOX_TASK)],
@@ -105,10 +156,21 @@ def test_2_build_snapshot():
 
 def test_3_local_sandbox():
     separator("Test 3: _local_sandbox() with Neo4j snapshot")
-    from src.agents.tools import _build_snapshot, _local_sandbox
+    from src.agents.tools import _build_snapshot, _capability_token, _local_sandbox
 
     snapshot = _build_snapshot()
-    result = _local_sandbox(SAMPLE_FLOW_YAML, snapshot)
+    private_key, public_key = _test_keys()
+    os.environ["CAPABILITY_JWT_PRIVATE_KEY"] = private_key
+    os.environ["CAPABILITY_JWT_PUBLIC_KEY"] = public_key
+    os.environ["CAPABILITY_TOKEN_AUDIENCE"] = "ecolink-sandbox-job"
+    os.environ.pop("CAPABILITY_KMS_KEY_VERSION", None)
+    token = _capability_token(
+        "flow_proposal_test_v1",
+        allowed_skills=["semantic_similarity", "score_by_expertise_depth"],
+        project_id="test-project",
+        run_id="run_test_local",
+    )
+    result = _local_sandbox(SAMPLE_FLOW_YAML, snapshot, token, "test-project", "run_test_local")
 
     print(f"  status    : {result['status']}")
     print(f"  metrics   : {result.get('metrics', {})}")
@@ -127,6 +189,11 @@ def test_4_simulate_flow_tool_real():
     separator("Test 4: simulate_flow tool (SANDBOX_MOCK=false, SANDBOX_MODE=local)")
     os.environ["SANDBOX_MOCK"] = "false"
     os.environ["SANDBOX_MODE"] = "local"
+    private_key, public_key = _test_keys()
+    os.environ["CAPABILITY_JWT_PRIVATE_KEY"] = private_key
+    os.environ["CAPABILITY_JWT_PUBLIC_KEY"] = public_key
+    os.environ["CAPABILITY_TOKEN_AUDIENCE"] = "ecolink-sandbox-job"
+    os.environ.pop("CAPABILITY_KMS_KEY_VERSION", None)
 
     from src.agents.tools import simulate_flow
 

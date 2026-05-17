@@ -63,6 +63,14 @@ nodes:
     required: [id, source, source_type, indexed_at]
     optional: [connector_count, skill_count, flow_count]
 
+  SkillProposal:
+    required: [id, name, purpose, status, proposed_by]
+    optional: [created_at, rejection_reason]
+
+  SchemaChangeProposal:
+    required: [id, label, status, proposed_by, reason]
+    optional: [created_at, required_fields, optional_fields, relationship_examples, project_id]
+
   Project:
     required: [id, name, project_id, scan_id, source_path, confidence]
     optional: [repo_path, permission_status, analysis_status, created_at, updated_at, last_scan_id, display_name, technical_description, stakeholder_description]
