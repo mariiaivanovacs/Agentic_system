@@ -2,6 +2,11 @@
 
 EcoLink NeuroCore is an agentic analysis layer for an existing software project. It connects to a local codebase, indexes the real architecture into Neo4j, retrieves graph evidence with GraphRAG, proposes workflow improvements, tests approved flows in an isolated sandbox, and keeps a human operator in control through Streamlit.
 
+Video Preview 
+
+[![Demo video](https://github.com/user-attachments/assets/bbaf4796-a796-4204-98c3-6218d3f78af3)](https://youtu.be/tq_W29cJFm0)
+
+
 The project is no longer just a mentor-matching demo. It is a project-aware operating layer for inspecting software systems, understanding business workflows, and safely promoting tested recommendations into a graph registry.
 
 ## What It Does
@@ -15,6 +20,9 @@ The project is no longer just a mentor-matching demo. It is a project-aware oper
 - **Shows operator views**: Streamlit pages expose project review, graph display, flows, sandbox runs, system map, agent architecture, retry inspection, and results.
 
 ## Architecture
+
+<img width="975" height="551" alt="Screenshot 2026-05-19 at 12 36 30 PM" src="https://github.com/user-attachments/assets/49ba8cc8-4857-446a-86cb-2db2d199b1aa" />
+
 
 ```text
 Local project
